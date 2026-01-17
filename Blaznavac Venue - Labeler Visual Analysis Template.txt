@@ -1,0 +1,2681 @@
+﻿Obrazac za Vizuelnu Analizu - PRAVI
+
+
+OBJEKAT: Blaznavac 
+________________
+
+
+FAZA 1: PRIKUPLJANJE SKRINŠOTOVA
+Uputstva za labelere:
+1. Napravite skrinšotove SVIH stavki iz menija kako se pojavljuju na kameri (dole je prostor za ubacivanje slika)
+2. Za svaku stavku napravite 3 skrinšota:
+   * Predmet sam na šanku (čista pozadina)
+   * Predmet sa drugim pićima/hranom u blizini (realna situacija)
+   * Predmet koji se drži/toči/služi (ako je moguće)
+________________
+
+
+SKRINŠOTOVI PIĆA I HRANE
+Napomene za kategorije:
+* Piva: Posebno obratiti pažnju na razlike u veličini flaša i etiketa
+* Žestoka pića: Fokus na oblik čaša, nivo sipanja…
+* Kokteli: Obratiti pažnju na boju, ukras i oblik čaše
+* Vina: Razlikovati boju vina i tip čaše/flaše
+* Kafe: Veličina čaše i boja napitka (espresso vs cappuccino)
+* Bezalkoholna pića: Etikete i veličina pakovanja
+________________
+Razlicite kamere
+
+
+
+
+Kategorije
+
+
+TODO i napomene -  Lista i istroija promena:
+* Zombie casa promenjena - pg cc1 198
+* Rakije mogu da izadju na sanku - ako je cesto moraju se modelirati. Morace sigurno jer cemo krenuti da obradjujemo sredinu sanka gde izlaze rakije. Neke vec imamo, treba da dodamo u shotove ovo sa srednje kamere - zestina pg cca 159  ODRADJENA OBA SANKA
+* Paziti na nacin na koji se obradjuju sankovi kada nesto prelazi iz sanka levo/desno na srednji sank (duplikati)
+* Cappuccino freddo izmodelirati mozda i u solje jer je mala - pg cca 16
+* Bokal za spricer - pg cca 141
+* Limunade u bokalima i casama moze dosuti video konobar - moramo hvatati oba
+* Videti sta sa mix sokovima, verovatno najbezbolnije ubaciti ih u modele pojedinacno jer imaju razlicite stvari, a onda u mappingu reci da mix sok moze odgovarati svim tim klasama - pg cca 72
+* STRAWBERRY MOJITO - mora da ide na trening - nije istreniran
+* Domaci ledeni caj moze biti zut ili crven. Mislim de je modeliran da moze biti samo zut. Proveriti i dodati opciju i crvenu u obicna_crveno verovatno.
+* Bavaria Pivo - mozda bezalkoholna u nekom trenutku da se razdvoji ako ne radi dobro - crvena vs plava etiketa - pg cca 214
+
+
+Tagovi i oznake - svaka stavka mora pocinjati nekom oznakom i imati pridruzen tag, a tagovi su sledeci:
+
+
+* [INCL: ModelName.ClassName] - u znacenju ovaj article je ubacen vec u neki model pa onda govori koji model i koja klasa - npr [INCL: CUPS.ESPRESSO_KAFA_MANJA] za espresso. te informacije se mogu naci nakon svih artikala
+* [NO_IMG] - ono sto nemamo na slikama uopste
+* [MISS] - ono sto imamo na slikama ali nije prisutno ni u jednom modelu
+* [SKIP] - nece se modelirati i ne treba da bude ukljuceno ni u jedan model
+* [PLAN: ModelName.ClassName] - u znacenju article nike jos uvek u modelu, ali je pridruzen ili necemu u postojecem data.yaml ili je osmisljena nova klasa u okviru nekog modela za ovaj artikal 
+* art -  oznaka denotira artikal u blaznavac sistemu
+* art_alt: oznaka denotira artikal koji ne postoji u blaznavac sistemu vec je kod nas u sistemu alternativa nekog blaznavac artikla (capuccino i freddo, mix sokovi kojih ima vise vrsta)
+Kafe
+art: ESPRESSO - [INCL: Cups.ESPRESSO_KAFA_MANJA]
+  
+  
+  
+
+  
+  
+
+art: ESPRESSO DECAF -  [INCL: Cups.ESPRESSO_KAFA_MANJA]
+Napomena: pretpostavljam isto kao obican espresso
+art: ESPRESSO SA MLEKOM - [INCL: Cups.ESPRESSO_KAFA_VECA]
+  
+  
+manja
+  
+  
+  
+
+
+
+art: DUPLI ESPRESO [INCL: Cups.ESPRESSO_KAFA_VECA]
+  
+
+art: LATTE SA UKUSIMA -  [PLAN: Cups.CAFFE_LATTE]
+  
+
+  
+
+  
+
+art: MOKA KAFA  [INCL: Glasses.MOKA] 
+PREBACUJE SE U CUPS!!! [PLAN: Cups.MOKA]
+  
+  
+
+  
+  
+  
+
+art: MOKA KAFA EKSTRA - [NO_IMG]
+art: NES KAFA - [MISS]
+  
+  
+  
+
+  
+
+Napomena :  ovo moram da proverim dal je nes za poneti/plazma sejk/kakao za poneti
+
+
+art: NES SA SLAGOM - [MISS]
+  
+  
+
+art: KAFE LATTE -  [PLAN: Cups.CAFFE_LATTE]
+  
+  
+  
+
+  
+  
+
+  
+
+art: IRISH COFFE -  [PLAN: Cups.IRISH_COFFE]
+  
+  
+  
+
+art: CAPPUCCINO - [INCL: Cups.ESPRESSO_KAFA_VECA]
+art_alt: CAPUCCINO FREDDO - [MISS]
+Napomena: oba se kucaju kao kapucino IDE U GLASSES
+  
+
+  
+
+
+
+Napomena: Cappuccino freddo ide u drugu casu mora da se modelira sa casama negde
+Todo: dodati cappuccino freddo u model za case
+  
+  
+
+art: DOMACA KAFA - [INCL: Cups.TURSKA_KAFA]
+
+
+Napomena:  obicna + velika solja kao za Caj za zaposlene
+  
+  
+  
+
+  
+
+  
+
+art: NES KAFA SA UKUSIMA - [MISS]
+  
+
+  
+
+art: NES SA VODOM - [MISS]
+  
+
+  
+
+art: KAKAO -  [PLAN: Cups.COKOLADA_KAKAO]
+Napomena: mozda spojiti sa toplom cokoladom
+  
+
+  
+
+art: LEDENA KAFA - [INCL: Glasses.LEDENA_KAFA]
+  
+  
+
+art: LEDENI LATE - [MISS]
+  
+  
+
+art: SLADOLED KAFA - [INCL: Glasses.LEDENA_KAFA]
+  
+  
+
+art: LEDENA MOKA KAFA - [INCL: Glasses.LEDENA_KAFA]
+  
+
+  
+  
+
+art: LEDENA MOKA COFFE EXTRA - [INCL: Glasses.LEDENA_KAFA]
+  
+  
+
+art: HOGAR KAFA - [INCL: Glasses.LEDENA_KAFA]
+  
+  
+  
+
+art: KAFA ZA DECU 0.2 - [NO_IMG]
+Dodaci za kafu - Ne izlazi na sank
+art: EXTRA MLEKO - [SKIP]
+art: EXTRA SLAG -  [SKIP]
+art: EXTRA BADEM I LESNIK - [SKIP]
+art: MONIN SIRUP 0.03 - [SKIP]
+art: SOJINO MLEKO - [SKIP]
+art: SOT LIMUNA 0.03 - [SKIP]
+art: SOT BELANCE - [SKIP]
+Topli napici
+art: TOPLA COKOLADA -  [PLAN: Cups.COKOLADA_KAKAO]
+Napomena: mozda spojiti sa kakaom
+  
+  bez slaga iza
+  
+ sa slagom iza
+  
+
+  
+
+  
+  
+  
+  
+  
+  
+
+
+
+art: CAJ - [INCL: Cups.CAJ]
+ svaki caj ide u blaznavac solju ove BG solje su greska
+
+
+  
+  
+
+  
+  
+
+art: kuvano crveno vino 0.20 -  [PLAN: Cups.KUVANO_VINO]
+Napomena: mozda moze u crno vino u casi ili sa toplom cokoladom?
+  
+  
+  
+
+  
+
+  
+
+art: RUM ZA CAJ - [SKIP]
+Napomena: necemo ga modelirati jer smo caj naucili da vec ide sa tim
+art: DOMACI CAJ OD DJUMBIRA - [INCL: Cups.CAJ]
+ svaki caj ide u blaznavac solju ove BG solje su greska
+  
+  
+
+art: CAJ SA RUMOM - [INCL: Cups.CAJ]
+svaki caj ide u blaznavac solju ove BG solje su greska
+  
+  
+  
+
+
+
+art: KURKUMA NAPITAK - [NO_IMG]
+ Napomena: trebalo bi da ide u solju staklnu kao late, mora slika pa cemo videti
+Shakes
+art: SHAKE SA VOCEM - [MISS]
+Napomena: ovo iza - belo
+  
+  
+
+art: SHAKE SA COKOLADOM - [MISS]
+  
+  
+  
+
+art: PLAZMA SHAKE - [MISS]
+  
+  
+
+art: SHAKE SA BANANA - [MISS]
+  
+
+art: SHAKE COKOLADA SA BANANOM - [NO_IMG]
+art: SEJK COKOLADA SA VOCEM - [MISS]
+  
+
+art: COKO PLAZMA SEJK - [MISS]
+  
+  
+  
+
+art: SNIKERS PLAZMA SHAKE - [MISS]
+  
+  
+
+art: OREO PLAZMA SHAKE - [MISS]
+  
+  
+
+art: PLAZMA SHAKE KEJK - [NO_IMG]
+Bezalkoholna pica
+art: AQUA VIVA 0.25 - [INCL: Bottles.AQUA_VIVA]
+  
+  
+  
+  
+
+  
+  
+
+
+
+art: KNJAZ MILOS 0.25 - [INCL: Bottles.KNJAZ_MILOS]
+  
+  
+  
+
+  
+  
+  
+
+art: KNJAZ MILOS LIMUN 0,33 - [INCL: Bottles.KNJAZ_MILOS]
+  
+  
+  
+  
+  
+  
+
+art: KNJAZ MILOS MANDARINA 0,33 - [INCL: Bottles.KNJAZ_MILOS]
+  
+
+
+
+art: PEPSI 0.25 -  [INCL: Bottles.PEPSI]
+  
+  
+  
+  
+  
+  
+  
+  
+  
+
+art: PEPSI ZERO 0.25 -  [INCL: Bottles.PEPSI]
+  
+  
+  
+
+  
+
+art: 7UP 0.25 -  [INCL: Bottles.7UP]
+  
+  
+  
+
+
+
+art: MIRINDA 0.25 -  [INCL: Bottles.MIRINDA]
+  
+  
+  
+
+  
+  
+
+art: EVERVES BITER 0.25 -  [INCL: Bottles.EVERVESS]
+  
+  
+  
+  
+  
+  
+  
+
+art: SCHEWEPPES TONIC 0.25 -  [INCL: Bottles.SCHEWEPPES_TONIC]
+  
+  
+  
+
+  
+  
+  
+
+  
+  
+
+
+
+art: GUSTO 0.20 - [INCL: Bottles.GUSTO]
+  
+  
+  
+
+  
+  
+  
+  
+
+art: MIX SOKOVI - [MISS]
+  
+
+  
+
+  
+
+  
+
+  
+
+  
+
+  
+
+  
+  
+  
+
+  
+  
+  
+  
+  
+  
+  
+
+NAPOMENA:
+1x mix sokovi se služe kao puna tanka visoka čaša kao na slikama,
+2x mix sokovi se služe u visokim,debelim kao izrezbarenim čašama,
+imamo od mix sokova:
+kisela voda, ananas, đus, borovnica, jabuka, coca cola, spajt,tonik - MORAMO SVE DA IMAMO SLIKE! 
+predlog za spajanje:
+-kisela voda,sprajt,tonik
+-borovnica,koka kola
+-ananas,đus
+-jabuka
+
+
+
+
+  
+ soda voda za osoblje
+  
+ sprite za osoblje
+  
+pretpostavljam borovnica
+
+
+Limunade i sokovi
+Napomena: Barmen moze posluiziti sa vodom ili samo limun pa konobar dospe vodu
+art: LIMUNADA 0.30 - [INCL: Glasses.LIMUNADA]
+  
+  
+  
+
+
+
+art: LIMUNADA SA NANOM 0.30 - [INCL: Glasses.LIMUNANA]
+  
+  
+  
+
+
+
+art: LIMUNADA SA UKUSIMA 0.30 - [MISS]
+  
+  
+
+  
+  
+
+art: LIMUNADA 1L - [INCL: Pitchers.LIMUNADA]
+  
+  
+
+art: CEDJENA POMORANDZA 0.30 - [INCL: Glasses.CEDJENO_NARANDZASTO]
+  
+
+art: CEDJENI GREJP 0.3 -  [INCL: Glasses.CEDJENO_CRVENO]
+  
+  
+
+art: CEDJENI MIX 0.30 - [INCL: Glasses.CEDJENO_NARANDZASTO]
+  
+  
+
+art: DOMACI LEDENI CAJ 0.30 - [INCL: Glasses.DOMACA_LIMUNADA]
+art_alt: DOMACI LEDENI CAJ 0.30 - [MISS]
+Napomena: CRVENI ILI ZUTI OBICNA CASA, miss se odnosi na crveni - proveriti
+  
+  
+  
+
+  
+crveni
+  
+
+
+
+art: LIMUNADA SA NANOM 1L - [INCL: Pitchers.MOJITO]
+  
+  
+  
+
+  
+
+art: LIMUNADA SA UKUSOM 1L -  [PLAN: Pitchers.RED_ORAGNGE_FAMILY]
+art_alt: LIMUNADA SA UKUSOM 1L -  [PLAN: Pitchers.LIMUNADA_BAZA_CRVENO]
+  
+  
+  
+
+art: IMUNO SOT 0.05 - [INCL: Shots.SHOT_BLURRY] 
+Napomena: uglavnom shot, u casi je otkucan za osoblje za hranu za kolac - ovo cemo preskociti i necemo modelirati ako ne krene precesto da se desava. Racunamo samo shot
+  
+  
+  
+
+art: LIMUNADA DJUMBIR 0.30 -   [PLAN: Pitchers.LIMUNADA]
+- moze u 'LIMUNADA'
+  
+  
+
+art: LIMUNADA DJUMBIR 1L -   [PLAN: Pitchers.YELLOW_GREEN_FAMILY]
+- moze u LIMUNADA
+  
+  
+  
+
+art: DJUMBIR DODATAK 0.03 - [SKIP]
+Specijalne limunade
+art: BLAZNAVAC LAJMONADA - [INCL: Glasses.DOMACA_LIMUNADA]
+  
+  
+  
+
+art: BEOGRAD 0.30 - [INCL: Glasses.CEDJENO_NARANDZASTO]
+  
+  
+  
+
+art: BARSELONA 0.30 -  [INCL: Glasses.CEDJENO_NARANDZASTO]
+  
+
+  
+  
+
+art: MAJAMI 0.30 -  [INCL: Glasses.CEDJENO_CRVENO]
+  
+  
+  
+
+  
+
+art: LONDON 0.30 -  [INCL: Glasses.CEDJENO_CRVENO]
+  
+  
+  
+
+art: RIM 0.30 -  [INCL: Glasses.CEDJENO_CRVENO]
+  
+
+  
+  
+  
+
+art: AMSTERDAM 0.30 -  [INCL: Glasses.CEDJENO_NARANDZASTO] 
+- ovo bih pre spojila sa 'LEDENA_KAFA'
+  
+  
+  
+
+art: BEC 0.30 - [INCL: Glasses.CEDJENO_CRVENO]
+  
+  
+  
+
+art: HONOLULU 0.30 - [INCL: Glasses.CEDJENO_CRVENO]
+  
+  
+
+  
+
+art: ISTAMBUL 0.30 - [INCL: Glasses.CEDJENO_NARANDZASTO]
+  
+
+  
+  
+
+Energetska pica
+art: GUARANA 0.25 -  [PLAN: Bottles.GUARANA]
+  
+  
+  
+  
+
+- mozda napraviti klasu LIMENKA      
+art: RED BULL 0.25 -  [PLAN: Bottles.REDBULL]
+  
+
+  
+  
+  
+  
+  
+
+Napomena: mozda napraviti klasu LIMENKA
+  
+  
+  
+
+Piva
+art: NIKSICKO 0.33 - [INCL: Bottles.NIKSICKO_PIVO]
+  
+  
+  
+
+  
+  
+  
+
+
+
+art: TOC NIK TAMNO 0,33 - [MISS]
+  
+  
+
+  
+
+art: TOC NIK TAMNO 0,50 - [MISS]
+  
+
+  
+
+  
+
+
+
+art: SOMERSBY APPLE 0,30 - [SKIP]
+Napomena: POVUCENO IZ PRODAJE
+
+
+art: CORONA 0.33 - [INCL: Bottles.CORONA_PIVO]
+  
+  
+
+art: TOC HOEGAARDEN 0,33 - [MISS]
+  
+
+  
+
+  
+
+
+
+art: TOC HOEGAARDEN 0,50 - [MISS]
+  
+
+  
+
+  
+
+art: TOC STELA ARTOIS 0.25 - [MISS]
+  
+
+  
+
+  
+
+
+
+art: TOC STELA ARTOIS 0.5 - [MISS]
+  
+
+  
+  
+
+art: BAVARIA 0.25 - [INCL: Bottles.BAVARIA_PIVO]
+  
+  
+  
+
+art: TOC NIK SVETLO 0.33 - [MISS]
+  
+
+  
+-desno
+  
+
+art: TOC NIK SVETLO 0.5 - [MISS]
+  
+
+
+
+  
+
+  
+
+art: JELEN 0.33 - [INCL: Bottles.JELEN_PIVO]
+  
+  
+  
+
+  
+  
+
+art: BAVARIA BEZALKOHOLNA 0,25 - [INCL: Bottles.BAVARIA_PIVO]
+  
+  
+  
+  
+
+art: ASPALL -  [PLAN: Bottle.ASPALL_RASPBERRY]  
+art_alt: ASPALL_JABUKA -  [INCL: Bottle.SOMERSBY]
+
+
+  
+  
+
+  
+  
+  
+
+
+
+Vina
+art: Spricer Belo Litar-Litar - [MISS] 
+- flasa vina u bokalu + soda voda
+  
+  
+
+
+
+Napomena: Litar-litar se sluzi u bokalu. Ako se izmodelira, a trebalo bi onda obratiti paznju da moze da se vidi i soda voda. Mozda i nju dodati, moze da znaci. 
+Todo: Dodati u pitcher model bokal sa vinom
+  
+  
+
+art: Spricer Rose Litar-Litar - [MISS]
+Napomena:  - rose vino + soda voda
+  
+  
+
+  
+
+art: Memoro Bianco 0.125 - [INCL: Glasses.BELO_VINO_CASA]
+  
+  
+  
+
+art: Pinot grigio 0.125 - [INCL: Glasses.BELO_VINO_CASA]
+  
+
+  
+  
+
+art: Chardonnay Cahantarel 0.125 - [INCL: Glasses.BELO_VINO_CASA]
+  
+  
+  
+
+art: Appassimento Primitivo 0.125 - [INCL: Glasses.CRNO_VINO_CASA]
+  
+  
+
+art: Memoro Rosso 0.125 - [INCL: Glasses.CRNO_VINO_CASA]
+  
+
+art: Primitivo di Manduria DOC 0.125 - [INCL: Glasses.CRNO_VINO_CASA]
+  
+  
+
+art: Mediterranee Rose 0.125 - [INCL: Glasses.BELO_VINO_CASA]
+  
+  
+
+art: Memoro Rosato 0.125 - [INCL: Glasses.CRNO_VINO_CASA]
+  
+
+art: Prosecco Colezzione dry 0.125 - [INCL: Glasses.BELO_VINO_CASA]
+  
+  
+
+art: MEMORO ROSATO 0.75 - [NO_IMG]
+art: PRIMITIVO DI MANDURIA 0.75 - [INCL: Bottles.VINO_FLASA_CRVENO]
+  
+
+  
+
+
+
+art: MEDITERRANE ROSE 0.75 -  [NO_IMG]
+art: PROSECCO COLEZZIONE EXTRA DRY 0.75 - [INCL: Bottles.PROSECCO_FLASA]
+  
+  
+  
+  
+
+  
+  
+
+art: PINO GRIGIO 0.75 - [INCL: Bottles.VINO_FLASA_BELO]
+  
+  
+  
+
+  
+
+art: MEMORO BIANCO 0.75 - [NO_IMG] 
+art: CHARDONNAY CHANTAREL 0.75 - [INCL: Bottles.VINO_FLASA_BELO]
+  
+  
+
+art: APPASSIMENTO PRIMITIVO 0.75 - [NO_IMG]
+Zestine osnovne 
+NAPOMENA: Rakije mogu izlaziti i na sanku i izlaze u sredini sa pivom
+art: ABSOLUT 0.03 - [INCL: Shots.SHOT_TRANSPARENT]
+
+
+  
+
+  
+
+  
+-Napomena: absolut + shot limuna tako se kuca, tako se sluzi
+  
+
+  
+--ovo je kucano kao absolut 0.03 x 8 + 4x red bull limenka
+
+
+Napomena: Sledece dve slike shotovi providni
+  
+  
+
+art: BEEFEATERS 0.03 - [INCL: Glasses.VISOKA_USKA_PROVIDNO]
+
+
+  
+  
+
+Napmena: Ovo providno sa limunom
+  
+
+  
+- služi se i kao shot,dodala sam na spisak u shot_transparent
+art: OLMECA BELA 0.03 - [INCL: Shots.SHOT_TRANSPARENT]
+  
+
+  
+
+Napomena: Nalazi se na ajnceru u pozadini slike
+  
+  
+
+
+
+art: OLMECA ZUTA 0.03 - [INCL: Shots.SHOT_TRANSPARENT]
+  
+  
+  
+
+art: JEGERMEISTER 0.05 - [INCL: Glasses.NISKA_CRVENO]
+  
+
+art: GORKI LIST 0.05 - [INCL: Glasses.NISKA_CRVENO]      
+art: CAMPARI 0.05 - [INCL: Glasses.NISKA_CRVENO]
+  
+  
+  
+
+art: MARTINI BIANCO 0.05 -  [INCL: Glasses.MARTINI_PROVIDNO]
+  
+
+  
+
+
+
+art: AMARETO 0.05 - [NO_IMG]
+Napomena: viski casa sa ledom,tamniji,boje kao jelicki dukat
+art: BAILEYS 0.05 - [INCL: Glasses.MARTINI_BELO]
+  
+  
+  
+
+art: ABSINTH 0.03 - [NO_IMG]
+Napomena: sluzi se obicno kao shot,blago zelene boje 
+art: MARTINI ROSSO 0.05 - [NO_IMG]
+Napomena: liker ,martini casa
+art: MARTINI EXTRA DRY 0.05 - [NO_IMG]
+Napomena: martini casa - vise ide kao dodatak u koktele,retko izlazi,spojiti sa MARTINI BIANCO
+art: SOUTHERN COMFORT 0.05 - [NO_IMG]
+Napomena: sluzi se kao amareto u niskoj casi,spojiti sa jamesonom
+art: KAHLUA 0.05 - [NO_IMG]
+Napomena: liker of kafe,niska viski casa -crna boja,retko izlazi
+art: MALIBY 0.05 - [NO_IMG]
+Napomena: rum,viski casa,providne boje,spojiti sa dzinom u niskoj providnoj casi
+art: APEROL 0.05 - [NO_IMG]
+Napomena: viski casa,narandzaste boje,retko izlazi
+art: rum za koktel 0.03 - [NO_IMG]
+art: TWIN TIGERS 0.03 - [NO_IMG]
+Napomena: Dzin
+Napomena: retko izlazi na sank - inace je providne boje,sluzi se u sotu  kao rakija ako gost zeli da pojaca alkohol u litarskom koktelu
+art: crni rum za koktel 0.03 - [SKIP]
+Napomena: ne izlazi na sank, kao dodatak koktelu da pojaca alkohol ako gost trazi
+art: HAVANA CLUB (3) 0.03 - [INCL: Glasses.NISKA_PROVIDNO] 
+  
+
+  
+  
+
+art: HAVANA CLUB (7) 0.03 - [NO_IMG]
+Napomena: viski casa ili shot,tamnije boje
+art: marie brizard 0.03 - [MISS]
+  
+
+art: SRPSKI GIN JUNI 0.03 - [INCL: Glasses.VISOKA_USKA_PROVIDNO]
+  
+  
+  
+
+Premium zestine
+art: BUMBU 0.03 - [NO_IMG]
+Napomena: viski casa,tamna boja
+art: BUMBU XO 0.03 - [NO_IMG]
+Napomena: viski casa,tamna boja
+art: HAVANA SELECTION 0,03 - [NO_IMG]
+Napomena: viski casa,tamna boja ,mozemo da spojimo sa jamesonom,dzekom
+art: RAMAZZOTTI 0.03 - [NO_IMG]
+Napomena: isto izgleda kao gorki list 
+art: BEEFEATER 24 0.03 - [NO_IMG]
+Napomena: dzin
+art: OLMECA ALTOS 0.03 - [INCL: Shots.SHOT_TRANSPARENT]
+  
+
+art: OLMECA RESPOSADO 0.03 - [NO_IMG]
+Napomena: kao olmeka zuta izgleda
+art: PLYMOUTH GIN 0.03 - [NO_IMG]
+Napomena: spojiti sa dzinom
+art: AVION 0.03 - [NO_IMG] 
+Napomena: shot,spojiti sa tekilom
+art: ABSOLUT ELIKS 0.03 - [NO_IMG] 
+Napomena: vodka,uglavnom viski casa sa ledom,ponekad kao shot
+art: MONKEY 47 0.03 - [NO_IMG]
+Napomena: spojiti sa dzinom
+Napomena: Za džin generalno - moze se sluziti u različitim čašama, kada ide sa svepsom onda je velika, kada je solo moze mala moze velika sa ledom i limunom
+  
+
+  
+  
+  
+  
+  
+
+art: BEEFEATER PINK 0.03 - [NO_IMG] 
+Napomena: bledo roze boje,viski casa sa ledom
+Rakije - izlaze na sanku gde i pivo
+art: RAKIJA LOZOVA BELA 0.03 - [INCL: Shots.SHOT_TRANSPARENT] 
+  
+
+art: RAKIJA SLJIVA 0.03 - [PLAN: Shots.SHOT_AMBER]  
+Napomena: ovo bih možda spojila sa jeličkim dukatom kada ga smestimo  negde
+  
+
+  
+
+  
+
+  
+
+art: RAKIJA KAJSIJA 0.03 - [INCL: Shots.SHOT_TRANSPARENT] 
+  
+
+  
+
+art: RAKIJA DUNJA 0.03 - [INCL: Shots.SHOT_TRANSPARENT]
+  
+
+  
+
+  
+
+art: RAKIJA VILJAMOVKA 0.03 - [INCL: Shots.SHOT_TRANSPARENT]
+  
+
+  
+
+  
+
+art: RAKIJA MEDOVACA 0.05 -  [PLAN: Shots.SHOT_AMBER]  
+  
+
+  
+  
+
+art: RAKIJA MALINA 0,05 - [INCL: Shots.SHOT_RED] 
+  
+  
+
+  
+
+  
+
+art: JELICKI DUKAT 0,03 -  [PLAN: Shots.SHOT_AMBER]  
+Napomena: spojila bih sa šljivom
+  
+
+  
+  
+
+
+
+Viski i konjaci
+art: JAMESON 0.03 - [INCL: Glasses.VISKI_KRATKO_NARANDZASTO] 
+  
+  
+  
+  
+
+art: JACK DANIELS 0.03 - [INCL: Glasses.VISKI_KRATKO_NARANDZASTO]
+  
+
+Napomena: ISTO KAO JAMESON SLIKA pa zato nema slike
+art: CHIVAS REGAL 0.03 - [NO_IMG]
+art: CHIVAS ROJAL SALUT 0.03 - [NO_IMG]
+art: CHIVAS XV 0.03 - [NO_IMG]
+art: FOUR ROSES 0.03 - [NO_IMG]
+art: JOHNNIE WALKER BLACK 0.03 - [NO_IMG]
+art: BALLANTINES 17YO 0.03 - [NO_IMG]
+art: JAMESON 18YO 0.03 - [NO_IMG]
+art: MARTEL 0.03 - [NO_IMG]
+art: CHIVAS EKSTRA 13YO - [NO_IMG]
+art: JAMESON BLACK BAREL 0.03 - [NO_IMG]
+art: MARTEL VSOP 0.03 - [NO_IMG]
+art: CHIVAS 18 YO 0.03 - [NO_IMG]
+art: FOUR ROSES SINGLE BAREL 0.03 - [NO_IMG]
+art: BALLANTINES 0.03 - [NO_IMG]
+art: BALLANTINES 12YO 0.03 - [NO_IMG]
+art: MARTEL XO 0.03 - [NO_IMG]
+art: REDBREAST 0.03 - [NO_IMG]
+art: GLENLIVET 0.03 - [NO_IMG]
+art: ABERLOUR 0.03 - [NO_IMG]
+art: ARARANT 0.03 - [NO_IMG]
+Klasicni kokteli
+art: COSMOPOLITAN - [INCL: Glasses.MARTINI_CRVENO]
+  
+  
+
+art: CAIPIRINHA - [INCL: Glasses.KOKTEL_KRATKI_BELO_SIVO]
+  
+  
+
+art: MOJITO - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+
+  
+  
+
+art: MAI TAI - [MISS]
+  
+  
+  
+
+art: APEROL SPRITZ - [INCL: Glasses.OVALNA_CRVENO]
+  
+
+  
+  
+
+  
+
+art: MARGARITA - [INCL: Glasses.MARTINI_ZUTO]
+  
+  
+  
+
+art: ZOMBIE - [MISS]
+TODO:  Promenjena casa iz bakarne havaji u obicnu staklenu - bitno promeniti u modelu
+  
+
+  
+  
+
+art: WHITE RUSIAN - [INCL: Glasses.KOKTEL_KRATKI_BELO_SIVO]
+  
+
+  
+  
+
+art: PABLO ESCOBAR - [MISS] 
+Napomena: mozda da ubacimo u KOKTEL_ROZE-CRVENO
+  
+  
+  
+
+art: PINA COLADA - [INCL: Glasses.PINA_COLADA]
+  
+  
+  
+
+art: NEGRONI - [INCL: Glasses.NISKA_NARANDZASTO]
+  
+  
+  
+
+art: OLD FASHIONED - [INCL: Glasses.NISKA_NARANDZASTO]
+  
+  
+  
+
+art: TOM COLLINS - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+
+
+
+art: DAIQUIRI - [INCL: Glasses.MARTINI_ZUTO]
+  
+  
+
+art: AMARETO SOUR - [INCL: Glasses.KOKTEL_KRATKI_BELO_SIVO]
+Napomena: prva je bez benalceta, na drugoj fali garnis, na trecoj ga ima
+  
+
+  
+  
+
+art: LONDON MULE - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+
+art: DZIN TONIK - [MISS]  
+Napomena:  - dzin+tonik zajedno u velikoj čaši; mozda zbaciti u VISOKA_USKA_PROVIDNO, moze biti i u maloj casi, pa u mappingu oba da budu za dzin tonik. 
+  
+
+  
+  
+  
+  
+  
+  
+
+dzin velika čaša sa ledom (bez tonika)
+  
+
+dzin u maloj čaši bez tonika
+  
+  
+  
+
+
+
+art: BLOODY MERY - [MISS]
+  
+  
+  
+
+art: WHISKEY SOUR - [MISS]
+  
+2 ista žuta manja čaša
+  
+  
+
+  
+
+art: CAMPARI DJUS - [MISS]
+  
+  
+  
+  
+
+art: RUM KOLA - [MISS]
+  
+  
+  
+
+art: VODKA SODA - [MISS]
+  
+  
+
+art: DJUS VODKA - [NO_IMG]
+art: MOSCOW MULE - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+
+  
+ duga providna
+
+
+Signature kokteli
+art: DEJA VU - [INCL: Glasses.KOKTEL_SA_LJUBICASTIM]
+  
+  
+
+art: GODFATHER - [INCL: Glasses.NISKA_NARANDZSTO]
+  
+  
+
+art: ICEBERG - [INCL: Glasses.KOKTEL_PLAVI]
+  
+  
+  
+  
+
+  
+
+art: RASPBERRY SENORITA - [INCL: Glasses.KOKTEL_KRATKI_BELO_SIVO]
+  
+  
+
+art: MR. BLAZNAVAC - [MISS]
+  
+  
+  
+
+art: COCO LOCO TEQULA - [MISS]
+  
+  
+  
+
+art: TEQUILA PEARSPECTIVE - [MISS]
+  
+  
+  
+
+art: IRAC - [MISS]
+  
+ bez slamčice
+  
+  
+  
+
+art: GIN SMASH - [INCL: Glasses.KOKTEL_ROZE_CRVENO]
+  
+  
+
+art: STRAWBERRY MOJITO - [MISS]
+  
+  
+  
+
+art: PEACH MOJITO - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+  
+  
+
+art: STRAWBERRY DAIQUIRI - [INCL: Glasses.MARTINI_CRVENO]
+  
+  
+  
+  
+iza
+
+
+art: PEACH DAIQUIRI - [INCL: Glasses.MARTINI_ZUTO]
+  
+  
+  
+
+art: STRAWBERRY MARGARITA - [INCL: Glasses.MARTINI_CRVENO]
+  
+  
+  
+
+art: PEACH MARGARITA - [INCL: Glasses.MARTINI_ZUTO]
+  
+  
+  
+
+art: MARESITA - [MISS]
+  
+  
+
+art: TEQUILA SUNRISE - [INCL: Glasses.OVALNA_ZUTO-NARANDZASTO]
+  
+
+  
+
+art: SEX ON THE BEACH - [INCL: Glasses.OVALNA_ZUTO-NARANDZASTO]
+  
+  
+
+art: BLUE LAGON - [INCL: Glasses.KOKTEL_PLAVI]
+  
+  
+
+art: CUBA LIBRE - [INCL: Glasses.OBICNA_ZUTO-NARANDZASTO]
+  
+
+
+
+Napomena: Iza zutog koktela je cuba libre
+  
+  
+  
+  
+
+art: DAY DREAMING - [Glasses: KOKTEL_OBICNA_CRVENO] 
+  
+  
+  
+
+art: CHALLENGE - [SKIP]
+Napomena: Izbacen iz asortimana
+art: WATERMELON COOLER - [Glasses: KOKTEL_OBICNA_CRVENO] 
+  
+  
+  
+
+art: FAT BOY SLIM - [INCL: Glasses.KOKTEL_ROZE-CRVENO]
+  
+  
+
+  
+  
+
+art: LONG ISLAND TEA - [INCL: Glasses.OBICNA_ZUTO-NARANDZASTO]
+  
+  
+  
+  
+
+art: BLACK SABBATH - [INCL: Glasses.KOKTEL_SA_LJUBICASTIM]
+  
+  
+
+art: BAHAMA MAMA - [MISS]
+  
+  
+
+art: SOUTHERN LEMONADE - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+  
+
+art: TIJUANA TAXI - [INCL: Glasses.KOKTEL_PLAVI]
+  
+
+  
+
+art: MEXICAN APPLE PIE - [MISS]
+  
+  
+  
+
+art: CONTINENTAL SOUR - [INCL: Glasses.KOKTEL_PLAVI]
+  
+  
+  
+  
+
+art: RUSSIAN FOG -  [INCL: Glasses.KOKTEL_SA_LJUBICASTIM]
+  
+  
+
+art: LYNCHBURG LEMONADE - [INCL: Glasses.OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+  
+
+art: PURPLE RAIN - [INCL: Glasses.OBICNA_PROVIDNO-ZUTO-ZELENO]
+
+
+napomena: ova 2 na prvoj slici su kad se napravi, a posle se razlije pa izgleda kao na drugim slikama
+  
+  
+  
+
+art: BAHAMA BREEZER - [MISS]
+  
+  
+
+art: RED HOT PASSION - [INCL: Glasses.OBICNA_ZUTO-NARANDZASTO]
+
+
+  
+  
+  
+  
+
+
+
+art: TROPICAL DEPRESSION - [INCL: Glasses.KOKTEL_PLAVI]      
+
+
+art: CARIBBEAN CRUISE - [MISS]
+  
+  
+  
+crveni
+  
+
+art: AYA - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+
+art: SKINNY BITCH - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+
+  
+
+art: GGT - [INCL: Glasses.KOKTEL_ROZE-CRVENO ]
+  
+  
+
+art: GANDALF - [MISS]
+  
+  
+  
+  
+
+  
+
+art: RASPBERY MULE - [MISS]
+  
+  
+  
+  
+
+art: STRAWBERRY KISS - [MISS]
+  
+  
+
+art: BITER PEACH - [MISS]
+  
+  
+  
+
+art: RUM DIARY - [INCL: Glasses.KOKTEL_KRATKI_BELO_SIVO]
+  
+  
+  
+  
+
+art: DOUBLE WIN - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+  
+
+
+
+art: FRESH MELON - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+  
+
+art: TEA SPIRIT - [INCL: Glasses.OBICNA_ZUTO-NARANDZASTO]
+  
+  
+  
+  
+
+Shotovi
+art: B-52 -  [INCL: Shots.SHOT_CREAMY]
+  
+  
+
+  
+
+  
+
+art: B-53 - [INCL: Shots.B53]
+  
+  
+  
+
+  
+  
+  
+
+art: BLOW JOB - [INCL: Shots.SHOT_CREAMY]
+  
+  
+  
+
+  
+  
+
+art: MONKEY BRAIN -  [INCL: Shots.SHOT_CREAMY]
+  
+  
+  
+
+  
+
+  
+  
+
+
+
+art: BLACK JACK -  [INCL: Shots.SHOT_BLACK]
+  
+  
+  
+  
+
+art: THC -  [INCL: Shots.THC]
+  
+  
+
+  
+  
+  
+
+art: MINI MARGARITA - [INCL: Shots.SHOT_BLURRY]
+  
+
+  
+  
+  
+
+
+
+art: N.N. SOT - [INCL: Shots.SHOT_TRANSPARENT]
+  
+  
+  
+  
+
+art: DORUCAK U BLAZNAVCU - [INCL: Shots.SHOT_ZUTO]
+  
+  
+  
+  
+  
+  
+  
+
+
+
+art: PERNOD 0.03 - [NO_IMG]
+Napomena: absinth,providna shot casa
+
+
+
+
+Martini kokteli
+art: ESPRESO MARTINI - [INCL: Glasses.MARTINI_BELO]
+  
+  
+  
+
+art: MELON MARTINI - [INCL: Glasses.MARTINI_ZUTO]
+  
+  
+gornja
+  
+
+
+
+art: BAILEYS MARTINI -  [INCL: Glasses.MARTINI_BELO]
+  
+  
+  
+
+art: SWEET DREAM - [INCL: Glasses.MARTINI_ZUTO]
+  
+  
+  
+
+
+
+art: PASSION KISS -  [INCL: Glasses.MARTINI_CRVENO]
+  
+crveni
+  
+  
+
+art: MULTIPLE ORGASM - [INCL: Glasses.MARTINI_BELO]
+  
+beli
+  
+  
+
+art: VODKA MARTINI -  [INCL: Glasses.MARTINI_PROVIDNO]
+  
+  
+
+art: MARTINI - [INCL: Glasses.MARTINI_PROVIDNO]
+  
+  
+  
+  
+
+art: PORN STAR MARTINI - [MISS]
+dodatak: shot_transparent je deo
+Napomena: Kombinacija martini zuto i shot providno
+  
+  
+  
+  
+  
+  
+
+
+
+Specijalni kokteli
+art: KAPRI - [MISS]
+  
+  
+
+art: LOST CHERRY - [MISS]
+  
+  
+crveni
+art: MSS JULKA - [MISS]
+  
+  
+  
+  
+
+art: KIR ROYALE - [MISS]
+  
+  
+
+art: STRAWBERRY FIZZ - [NO_IMG]
+art: LIMONCELLO SPRITZ - [MISS]
+  
+  
+  
+  
+
+art: IZZY - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+
+  
+  
+
+art: LOLITA -  [INCL: Glasses.OVALNA_CRVENO]
+  
+  
+
+art: BLUE FROG -  [INCL: Glasses.KOKTEL_PLAVI]
+  
+
+art: DEVIL ICED TEA - [INCL: Glasses.KOKTEL_SA_LJUBICASTIM]
+  
+  
+
+art: VIAGRA -  [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+  
+
+art: BEAST - [MISS] 
+  
+
+  
+  
+  
+
+
+
+art: STOPPER -  [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+
+art: SINGAPORE SLING - [MISS] 
+  
+
+art: PIJANA SIRENA - [MISS] 
+  
+  
+  
+
+art: FLYING ELEPHANT -  [INCL: Glasses.KOKTEL_ROZE-CRVENO]
+  
+  
+
+Kokteli 1L
+art: Mojito 1L - [INCL: Pitchers.YELLOW_GREEN_FAMILY]
+  
+  
+
+  
+  
+
+
+
+art: Tequila Sunrise 1L -  [PLAN: Pitchers.RED_ORANGE_FAMILY]    
+  
+  
+
+art: Sex on the beach 1L - [INCL: Pitchers.SEX_ON_THE_BEACH]
+
+
+  
+  
+  
+
+  
+  
+  
+
+  
+
+art: Blue lagon 1L - [INCL: Pitchers.BLUE_FAMILY]
+  
+  
+
+  
+
+  
+
+art: Day dreaming 1L - [INCL: Pitchers.DAY_DREAMING]
+  
+  
+  
+
+  
+  
+
+  
+
+art: Mai tai 1L -  [PLAN: Pitchers.MARESITA_MAI_TAI]
+  
+  
+  
+
+  
+  
+
+art: Watermelon cooler 1L - [INCL: Pitchers.RED_ORANGE_FAMILY]
+  
+  
+
+  
+  
+
+art: Continental Sour 1L - [INCL: Pitchers.BLUE_FAMILY]
+  
+  
+  
+
+  
+  
+
+art: Fat Boy Slim 1L -  [INCL: Pitchers.FAT_BOY_SLIM]
+  
+  
+
+  
+
+  
+
+art: Long Island Ice Tea 1L - [INCL: Pitchers.DARK_COCKTAILS]
+  
+  
+  
+  
+  
+
+art: Blue Frog 1L -  [INCL: Pitchers.BLUE_FAMILY]
+  
+  
+
+  
+  
+
+art: Devil 1L - [INCL: Pitchers.DEVIL]
+  
+  
+
+  
+  
+
+  
+
+art: Lynchburg Lemonade 1L - [INCL: Pitchers.YELLOW_GREEN_FAMILY]
+  
+  
+
+  
+
+art: Mexican Apple Pie 1L - [INCL: Pitchers.RED_ORANGE_FAMILY]
+  
+  
+
+art: Beast 1L - [INCL: Pitchers.RED_ORANGE_FAMILY]
+  
+
+  
+  
+
+  
+
+art: Black sabbath 1L - [INCL: Pitchers.DARK_COCKTAILS]
+  
+  
+
+  
+  
+
+art: Maresita 1l - [INCL: Pitchers.MARESITA_MAI_TAI]
+  
+  
+
+  
+  
+
+art: Viagra 1L - [INCL: Pitchers.YELLOW_GREEN_FAMILY]
+  
+  
+  
+
+art: Stoper 1L - [INCL: Pitchers.YELLOW_GREEN_FAMILY]
+  
+  
+
+  
+  
+
+art: Flying Elephant 1 L -  [PLAN: Pitchers.RED_ORANGE_FAMILY]
+  
+  
+
+  
+  
+  
+
+art: Singapore Sling 1 L - [MISS] 
+  
+
+  
+
+Bezalkoholni kokteli
+art: MOJITO BEZ ALK. - [INCL: Glasses.KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO]
+  
+  
+  
+
+art: MARESITA BEZ ALK. -  [INCL: Glasses.KOKTEL_ROZE_CRVENO]
+  
+  
+
+art: DRIBBLING BEZ ALK. -  [INCL: Glasses.VISOKA_USKA_CRVENO]
+  
+svetliji
+  
+
+  
+
+
+
+art: PABLITO BEZ ALK.  [INCL: Glasses.KOKTEL_ROZE-CRVENO] 
+  
+
+  
+  
+
+art: VIRGIN PINA COLADA - [INCL: Glasses.PINA_COLADA] 
+  
+  
+
+Cigarete
+art: Dunhill Swiss - [MISS]
+  
+
+  
+  
+  
+  
+  
+  
+  
+
+art: Dunhill Master - [MISS]
+  
+
+  
+
+  
+  
+  
+  
+  
+
+art: Dunhill Blonde - [MISS]
+  
+
+  
+
+  
+  
+  
+
+art: Laki original - [MISS]
+  
+  
+  
+  
+  
+
+art: Laki Wild - [MISS]
+  
+
+  
+
+  
+  
+  
+  
+
+art: Neostick Tobacco Bright - [MISS]
+  
+  
+  
+  
+
+art: Dunhill Essence blue - [MISS]
+  
+  
+
+  
+  
+  
+  
+  
+
+art: Dunhill Essence Bronze - [MISS]
+  
+
+  
+  
+  
+  
+  
+
+art: Dunhill Signature Purple - [MISS]
+  
+
+  
+  
+  
+  
+  
+
+art: Dunhill Signature White - [MISS]
+
+
+  
+  
+  
+  
+
+art: Neostick Violet - [MISS]
+  
+  
+  
+
+art: Neostick Green - [MISS]
+  
+  
+  
+  
+
+art: Neostick Tobacco Dark - [MISS]
+  
+  
+  
+  
+  
+
+art: Neostick Red - [MISS]
+  
+  
+  
+  
+  
+
+art: Neostick Tropic - [SKIP]
+Napmena: nema u ponudi više
+
+
+art: Dunhill Opus Enigma - [MISS]
+  
+
+  
+  
+  
+  
+
+
+
+  
+  
+  
+
+art: Laki Balanced Svetli - [MISS]
+  
+  
+  
+  
+
+art: Laki Rounded Tamni - [MISS]
+  
+  
+  
+
+art: Velo Mini - [MISS]
+Napomena: ljubičasto okruglo pakovanje (to su nikotinske kesice)
+  
+  
+  
+-levo
+
+
+
+
+art: Glo Pro rose - [SKIP]
+Napomena: nema u ponudi više
+art: Glo Pro black - [MISS]
+Napomena: aparat
+  
+[a]        
+
+
+
+
+
+
+  
+
+art: Laki Amber - [MISS]
+  
+
+  
+
+  
+-najbliži
+  
+-levo
+
+
+art: Dunhill Prime - [MISS]
+  
+
+  
+-najbliži
+  
+  
+  
+
+
+
+art: Laki Amber 100s - [MISS]
+  
+-desno
+  
+-duži
+
+
+art: GLO HILO Black - [MISS]
+Napomena: aparat
+  
+
+  
+  
+  
+-gornji
+art: GLO HILO Blue - [MISS]
+Napomena: aparat
+  
+
+  
+  
+  
+  
+-donji
+art: Glo Pro blue - [SKIP]
+art: Glo Pro purple - [SKIP]
+art: Glo TM black - [SKIP]
+art: Glo TM blue - [SKIP]
+art: Glo TM green - [SKIP]
+art: Glo TM pink - [SKIP]
+Napomena: Sve su aparati; Ovo je sve izbaceno, umesto toga hilo aparati
+art: Rivo Scarlet Click - [MISS]
+  
+
+  
+
+  
+  
+  
+
+art: Rivo Wild Click - [MISS]
+  
+  
+  
+  
+
+art: Virto Frosty Click - [MISS]
+  
+
+  
+  
+
+art: Virto Rich Tobacco - [MISS]
+  
+
+
+
+
+
+  
+  
+  
+
+art: Virto Smoth Tobacco - [MISS]
+  
+  
+  
+  
+
+art: Dunhill Select Rose - [MISS]
+
+
+  
+
+  
+  
+
+art: Dunhill Select Beige - [MISS]
+  
+
+  
+  
+  
+  
+  
+
+  
+
+art: Vuse Hestia - [MISS]
+Napomena: 3 boje
+
+
+
+
+  
+  
+  
+
+art: Vuse 1000  - [MISS]
+Napomena: jednokratne cigare i ima ih u 6 boja -duguljasta kutija
+  
+  
+  
+  
+  
+  
+  
+  
+  
+
+art: Vuse Go Reolad - [MISS]
+Napomena: aparat
+  
+  
+  
+  
+
+
+
+art: Velo - [MISS]
+Napomena: 6 boja i mini i regularno pakovanje    
+  
+  
+  
+  
+  
+
+art: GLO HILO Burgundy - [MISS]
+  
+  
+  
+  
+  
+
+art: Virto Signature Tobacco - [MISS]
+  
+  
+  
+  
+  
+
+art: Virto Berry Click - [MISS]
+  
+
+Grickalice
+art: KIKIRIKI - [MISS]
+Napomena: nekad otvore na šanku,nekad uzmu kesicu i odnesu na ajncer pa tamo otvore (gde se sipa pivo)
+  
+  
+  
+  
+
+  
+
+  
+
+art: CIPS - [MISS]
+  
+
+  
+  
+  
+  
+  
+
+  
+  
+
+  
+
+HRANA - NE MODELIRA SE
+Dorucak
+art: hangover omlet - [SKIP]
+art: avokado brios tost- [SKIP]
+art: poke cinija- [SKIP]
+art: takos kajgana- [SKIP]
+art: komplet lepinja- [SKIP]
+art: przenice- [SKIP]
+art: dorucak inglis brekfest- [SKIP]
+art: dorucak pinki- [SKIP]
+art: dorucak grcka jaja- [SKIP]
+art: dorucak slatki- [SKIP]
+art: dorucak heljda sa povrcem- [SKIP]
+art: dorucak takos jaja- [SKIP]
+art: dorucak tri jaja po izboru- [SKIP]
+art: smothie bowl- [SKIP]
+Glavna jela
+art: ramen tom ka ga- [SKIP]
+art: pohovani pileci stapici- [SKIP]
+art: tom ka ga- [SKIP]
+art: sendvic birija- [SKIP]
+art: tortilja piletina- [SKIP]
+art: ramen- [SKIP]
+art: veganski ramen- [SKIP]
+art: praseca bajadera- [SKIP]
+art: terijaki piletina- [SKIP]
+art: takos birija komad 60g- [SKIP]
+art: takos spicy piletina komad 60g- [SKIP]
+art: takos grentumb komad 60g- [SKIP]
+art: takos spicy pork 60g- [SKIP]
+art: takos piletina komad 60g- [SKIP]
+art: karbonara mafija pomfrit- [SKIP]
+art: meze- [SKIP]
+art: klub sendvic- [SKIP]
+art: krilca 400g- [SKIP]
+art: pomfrit belgijski- [SKIP]
+art: blaznavac klasik burger- [SKIP]
+art: blaznavac cizburger- [SKIP]
+art: takitosi- [SKIP]
+art: blaznavac kari sos burger- [SKIP]
+art: blaznavac tzaziki burger- [SKIP]
+Deserti
+art: ciz kejk sargarepa- [SKIP]
+art: dezert brauni 190g- [SKIP]
+art: dezert ciz kejk- [SKIP]
+art: SLADOLED KUGLA- [SKIP]
+art: BANANA SPLIT- [SKIP]
+Prilozi i dodaci
+art: pomfrit 200g- [SKIP]
+art: sos Jogurt dip- [SKIP]
+art: sos Spicy majonez- [SKIP]
+art: sos BBQ- [SKIP]
+art: sos Sweet chilly- [SKIP]
+art: dodatak jaje- [SKIP]
+art: dodatak pomfrit 100g- [SKIP]
+art: dodatak kiselo mleko 2dl- [SKIP]
+art: dodatak kackavalj 50g- [SKIP]
+art: dodatak slanina 50g- [SKIP]
+art: sos honey mustard- [SKIP]
+art: sos carolina- [SKIP]
+art: dodatak meso burger 75g- [SKIP]
+art: hleb- [SKIP]
+art: grilovano povrce- [SKIP]
+art: przeno povrce sa heljdom- [SKIP]
+art: prsuta 50g- [SKIP]
+art: dimljeni vrat 50g- [SKIP]
+art: dodatak kobasica- [SKIP]
+art: batat 200g- [SKIP]
+art: batat 100g- [SKIP]
+art: hleb iz nase furune- [SKIP]
+Salate
+art: cezar salata- [SKIP]
+art: salata kineska 300g- [SKIP]
+art: salata tofu- [SKIP]
+art: salata athine- [SKIP]
+art: salata cobb- [SKIP]
+art: salata sa cipsom od tikvica- [SKIP]
+Kobasice
+art: CURRYWURST BERLIN- [SKIP]
+art: BIERWURST- [SKIP]
+art: HOT SPICE- [SKIP]
+art: HOT DOG- [SKIP]
+
+
+Ostalo
+art: MAJICA NOVA- [SKIP]
+art: SUSKAVAC- [SKIP]
+
+
+
+
+NAPOMENE:
+VAN PONUDE:
+* ________________
+
+
+
+
+FAZA 2: ANALIZA SLIČNOSTI I DEFINISANJE MODELA
+
+
+Bottles
+
+
+Mind map koji prati flase je na sledećoj slici:
+
+
+  
+
+Data Yaml klase koji se trenutno koristi u produkciji:
+
+
+names: ['7UP', 'AQUA_VIVA', 'BAVARIA_PIVO', 'CORONA_PIVO', 'EVERVESS', 'GUSTO', 'JELEN_PIVO', 'KNJAZ_MILOS', 'MIRINDA', 'NIKSICKO_PIVO', 'PEPSI', 'PROSECCO_FLASA', 'ROSA', 'SCHEWEPPES_TONIC', 'SOMERSBY', 'VINO_FLASA_BELO', 'VINO_FLASA_CRVENO', 'VINO_FLASA_ROZE', ‘REDBULL’, ‘GUARANA’]
+
+
+United classes: 
+Bavaria_Pivo - Bavaria, Bavaria_bezalkohol
+Knjaz_Milos - KNJAZ_MILOS, KNJAZ_MILOS_LIMUN, KNJAZ_MILOS_POMORANDZA,KNJAZ_MILOS_MANDARINA
+Pepsi - Pepsi, Pepsi_zero
+
+
+
+
+Detaljnije informacije mogu se pronaći ovde: Bottles
+Cups
+Mind map koji prati flase je na sledećoj slici:
+Zbog jednostavnosti modela mind mapa za sada nije urađena, moguće je da ćemo je dodati uskoro.
+
+
+Data Yaml klase koje trenutno koristimo u produkciji:
+
+
+names: [ 'CAJ', 'ESPRESSO_KAFA_MANJA', 'ESPRESSO_KAFA_VECA', 'TURSKA_KAFA', 'CAFFE_LATTE', 'COKOLADA_KAKAO', 'KUVANO_VINO', 'IRISH_COFFE', 'MOKA']
+
+
+Combined items: 
+Espresso_kafa_veca - Espresso_kafa_veca, espresso mleko, cappuccino
+Caffe_latte - kafe late, latte sa ukusima
+Cokolada_kakao - topla cokolada, kakao
+Moka - moka kafa, moka kafa extra
+
+
+Detaljnije informacije mogu se pronaći ovde: Cups
+
+
+Pitchers
+Mind map koji prati bokale je na sledećoj slici - treba da se ažurira, ono što fali trenutno jeste Devil (samostalna klasa), limunada (samostalna klasa), žuti kokteli (lyncburg, viagra, stopper):
+  
+
+
+
+Data Yaml klase koje trenutno koristimo u produkciji:
+
+
+Names: ['RED_ORANGE_FAMILY', 'DARK_COCKTAILS', 'BLUE_FAMILY', 'LEGACY_BOKAL', 'LEGACY_CHALLENGE', 'DAY_DREAMING', 'DEVIL', 'FAT_BOY_SLIM', 'YELLOW_GREEN_FAMILY', 'LEGACY_LIMUNANA', 'LEGACY_LONG_ISLAND_ICE_TEA', 'MARESITA_MAI_TAI', 'LEGACY_MEXICAN_APPLE_PIE', 'LEGACY_MOJITO', 'SEX_ON_THE_BEACH', 'LEGACY_VIAGRA', 'LEGACY_WATERMELON_COOLER', 'SPRICER_BELO', 'SPRICER_ROZE', 'LIMUNADA_BAZA', 'LIMUNADA_BAZA_CRVENO']
+
+
+Svi Artikli iz Blaznavca - Beast 1L, Black sabbath 1L, Blue Frog 1L, Blue lagon 1L, Challenge 1L, Continental Sour 1L, Day dreaming 1L, Devil 1L, Fat Boy Slim 1L, Long Island Ice Tea 1L, Lynchburg Lemonade 1L, Mai tai 1L, Maresita 1L, Mexican Apple Pie 1L, Mojito 1L, Sex on the beach 1L, Stoper 1L, Tequila Sunrise 1L, Viagra 1L, Watermelon cooler 1L,Flying Elephant 1 L,  Singapore Sling 1 L ,Spricer Belo Litar-Litar,  Limunada 1L, Limunada sa ukusom 1L, Limunana 1L, Limunada Djumbir 1L
+Combined items
+YELLOW_GREEN_FAMILY - Viagra, Stoper, Lynchburg Lemonade, Limunada, Limunada Djumbir, Limunada sa nanom, Limunada sa ukusom (Yellow), Mojito
+BLUE_FAMILY - Blue Lagoon, Continental Sour, Blue Frog
+RED_ORANGE_FAMILY - Watermelon Cooler, Beast, Mexican Apple Pie, Tequila Sunrise, Flying Elepant, Singapore Sling, Limunada sa ukusom (Red)
+MARESITA_MAI_TAI - Maresita, Mai Tai
+DARK_COCKTAILS - Black Sabath, Long Island
+
+
+
+
+Detaljnije informacije mogu se pronaći ovde: Pitchers
+  Glasses
+Data Yaml klase koje trenutno koristimo u produkciji:
+
+
+names: ['BELO_VINO_CASA', 'CEDJENO_CRVENO', 'CEDJENO_NARANDZASTO', 'CRNO_VINO_CASA', 'DOMACA_LIMUNADA', 'KOKTEL_KRATKI_BELO_SIVO', 'KOKTEL_OBICNA_CRVENO', 'KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO', 'KOKTEL_PLAVI', 'KOKTEL_ROZE-CRVENO', 'KOKTEL_SA_LJUBICASTIM', 'LEDENA_KAFA', 'LIMUNADA', 'LIMUNANA', 'MARTINI_BELO', 'MARTINI_CRVENO', 'MARTINI_PROVIDNO', 'MARTINI_ZUTO', 'MOKA', 'NISKA_CRVENO', 'NISKA_NARANDZASTO', 'NISKA_PROVIDNO', 'OBICNA_ZUTO-NARANDZASTO', 'OVALNA_CRVENO', 'OVALNA_ZUTO-NARANDZASTO', 'PINA_COLADA', 'VISKI_KRATKO_NARANDZASTO', 'VISOKA_USKA_CRVENO', 'VISOKA_USKA_PROVIDNO'']
+
+
+Ovo nam fali u modelima, moramo da oznacimo da fali gore
+
+
+Sejk_beli - sejk_sa_vocem, sejk_banana
+Sejk_sa_slagom - Coko plazma sejk,Oreo plazma sejk,Plazma sejk,Snikers plazma sejk,Topla cokolada
+Sejk_crni - Sejk cokolada voce,Sejk cokolada sa bananom,Sejk sa cokoladom
+Nes_kafa - Nes_kafa, ledeni_late
+Caffe_latte -  caffee_latte, latte_sa_uksima
+Ono sto imamo - Combined items
+
+
+BELO_VINO_CASA - belo vino casa (sve vrste), prosecco
+CRNO_VINO_CASA - sva vina crna na casu
+CEDJENO_CRVENO - Bec, Honolulu, London, Majami, Rim, Cedjeni grejp
+CEDJENO_NARANDZASTO -  Amsterdam, Barselona, Beograd, Cedjena pomorandza, Cedjeni mix,Istanbul
+DOMACA_LIMUNADA - domaci ledeni caj, slavkova (blaznavac) lajmonada
+PINA_COLADA - Pina_colada, VIRGIN PINA COLADA
+Ledena_kafa - Hogar,Ledena moka,Ledena kafa,Sladoled kafa
+OVALNA_CRVENO -  aperol_spritiz, red_berry, lolita
+KOKTEL_PLAVI - challenge, blue_lagoon, blue_frog, funky_blue, continental_sour, iceberg, tropical_depression, tijuana_taxi
+KOKTEL_OBICNA_PROVIDNO-ZUTO-ZELENO - purple_rain, mojito(bez_alc, peach), aya, double_win, london_mule, lynchburg_lemonade, fresh_melon, moscow_mule, southern_lemonade, tom_collins, viagra, stopper, skinny bitch,izzy
+OVALNA_ZUTO-NARANDZASTO - tequila sunrise, sex_on_the_beach
+KOKTEL_KRATKI_BELO_SIVO - amaretto_sour, caipirinha, raspberry_senorita, rum_diary, white_russian
+KOKTEL_OBICNA_CRVENO - day dreaming,watermelon cooler
+KOKTEL_ROZE-CRVENO - ggt, fat_boy_slim, flying_elephant, gin_smash, pablito,pablito bez alkohola,STRAWBERRY MOJITO (UNCHECKED, mozda nije istreniran),MARESITA BEZ ALK. (UNCHECKED,mozda nije istrenirano)
+KOKTEL_SA_LJUBICASTIM - deja_vu, devil_iced_tea, black_sabbath, russian_fog
+MARTINI_ZUTO - bellini, sweet_dream, peach_margarita, melon_martini, margarita, daiquiri, peached_daiquiri
+MARTINI_BELO - multiple_orgasm, baileys_martini, espresso_martini
+MARTINI_PROVIDNO - martini_bianco, vodka_martini, pernod_martini,martini
+MARTINI_CRVENO - cosmopolitan, kir_royale, passion_kiss, strawberry_daiquiri, strawberry_fizz, strawberry_margarita, aperol_martini, martini_rosso
+NISKA_CRVENO - jeggermeister_05, campari, gorki_list, aperol_niska, ramazzoti
+NISKA_PROVIDNO - monkey_47, havana_club_3, plymouth_niska, absolut_vodka_niska, absolut_elix_niska, avion_niska, olmeca_altos_niska, malibu_niska, baileys_niska
+VISOKA_USKA_PROVIDNO - bumbu_xo_visoka, havana_club_selection_visoka, monkey_47_visoka, havana_club_3, srpski_gin_juni, beefeaters (+ 24), plymouth_visoka, absolut_vodka_visoka,  absolut_elix_visoka, malibu_visoka, beefeater_pink, southern_comfort_visoka, havana_club_7_visoka
+VISKI_KRATKO_NARANDZASTO - jack, jameson, johnnie, havana_club, four_rouses, chivas, ballantines,SOUTHERN COMFORT 0.05 (UNCHECKED - samo dodat nije istreniran)
+VISKI_KONJAK_OVALNO - ararat, martel, (some more whiskey)
+VISOKA_USKA_CRVENO - campari_visoka, DRIBBLING BEZ ALK. (unchecked, mozda neistrenirano, samo dodato)
+OBICNA_ZUTO-NARANDZASTO - red_hot_passion, cuba_libre, long_island_ice_tea, TEA SPIRIT (IPAK JE CRVEN…)
+NISKA_NARANDZASTO - godfather, zombie, old_fashioned, negroni
+
+
+
+
+Detaljnije informacije mogu se pronaći ovde: Glasses
+
+
+Shots
+Mind map koji prati bokale je na sledećoj slici 
+  
+
+
+
+Data Yaml klase koje trenutno koristimo u produkciji:
+
+
+names: ['B53', 'SHOT_BLACK', 'DORUCAK_U_BLAZNAVCU', ‘SHOT_TRANSPARENT', 'SHOT_RED', 'THC', ‘SHOT_CREAMY’, ‘SHOT_BLURRY’, ‘SHOT_ZUTO', ‘SHOT_AMBER’]
+Combined items
+Shot_red - Rakija_malina, aperol, campari
+Shot_black - Black_jack, jeger_shot
+Shot_creamy - blow_job, monkey_brain, b52
+Shot_blurry - mini_margarita, imuno_shot, olmeca_zuta
+Shot_transparent - olmeca (altos, bela), avion, absolut vodka (+ elix), havana club 3, pernod, n_n_shot, DEO pornstar martini pica
+Shot_zuto - limun_za_caj, dorucak_u_blaznavcu
+Shot_amber - medovaca, rakija_sljiva, jelicki_dukat
+
+
+
+
+Detaljnije informacije mogu se pronaći ovde: Shots
+
+
+Grickalice i cigare
+
+
+Svi Artikli iz Blaznavca: Dunhill Blonde,Dunhill Essence Blue,Dunhill Essence Bronze,Dunhill Master,Dunhill Opus Enigma,Dunhill Prime,Dunhill Select Beige,Dunhill Select Rose,Dunhill Signature Purple,Dunhill Signature White,Dunhill Swis,GLO PRO Black,GLO Hilo Black,GLO Hilo Burgundy,Glo Hilo Blue,Laki Amber,Laki Amber 100s,Laki Balanced Svetli,Laki Original,Laki Original 100s,Laki Rounded Tamni,Laki Wild,Neostick Green,Neostick Red,Neostick Tobacco Bright,Neostick Tobacco Dark,Neostick Viole,Rivo Scarlet Click,Rivo Wild Click,Velo,Velo Mini,Virto Berry Click,Virto Frosty Click,Virto Rich Tobacco,Virto Signature Tobacco,Vuse 1000,Vuse Go Reolad,Vuse Hestia,Virto Smoth Tobacco,Kikiriki, Cips
+
+
+Predlog klasa: 
+names: [RED_PACKS',  'BLUE_PACKS',  'WHITE_PACKS',  'BLACK_PACKS',  'GREEN_PACKS',  'SNUS_TINS',  'CHIPS_BAG',  'CHIPS_BOWL',  'NUTS_BAG',  'NUTS_BOWL']
+
+
+Combined items:
+RED_PACKS – Neostick Red, Glo Hilo Burgundy, Vuse 1000 (red & purple), Virto Rich Tobacco, Virto Scarlet Click, Vuse Hestia (purple), Dunhill Prime, Rivo Scarlet Click, Virto Berry Click
+BLUE_PACKS – Dunhill Essence Blue, Dunhill Signature Purple, Neostick Violet, Laki Rounded Tamni, Laki Balanced Svetli, Virto Frosty Click, Virto Signature Tobacco, Glo Hilo Blue, Vuse 1000 (blue), Vuse Hestia (blue), Rivo Wild Click
+WHITE_PACKS – Dunhill Blond, Laki Original, Laki Original 100s, Neostick Tobacco Bright, Dunhill Essence Bronze, Dunhill Signature White, Laki Amber, Laki Amber 100s, Dunhill Select Rose, Dunhill Select Beige, Virto Smooth Tobacco, Vuse GO Reload, Vuse 1000 (light / orange), Vuse Hestia (cream)
+BLACK_PACKS – Dunhill Swiss, Dunhill Master, Laki Wild, Neostick Tobacco Dark, Dunhill Opus Enigma, Glo Pro Black, Glo Hilo Black
+GREEN_PACKS – Neostick Green, Vuse 1000 (green / petrolej)
+SNUS_TINS – Svi snus proizvodi
+CHIPS_BAG – Cips kesa
+CHIPS_BOWL – Cips cinija
+NUTS_BAG – Kikiriki kesa
+NUTS_BOWL – Kikiriki cinija
+
+
+
+
+
+
+
+
+FAZA x: ANALIZA SLIČNOSTI 
+Uputstva:
+Nakon što prikupite sve skrinšotove, pogledajte ih i grupišite predmete koji izgledaju IDENTIČNO ili VRLO SLIČNO na kameri.
+Identični predmeti (izgledaju potpuno isto)
+Navedite grupe predmeta koji su nemoguće za razlikovanje na kameri:
+Grupa 1:
+* Predmeti: ________________
+* Zašto su identični: ________________
+Grupa 2:
+* Predmeti: ________________
+* Zašto su identični: ________________
+Grupa 3:
+* Predmeti: ________________
+* Zašto su identični: ________________
+(Dodati dalje grupe po potrebi)
+Vrlo slični predmeti (male ali primetne razlike - razmotriti)
+Navedite grupe predmeta koji se mogu razlikovati ali su vrlo slični:
+Slična grupa 1:
+* Predmeti: ________________
+* Glavna razlika: ________________
+* Možete li ih sigurno razlikovati na kameri? Da / Ne
+Slična grupa 2:
+* Predmeti: ________________
+* Glavna razlika: ________________
+* Možete li ih sigurno razlikovati na kameri? Da / Ne
+Jedinstveni predmeti
+Navedite predmete koji su laki za prepoznavanje i ne liče ni na šta drugo:
+________________
+1. ________________
+2. ________________
+3. ________________
+4. ________________
+5. ________________
+
+
+FAZA 3: PROCENA TEŽINE PREPOZNAVANJA
+Uputstva:
+Ocenite težinu prepoznavanja svakog predmeta na kameri prema skali 1-5:
+* 1 = Vrlo lako za prepoznavanje i razlikovanje
+* 2 = Lako za prepoznavanje i razlikovanje
+* 3 = Umereno teško
+* 4 = Teško za prepoznavanje ili razlikovanje
+* 5 = Vrlo teško za prepoznavanje ili razlikovanje
+Najproblematičniji predmeti:
+Navedite 10 najteže prepoznatljivih predmeta sa objašnjenjem:
+1. ________________ - Ocena: ___ - Razlog: ________________
+2. ________________ - Ocena: ___ - Razlog: ________________
+3. ________________ - Ocena: ___ - Razlog: ________________
+4. ________________ - Ocena: ___ - Razlog: ________________
+5. ________________ - Ocena: ___ - Razlog: ________________
+6. ________________ - Ocena: ___ - Razlog: ________________
+7. ________________ - Ocena: ___ - Razlog: ________________
+8. ________________ - Ocena: ___ - Razlog: ________________
+9. ________________ - Ocena: ___ - Razlog: ________________
+10. ________________ - Ocena: ___ - Razlog: ________________
+________________
+
+
+FAZA 4: GRANIČNI SLUČAJEVI I POSEBNI SCENARIJI
+Česti problemi u prepoznavanju:
+Označite sve probleme koje ste primetili tokom snimanja:
+☐ Prekrivanje rukama/šakama
+* Opis problema: ________________
+* Koji predmeti su najčešće prekriveni: ________________
+☐ Refleksije na staklu/metalnim površinama
+* Opis problema: ________________
+* Koji predmeti imaju najjače refleksije: ________________
+☐ Preklapanje/naslagavanje predmeta
+* Opis problema: ________________
+* Kada se najčešće dešava: ________________
+☐ Loše osvetljenje
+* Opis problema: ________________
+* Deo šanka sa najgorim osvetljenjem: ________________
+☐ Zamućenje zbog brzog pokreta
+* Opis problema: ________________
+* Koji pokreti najviše utiču: ________________
+☐ Promene izgleda tečnosti (pena, krema, led)
+* Opis problema: ________________
+* Koji napici se najviše menjaju: ________________
+☐ Zagušenost šanka
+* Opis problema: ________________
+* Kada je šank najzagušeniji: ________________
+☐ Slični kontejneri za različite napitke
+* Opis problema: ________________
+* Najproblematičnije kombinacije: ________________
+Scenariji špica (gužva)
+Opišite šta posebno otežava prepoznavanje tokom špica:
+________________
+1. ________________
+2. ________________
+3. Vremenska analiza
+* Najlakše vreme za prepoznavanje: ________________
+* Najteže vreme za prepoznavanje: ________________
+* Razlog: ________________
+________________
+
+
+FAZA 5: PREPORUKE ZA KREIRANJE KLASA
+Predlog vizuelnih klasa
+Na osnovu svoje analize, predložite kako da se grupišu predmeti u klase:
+KLASA 1: ________________
+* Uključeni predmeti: ________________
+* Razlog za grupiranje: ________________
+* Karakteristike klase: ________________
+KLASA 2: ________________
+* Uključeni predmeti: ________________
+* Razlog za grupiranje: ________________
+* Karakteristike klase: ________________
+KLASA 3: ________________
+* Uključeni predmeti: ________________
+* Razlog za grupiranje: ________________
+* Karakteristike klase: ________________
+KLASA 4: ________________
+* Uključeni predmeti: ________________
+* Razlog za grupiranje: ________________
+* Karakteristike klase: ________________
+KLASA 5: ________________
+* Uključeni predmeti: ________________
+* Razlog za grupiranje: ________________
+* Karakteristike klase: ________________
+Predmeti koji zahtevaju posebnu pažnju
+Lista predmeta koji mogu da stvaraju probleme u detekciji:
+1. ________________
+
+   * Problem: ________________
+   * Predlog rešenja: ________________
+   2. ________________
+
+      * Problem: ________________
+      * Predlog rešenja: ________________
+      3. ________________
+
+         * Problem: ________________
+         * Predlog rešenja: ________________
+Preporuke za poboljšanje snimanja
+         * Ugao kamere: ________________
+         * Osvetljenje: ________________
+         * Pozicioniranje predmeta: ________________
+         * Ostalo: ________________
+________________
+
+
+FAZA 6: DODATNE NAPOMENE
+Specifičnosti vezane za hranu
+Pošto je ovo prvi put da radimo sa hranom, posebno dokumentujte:
+Faze pripreme hrane:
+         * Sirovi sastojci: Da li su vidljivi na kameri? ________________
+         * Tokom pripreme: Koliko dugo traje? Da li se može pratiti? ________________
+         * Gotov proizvod: Koliko se razlikuje od početka? ________________
+         * Služenje: Da li se menja izgled kada se služi? ________________
+Posebni izazovi sa hranom:
+________________
+         1. ________________
+         2. ________________
+         3. Preporuke za algoritam
+Na osnovu vizuelne analize, dajte preporuke za algoritam:
+Najlakše za detekciju:
+________________
+         * ________________
+         * Najteže za detekciju:
+________________
+         * ________________
+         * Preporučeni pristup:
+________________
+         * Predlozi za buduće poboljšanje
+________________
+         1. ________________
+         2. ________________
+         3. ________________
+
+
+ZAVRŠNE NAPOMENE
+Dodatna zapažanja:
+________________
+________________
+________________
+
+
+Pitanja za tim:
+________________
+________________
+________________
+
+
+Preporuke za sledeći objekat:
+________________
+________________
+________________
+________________
+
+
+[a]Greska pretpostavljam? Ovo je neki laki.
