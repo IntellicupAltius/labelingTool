@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Labeling Tool</title>
+  <link rel="stylesheet" href="/static/styles.css"/>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">Labeling Tool</div>
+
+      <div class="controls">
+        <label class="field">
+          <div class="label">Video</div>
+          <select id="videoSelect"></select>
+        </label>
+
+        <button id="uploadVideoBtn" class="btn" disabled title="Disabled for now. Copy videos into the videos folder.">Upload…</button>
+        <button id="loadVideoBtn" class="btn primary">Load</button>
+
+        <label class="field">
+          <div class="label">Model</div>
+          <select id="modelSelect"></select>
+        </label>
+
+        <button id="exportBtn" class="btn">Export ALL</button>
+      </div>
+
+      <div class="rightControls">
+        <div id="status" class="status">Starting…</div>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="viewer">
+        <div class="transport">
+          <button id="startBtn" class="btn">⟵⟵ Start</button>
+          <button id="playBtn" class="btn primary">Play [P]</button>
+          <button id="backBtn" class="btn">-50</button>
+          <button id="fwdBtn" class="btn">+50</button>
+          <button id="endBtn" class="btn">End ⟶⟶</button>
+
+          <div class="speed">
+            <div class="speedLabel">Speed</div>
+            <input id="speedSlider" type="range" min="1" max="8" step="1" value="4"/>
+            <div id="speedText" class="speedText">x6</div>
+          </div>
+        </div>
+
+        <div class="canvasWrap">
+          <canvas id="canvas" class="canvas"></canvas>
+        </div>
+
+        <div class="hint">
+          Drag to draw a box. Then pick class (type to filter) and press Enter to save.
+        </div>
+      </section>
+
+      <aside class="sidebar">
+        <div class="panel">
+          <div class="panelTitle">Current frame boxes</div>
+          <ul id="currentList" class="list"></ul>
+        </div>
+
+        <div class="panel">
+          <div class="panelTitle">All annotations (click to jump)</div>
+          <ul id="globalList" class="list"></ul>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Modal for label assign -->
+  <div id="modal" class="modal hidden">
+    <div class="modalCard">
+      <div class="modalTitle">Assign label</div>
+
+      <div class="modalRow">
+        <label class="field full">
+          <div class="label">Model</div>
+          <select id="modalModelSelect"></select>
+        </label>
+      </div>
+
+      <div class="modalRow">
+        <label class="field full">
+          <div class="label">Class (type to filter)</div>
+          <input id="classFilter" type="text" placeholder="Start typing…"/>
+        </label>
+      </div>
+
+      <div class="modalRow">
+        <ul id="classList" class="classList"></ul>
+      </div>
+
+      <div class="modalActions">
+        <button id="modalSaveBtn" class="btn primary">Save (Enter)</button>
+        <button id="modalCancelBtn" class="btn">Cancel (Esc)</button>
+      </div>
+
+      <div id="modalError" class="modalError"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+
+

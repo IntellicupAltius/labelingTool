@@ -1,0 +1,6 @@
+{
+  "data_root": "/home/intellicup/LabelingToolData",
+  "models_dir": "/home/intellicup/LabelingToolData/Models",
+  "videos_dir": "/home/intellicup/LabelingToolData/videos",
+  "output_dir": "/home/intellicup/LabelingToolData/output"
+}
