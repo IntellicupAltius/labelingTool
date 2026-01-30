@@ -1,6 +1,5 @@
 {
-  "data_root": "/home/intellicup/LabelingToolData",
-  "models_dir": "/home/intellicup/LabelingToolData/Models",
-  "videos_dir": "/home/intellicup/LabelingToolData/videos",
-  "output_dir": "/home/intellicup/LabelingToolData/output"
+  "data_root": "~/LabelingToolData",
+  "datasets_dir": "~/LabelingToolData/datasets",
+  "bar_counter_options": ["SANK_LEVO", "SANK_DESNO", "SANK_TOCILICA"]
 }

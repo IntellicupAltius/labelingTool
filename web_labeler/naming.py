@@ -89,3 +89,23 @@ def export_base_name(parsed: ParsedVideoName, frame_idx: int) -> str:
     return f"{ts}_{parsed.prefix}_f{(int(frame_idx) + 1):06d}"
 
 
+def output_video_dirname(filename: str, max_len: int = 140) -> str:
+    """
+    Folder name for exports based on the *video name*, but without GUID / trailing (001).
+    Keeps timestamp (so different captures don't collide) and avoids Windows path limits by truncating.
+
+    Examples:
+      blaznavac_sank_desno_{GUID}_20250509155935(001).avi -> BLAZNAVAC_SANK_DESNO_20250509155935
+      BLAZNAVAC_NVR_01_G_SANK_LEVO_{GUID}_20251205090046.mp4 -> BLAZNAVAC_NVR_01_G_SANK_LEVO_20251205090046
+    """
+    p = Path(filename)
+    stem = p.stem
+    stem = _PAREN_RE.sub("", stem)
+    stem = _GUID_RE.sub("", stem)
+    stem = re.sub(r"_+", "_", stem).strip("_")
+    stem = _normalize_tokens(stem)
+    if len(stem) > max_len:
+        stem = stem[:max_len].rstrip("_")
+    return stem or "VIDEO"
+
+

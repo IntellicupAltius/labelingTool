@@ -11,7 +11,12 @@
     <header class="topbar">
       <div class="brand">Labeling Tool</div>
 
-      <div class="controls">
+      <div class="tabs">
+        <button id="tabVideo" class="tabBtn tabActive">Video Labeler</button>
+        <button id="tabDataset" class="tabBtn">Dataset Fixer</button>
+      </div>
+
+      <div id="videoControls" class="controls">
         <label class="field">
           <div class="label">Video</div>
           <select id="videoSelect"></select>
@@ -35,6 +40,21 @@
 
     <main class="main">
       <section class="viewer">
+        <!-- Dataset Fixer controls -->
+        <div id="datasetControls" class="transport hidden">
+          <label class="field" style="min-width: 260px;">
+            <div class="label">Dataset</div>
+            <select id="datasetSelect"></select>
+          </label>
+          <button id="loadDatasetBtn" class="btn primary">Load Dataset</button>
+
+          <button id="prevImgBtn" class="btn">Prev</button>
+          <button id="nextImgBtn" class="btn">Next</button>
+
+          <button id="saveOverwriteBtn" class="btn">Save (overwrite)</button>
+          <button id="saveFixedBtn" class="btn">Save as _fixed</button>
+        </div>
+
         <div class="transport">
           <button id="startBtn" class="btn">⟵⟵ Start</button>
           <button id="playBtn" class="btn primary">Play [P]</button>
@@ -60,12 +80,12 @@
 
       <aside class="sidebar">
         <div class="panel">
-          <div class="panelTitle">Current frame boxes</div>
+          <div id="currentTitle" class="panelTitle">Current frame boxes</div>
           <ul id="currentList" class="list"></ul>
         </div>
 
         <div class="panel">
-          <div class="panelTitle">All annotations (click to jump)</div>
+          <div id="globalTitle" class="panelTitle">All annotations (click to jump)</div>
           <ul id="globalList" class="list"></ul>
         </div>
       </aside>

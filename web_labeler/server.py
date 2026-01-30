@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import logging
+import platform
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -20,16 +21,25 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import cv2  # noqa: E402
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Body
 from fastapi import UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from web_labeler import __version__ as app_version
 from web_labeler.state import Annotation, AppState
-from web_labeler.video_io import VideoReader
+from web_labeler.video_io import VideoReader, clamp
 from web_labeler.yolo import load_yolo_names_from_yaml, yolo_line
-from web_labeler.naming import ParsedVideoName, parse_video_name, export_base_name
+from web_labeler.naming import ParsedVideoName, parse_video_name, export_base_name, output_video_dirname
+from web_labeler.dataset import (
+    DatasetSession,
+    DatasetAnnotation,
+    list_dataset_folders,
+    load_dataset_session,
+    save_dataset_session,
+    ann_to_dict,
+)
 
 
 def ensure_dir(p: Path):
@@ -52,6 +62,7 @@ def video_stem_without_uuid(stem: str) -> str:
 
 class LoadVideoRequest(BaseModel):
     video_name: str = Field(..., description="Filename under videos directory")
+    load_existing_exports: bool = Field(False, description="If true, load annotations from existing exported labels on disk")
 
 
 class AddAnnotationRequest(BaseModel):
@@ -67,6 +78,34 @@ class AddAnnotationRequest(BaseModel):
 class ExportRequest(BaseModel):
     bar_counter: Optional[str] = Field(None, description="Override BAR_COUNTER_INFO (e.g. SANK_LEVO)")
 
+#
+# Dataset Fixer API models (module-level to avoid FastAPI/Pydantic edge cases)
+#
+class DatasetLoadRequest(BaseModel):
+    dataset_name: str
+    model: str
+
+
+class DatasetSaveRequest(BaseModel):
+    strategy: str = Field(..., description="overwrite or create_new")
+
+
+class DatasetAddAnnRequest(BaseModel):
+    image_idx: int
+    class_name: str
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+
+class DatasetUpdateAnnRequest(BaseModel):
+    class_name: Optional[str] = None
+    x1: Optional[int] = None
+    y1: Optional[int] = None
+    x2: Optional[int] = None
+    y2: Optional[int] = None
+
 
 def create_app() -> FastAPI:
     # Directories (configurable via env vars)
@@ -80,11 +119,12 @@ def create_app() -> FastAPI:
     def _load_or_create_config() -> Dict[str, str]:
         default_root = _default_data_root()
         default_cfg = {
-            "data_root": str(default_root),
+            # Use a portable "~" form so config can be copied between Windows/Linux.
+            "data_root": "~/LabelingToolData",
             "models_dir": str(default_root / "Models"),
             "videos_dir": str(default_root / "videos"),
             "output_dir": str(default_root / "output"),
-            "bar_counter_options": ["SANK_LEVO", "SANK_DESNO"],
+            "bar_counter_options": ["SANK_LEVO", "SANK_DESNO", "SANK_TOCILICA"],
         }
         if not config_path.exists():
             config_path.write_text(json.dumps(default_cfg, indent=2), encoding="utf-8")
@@ -93,6 +133,15 @@ def create_app() -> FastAPI:
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
             if not isinstance(cfg, dict):
                 return default_cfg
+
+            # If someone copied a Linux config onto Windows (or vice versa), paths can break.
+            # Detect and ignore clearly non-portable absolute paths on Windows.
+            if platform.system().lower().startswith("win"):
+                for k in ("models_dir", "videos_dir", "output_dir"):
+                    v = cfg.get(k)
+                    if isinstance(v, str) and v.strip().startswith("/"):
+                        cfg[k] = ""
+
             # allow overriding only some keys
             merged = dict(default_cfg)
             for k in ("data_root", "models_dir", "videos_dir", "output_dir"):
@@ -116,6 +165,17 @@ def create_app() -> FastAPI:
         env_key = env_map.get(key)
         if env_key and os.getenv(env_key):
             return Path(os.getenv(env_key)).expanduser().resolve()
+        # If user set data_root, derive other folders from it unless explicitly overridden.
+        if key in ("models_dir", "videos_dir", "output_dir"):
+            dr = cfg.get("data_root")
+            if isinstance(dr, str) and dr.strip():
+                root = Path(dr).expanduser()
+                if key == "models_dir":
+                    fallback = root / "Models"
+                elif key == "videos_dir":
+                    fallback = root / "videos"
+                else:
+                    fallback = root / "output"
         v = cfg.get(key)
         if isinstance(v, str) and v.strip():
             return Path(v).expanduser().resolve()
@@ -125,6 +185,7 @@ def create_app() -> FastAPI:
     models_dir = _resolve_cfg_path("models_dir", base_dir / "Models")
     videos_dir = _resolve_cfg_path("videos_dir", base_dir / "data" / "videos")
     output_dir = _resolve_cfg_path("output_dir", base_dir / "output")
+    datasets_dir = Path(cfg.get("datasets_dir") or (Path(cfg.get("data_root", "~/LabelingToolData")).expanduser() / "datasets")).expanduser().resolve()
 
     debug = os.getenv("LABELER_DEBUG", "").strip() not in ("", "0", "false", "False")
     logging.basicConfig(level=(logging.DEBUG if debug else logging.INFO))
@@ -134,10 +195,12 @@ def create_app() -> FastAPI:
     ensure_dir(videos_dir)
     ensure_dir(output_dir)
     ensure_dir(models_dir)
+    ensure_dir(datasets_dir)
 
     state = AppState(models_dir=models_dir, videos_dir=videos_dir, output_base_dir=output_dir)
     reader = VideoReader()
     video_lock = threading.Lock()
+    dataset_session: Optional[DatasetSession] = None
 
     try:
         # Avoid OpenCV internal thread pools competing with FFmpeg (stability/perf).
@@ -147,6 +210,16 @@ def create_app() -> FastAPI:
 
     static_dir = Path(__file__).resolve().parent / "static"
     app = FastAPI(title="Labeling Tool (Browser)", version="0.1.0")
+
+    @app.middleware("http")
+    async def no_cache_for_static_and_root(request: Request, call_next):
+        resp = await call_next(request)
+        p = request.url.path or ""
+        if p == "/" or p.startswith("/static/"):
+            resp.headers["Cache-Control"] = "no-store, max-age=0"
+            resp.headers["Pragma"] = "no-cache"
+        return resp
+
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     @app.get("/")
@@ -189,14 +262,239 @@ def create_app() -> FastAPI:
         if state.video_path is not None:
             detected = parse_video_name(state.video_path.name, bar_counter_options=bar_counter_options).bar_counter
         return {
+            "app_version": app_version,
             "config_file": str(config_path),
             "models_dir": str(state.models_dir),
             "videos_dir": str(state.videos_dir),
             "output_dir": str(state.output_base_dir),
+            "datasets_dir": str(datasets_dir),
             "models": [{"name": k, "class_count": len(v)} for k, v in sorted(models.items())],
             "videos": videos,
             "bar_counter_options": bar_counter_options,
             "bar_counter_detected": detected,
+        }
+
+    # ---------------- Dataset Fixer API ----------------
+    @app.get("/api/datasets")
+    def datasets_list():
+        return {"datasets_dir": str(datasets_dir), "datasets": list_dataset_folders(datasets_dir)}
+
+    @app.post("/api/datasets/load")
+    def datasets_load(req: DatasetLoadRequest = Body(...)):
+        nonlocal dataset_session
+        refresh_models()
+        names = state.model_to_names.get(req.model)
+        if not names:
+            raise HTTPException(status_code=400, detail="Invalid model")
+        ds_path = (datasets_dir / req.dataset_name).resolve()
+        if ds_path.parent != datasets_dir or not ds_path.exists():
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        dataset_session = load_dataset_session(ds_path, model=req.model, class_names=names)
+        mismatch = (req.model.lower() not in req.dataset_name.lower())
+        return {
+            "dataset_name": req.dataset_name,
+            "dataset_path": str(ds_path),
+            "model": req.model,
+            "image_count": len(dataset_session.img_files),
+            "dataset_name_contains_model": (not mismatch),
+        }
+
+    @app.get("/api/datasets/image")
+    def datasets_image(index: int = Query(..., ge=0)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        if index >= len(dataset_session.img_files):
+            raise HTTPException(status_code=400, detail="Index out of range")
+        img_path = dataset_session.image_path(index)
+        # Let the browser decode; serve bytes directly
+        media = "image/jpeg" if img_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+        return FileResponse(str(img_path), media_type=media, headers={"X-Image-Index": str(index), "X-Image-Name": img_path.name})
+
+    @app.get("/api/datasets/annotations")
+    def datasets_annotations(index: int = Query(..., ge=0)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        anns = dataset_session.ann_by_image.get(int(index), [])
+        return {"image_idx": int(index), "annotations": [ann_to_dict(a) for a in anns]}
+
+    @app.post("/api/datasets/annotations")
+    def datasets_add_annotation(req: DatasetAddAnnRequest = Body(...)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        names = state.model_to_names.get(dataset_session.model, [])
+        if req.class_name not in names:
+            raise HTTPException(status_code=400, detail="Invalid class")
+        class_id = names.index(req.class_name)
+        a = DatasetAnnotation(
+            id=dataset_session.new_id(),
+            image_idx=int(req.image_idx),
+            class_id=class_id,
+            class_name=req.class_name,
+            x1=int(req.x1),
+            y1=int(req.y1),
+            x2=int(req.x2),
+            y2=int(req.y2),
+        )
+        dataset_session.ann_by_image.setdefault(a.image_idx, []).append(a)
+        return {"ok": True, "annotation": ann_to_dict(a)}
+
+    @app.put("/api/datasets/annotations/{ann_id}")
+    def datasets_update_annotation(ann_id: str, req: DatasetUpdateAnnRequest = Body(...)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        names = state.model_to_names.get(dataset_session.model, [])
+        for i, anns in dataset_session.ann_by_image.items():
+            for a in anns:
+                if a.id != ann_id:
+                    continue
+                if req.class_name is not None:
+                    if req.class_name not in names:
+                        raise HTTPException(status_code=400, detail="Invalid class")
+                    a.class_name = req.class_name
+                    a.class_id = names.index(req.class_name)
+                for k in ("x1", "y1", "x2", "y2"):
+                    v = getattr(req, k)
+                    if v is not None:
+                        setattr(a, k, int(v))
+                return {"ok": True, "annotation": ann_to_dict(a)}
+        raise HTTPException(status_code=404, detail="Annotation not found")
+
+    @app.delete("/api/datasets/annotations/{ann_id}")
+    def datasets_delete_annotation(ann_id: str):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        removed = False
+        for i in list(dataset_session.ann_by_image.keys()):
+            anns = dataset_session.ann_by_image.get(i, [])
+            new_anns = [a for a in anns if a.id != ann_id]
+            if len(new_anns) != len(anns):
+                dataset_session.ann_by_image[i] = new_anns
+                removed = True
+        return {"ok": True, "removed": removed}
+
+    @app.post("/api/datasets/save")
+    def datasets_save(req: DatasetSaveRequest = Body(...)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        out_path = save_dataset_session(dataset_session, req.strategy)
+        return {"ok": True, "output_dataset_path": str(out_path)}
+
+    def _output_root_for_video_name(video_name: str) -> Path:
+        """
+        Compute per-video output folder name, keeping it short (Windows path limits).
+        """
+        return state.output_base_dir / sanitize_filename_part(output_video_dirname(video_name))
+
+    def _load_existing_exports_into_state(video_name: str) -> int:
+        """
+        Loads existing exported YOLO labels (per-model folders) back into the in-memory workspace.
+        Expects files:
+          <output>/<VIDEO_NAME>/<MODEL>/labels/<BASE>.txt
+        where <BASE> ends with `_f%06d`.
+        """
+        if state.video_path is None:
+            return 0
+        out_root = _output_root_for_video_name(video_name)
+        if not out_root.exists():
+            return 0
+
+        loaded = 0
+        # clear again just in case
+        state.ann_by_frame.clear()
+        state.last_annotation = None
+
+        for model_root in sorted([p for p in out_root.iterdir() if p.is_dir()]):
+            model = model_root.name
+            labels_dir = model_root / "labels"
+            if not labels_dir.exists():
+                continue
+
+            # class names for this model (if present)
+            names = state.model_to_names.get(model, [])
+
+            for txt_path in sorted(labels_dir.glob("*.txt")):
+                m = re.search(r"_f(\d{6})$", txt_path.stem)
+                if not m:
+                    continue
+                frame_idx = int(m.group(1)) - 1
+                if frame_idx < 0:
+                    continue
+                try:
+                    lines = txt_path.read_text(encoding="utf-8").splitlines()
+                except Exception:
+                    continue
+                for line in lines:
+                    parts = line.strip().split()
+                    if len(parts) != 5:
+                        continue
+                    try:
+                        class_id = int(parts[0])
+                        cx, cy, bw, bh = map(float, parts[1:])
+                    except Exception:
+                        continue
+
+                    # YOLO normalized -> pixel box
+                    img_w = max(1, int(state.img_w))
+                    img_h = max(1, int(state.img_h))
+                    x1 = int((cx - bw / 2.0) * img_w)
+                    y1 = int((cy - bh / 2.0) * img_h)
+                    x2 = int((cx + bw / 2.0) * img_w)
+                    y2 = int((cy + bh / 2.0) * img_h)
+                    x1 = clamp(x1, 0, img_w - 1)
+                    y1 = clamp(y1, 0, img_h - 1)
+                    x2 = clamp(x2, 0, img_w - 1)
+                    y2 = clamp(y2, 0, img_h - 1)
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+
+                    class_name = names[class_id] if 0 <= class_id < len(names) else f"class_{class_id}"
+                    ann = Annotation(
+                        id=state.new_annotation_id(),
+                        frame_idx=frame_idx,
+                        model=model,
+                        class_name=class_name,
+                        class_id=class_id,
+                        x1=x1,
+                        y1=y1,
+                        x2=x2,
+                        y2=y2,
+                    )
+                    state.ann_by_frame.setdefault(frame_idx, []).append(ann)
+                    loaded += 1
+
+        if debug:
+            logger.debug("Loaded %s existing annotations from %s", loaded, out_root)
+        return loaded
+
+    @app.get("/api/video/info")
+    def video_info(video_name: str = Query(...)):
+        """
+        Lightweight info used by the UI to warn if a video already has exported files.
+        """
+        out_root = _output_root_for_video_name(video_name)
+        # New export layout is per-model:
+        #   <out_root>/<model>/images/*.jpg
+        #   <out_root>/<model>/labels/*.txt
+        img_count = 0
+        lbl_count = 0
+        if out_root.exists():
+            for p in out_root.rglob("*"):
+                if not p.is_file():
+                    continue
+                suf = p.suffix.lower()
+                if suf in (".jpg", ".jpeg", ".png") and p.parent.name == "images":
+                    img_count += 1
+                elif suf == ".txt" and p.parent.name == "labels":
+                    lbl_count += 1
+
+        return {
+            "video_name": video_name,
+            "output_root": str(out_root),
+            "images_dir": str(out_root),
+            "labels_dir": str(out_root),
+            "image_files": img_count,
+            "label_files": lbl_count,
+            "has_exports": (img_count > 0 or lbl_count > 0),
         }
 
     @app.post("/api/video/upload")
@@ -266,9 +564,9 @@ def create_app() -> FastAPI:
 
         with video_lock:
             meta = reader.open(p)
-        # Always start clean when a video is loaded (no carryover between videos).
-        state.ann_by_frame.clear()
-        state.last_annotation = None
+            # Always start clean when a video is loaded (no carryover between videos).
+            state.ann_by_frame.clear()
+            state.last_annotation = None
         state.video_path = p
         state.total_frames = meta.total_frames
         state.fps = meta.fps
@@ -277,6 +575,11 @@ def create_app() -> FastAPI:
         if debug:
             logger.debug("Loaded video=%s frames=%s fps=%s size=%sx%s", p.name, state.total_frames, state.fps, state.img_w, state.img_h)
 
+        loaded_existing = 0
+        if req.load_existing_exports:
+            with video_lock:
+                loaded_existing = _load_existing_exports_into_state(p.name)
+
         return {
             "video_name": p.name,
             "total_frames": state.total_frames,
@@ -284,6 +587,7 @@ def create_app() -> FastAPI:
             "width": state.img_w,
             "height": state.img_h,
             "models_loaded": len(state.model_to_names),
+            "loaded_existing": loaded_existing,
         }
 
     @app.get("/api/video/status")
@@ -465,12 +769,12 @@ def create_app() -> FastAPI:
                 detail={"error": "BAR_COUNTER_MISSING", "options": bar_counter_options, "video_name": state.video_path.name},
             )
 
-        # Keep a short folder name to avoid Windows path limits.
-        out_root = state.output_base_dir / sanitize_filename_part(parsed.prefix)
-        images_dir = out_root / "images"
-        labels_dir = out_root / "labels"
-        ensure_dir(images_dir)
-        ensure_dir(labels_dir)
+        # Export root uses VIDEO_NAME (GUID removed), not the shortened prefix.
+        # Layout:
+        #   <output>/<VIDEO_NAME>/<MODEL>/images/<BASE>.jpg
+        #   <output>/<VIDEO_NAME>/<MODEL>/labels/<BASE>.txt
+        out_root = _output_root_for_video_name(state.video_path.name)
+        ensure_dir(out_root)
 
         written_images = 0
         written_label_files = 0
@@ -480,33 +784,50 @@ def create_app() -> FastAPI:
                 frame_idx, frame_bgr = reader.safe_seek_read(f)
             base = export_base_name(parsed, frame_idx)
 
-            img_out = images_dir / f"{base}.jpg"
-            ok = cv2.imwrite(str(img_out), frame_bgr)
-            if ok:
-                written_images += 1
-
-            # per-model label files to preserve your current behavior, but keep only 2 dirs
+            # Group annotations per model
             by_model: Dict[str, List[Annotation]] = {}
             for a in state.ann_by_frame.get(f, []):
                 by_model.setdefault(a.model, []).append(a)
 
             for model, anns in by_model.items():
                 model_part = sanitize_filename_part(model)
-                txt_out = labels_dir / f"{base}__{model_part}.txt"
+                model_root = out_root / model_part
+                images_dir = model_root / "images"
+                labels_dir = model_root / "labels"
+                ensure_dir(images_dir)
+                ensure_dir(labels_dir)
+
+                # Image and label MUST have the same base filename
+                img_out = images_dir / f"{base}.jpg"
+                txt_out = labels_dir / f"{base}.txt"
+
+                ok = cv2.imwrite(str(img_out), frame_bgr)
+                if ok:
+                    written_images += 1
+
                 with open(txt_out, "w", encoding="utf-8") as fp:
                     for a in anns:
                         fp.write(yolo_line(a.class_id, a.x1, a.y1, a.x2, a.y2, state.img_w, state.img_h) + "\n")
                 written_label_files += 1
 
+        # After export: clear workspace (close video + remove annotations), as requested.
+        with video_lock:
+            try:
+                reader.close()
+            except Exception:
+                pass
+            state.reset_video_state()
+
         return JSONResponse(
             {
                 "ok": True,
                 "output_root": str(out_root),
-                "images_dir": str(images_dir),
-                "labels_dir": str(labels_dir),
+                "images_dir": str(out_root),
+                "labels_dir": str(out_root),
                 "written_images": written_images,
                 "written_label_files": written_label_files,
                 "frames_labeled": len(frames),
+                "cleared": True,
             }
         )
 

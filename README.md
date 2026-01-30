@@ -17,7 +17,8 @@ By default, the app stores everything **outside the project** in your home folde
 
 1. Put your YOLO `*.yaml` files in the configured `Models/` folder
 2. Put your videos in the configured `videos/` folder (or use **Upload…** in the browser UI)
-3. Double-click `run_web_labeler.bat`
+3. Install Python 3.10+ from python.org (check **“Add Python to PATH”**)
+4. Double-click `run_web_labeler.bat` (it creates a local `.venv` automatically)
 4. Open the browser at `http://127.0.0.1:8000`
 
 ### Quick start (Linux)
@@ -44,12 +45,13 @@ sudo apt-get install -y python3-pip
 
 Exports go to:
 
-- `output/<video_stem>/images/*.jpg`
-- `output/<video_stem>/labels/*.txt`
+- `output/<VIDEO_PREFIX>/<MODEL>/images/*.jpg`
+- `output/<VIDEO_PREFIX>/<MODEL>/labels/*.txt`
 
-If multiple models are used on the same frame, labels are written as separate files:
+**Important**: For any labeled frame, the image and label always share the same base filename:
 
-- `labels/<base>__<model>.txt`
+- `.../images/<base>.jpg`
+- `.../labels/<base>.txt`
 
 ### Export filename format (important)
 
@@ -66,6 +68,31 @@ Rules:
 - The `{GUID}` part is removed (to avoid Windows path limits).
 - **BAR_COUNTER_INFO** (e.g. `SANK_LEVO` / `SANK_DESNO`) is required.
   - If it’s missing in the video name, Export will ask you to choose one.
+
+## Dataset Fixer (second tab)
+
+Use this when you already have a YOLO dataset and want labelers to **fix** boxes/classes.
+
+### Dataset folder structure
+
+Put datasets into the configured datasets folder (default: `~/LabelingToolData/datasets`):
+
+- `<datasets_dir>/<dataset_name>/images/*`
+- `<datasets_dir>/<dataset_name>/labels/*.txt`
+
+Image and label filenames must match by stem (e.g. `img_001.jpg` ↔ `img_001.txt`).
+
+### Model naming warning (recommended)
+
+It’s recommended that the dataset folder name contains the model name (e.g. `Bottles_run1`), so labelers load the correct model.
+If it doesn’t, the UI warns before loading.
+
+### Saving
+
+From the Dataset Fixer tab:
+
+- **Save (overwrite)**: writes fixed labels into the same dataset folder
+- **Save as _fixed**: writes into `<dataset_name>_fixed/` (copies/hardlinks images + writes labels)
 
 ### Hotkeys
 
@@ -84,5 +111,7 @@ You can change folders via environment variables:
 - `LABELER_PORT` (default `8000`)
 
 Or edit `labeler_config.json` in the project root (created automatically on first run).
+
+**Tip for Windows installs**: `labeler_config.json` uses `~/LabelingToolData` so it works on both Windows and Linux.
 
 

@@ -4,10 +4,23 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # Prefer the currently-active venv interpreter (usually `python`), but allow override.
-PYTHON_BIN="${PYTHON:-python}"
+# Many Linux distros don't ship `python` in PATH anymore, only `python3`.
+PYTHON_BIN="${PYTHON:-}"
+
+if [ -z "${PYTHON_BIN}" ]; then
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  else
+    echo "ERROR: Cannot find python/python3. Activate your venv or set PYTHON=/path/to/python." >&2
+    exit 1
+  fi
+fi
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "ERROR: Cannot find python. Activate your venv first (or set PYTHON=/path/to/python)." >&2
+  echo "ERROR: PYTHON is set to '$PYTHON_BIN' but it's not found in PATH." >&2
+  echo "Set PYTHON to an absolute path, e.g. PYTHON=/path/to/venv/bin/python" >&2
   exit 1
 fi
 
