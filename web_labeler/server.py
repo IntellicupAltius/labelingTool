@@ -117,13 +117,14 @@ def create_app() -> FastAPI:
         return (Path.home() / "LabelingToolData").resolve()
 
     def _load_or_create_config() -> Dict[str, str]:
-        default_root = _default_data_root()
         default_cfg = {
             # Use a portable "~" form so config can be copied between Windows/Linux.
             "data_root": "~/LabelingToolData",
-            "models_dir": str(default_root / "Models"),
-            "videos_dir": str(default_root / "videos"),
-            "output_dir": str(default_root / "output"),
+            # Optional overrides (if empty/missing, derived from data_root)
+            "models_dir": "",
+            "videos_dir": "",
+            "output_dir": "",
+            "datasets_dir": "",
             "bar_counter_options": ["SANK_LEVO", "SANK_DESNO", "SANK_TOCILICA"],
         }
         if not config_path.exists():
@@ -137,14 +138,14 @@ def create_app() -> FastAPI:
             # If someone copied a Linux config onto Windows (or vice versa), paths can break.
             # Detect and ignore clearly non-portable absolute paths on Windows.
             if platform.system().lower().startswith("win"):
-                for k in ("models_dir", "videos_dir", "output_dir"):
+                for k in ("models_dir", "videos_dir", "output_dir", "datasets_dir"):
                     v = cfg.get(k)
                     if isinstance(v, str) and v.strip().startswith("/"):
                         cfg[k] = ""
 
             # allow overriding only some keys
             merged = dict(default_cfg)
-            for k in ("data_root", "models_dir", "videos_dir", "output_dir"):
+            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir"):
                 if isinstance(cfg.get(k), str) and cfg.get(k).strip():
                     merged[k] = cfg[k].strip()
             if isinstance(cfg.get("bar_counter_options"), list) and cfg.get("bar_counter_options"):
@@ -176,6 +177,10 @@ def create_app() -> FastAPI:
                     fallback = root / "videos"
                 else:
                     fallback = root / "output"
+        if key == "datasets_dir":
+            dr = cfg.get("data_root")
+            if isinstance(dr, str) and dr.strip():
+                fallback = Path(dr).expanduser() / "datasets"
         v = cfg.get(key)
         if isinstance(v, str) and v.strip():
             return Path(v).expanduser().resolve()
@@ -185,7 +190,7 @@ def create_app() -> FastAPI:
     models_dir = _resolve_cfg_path("models_dir", base_dir / "Models")
     videos_dir = _resolve_cfg_path("videos_dir", base_dir / "data" / "videos")
     output_dir = _resolve_cfg_path("output_dir", base_dir / "output")
-    datasets_dir = Path(cfg.get("datasets_dir") or (Path(cfg.get("data_root", "~/LabelingToolData")).expanduser() / "datasets")).expanduser().resolve()
+    datasets_dir = _resolve_cfg_path("datasets_dir", Path(_default_data_root() / "datasets"))
 
     debug = os.getenv("LABELER_DEBUG", "").strip() not in ("", "0", "false", "False")
     logging.basicConfig(level=(logging.DEBUG if debug else logging.INFO))
