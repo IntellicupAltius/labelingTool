@@ -20,6 +20,66 @@ const api = {
       return r.json();
     });
   },
+  async getBgConfig() {
+    return fetch(`/api/background_labeler/config`).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((data.detail && (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))) || "Failed to load bg config");
+      return data;
+    });
+  },
+  async bgStart(payload) {
+    return fetch(`/api/background_labeler/start`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    }).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((data.detail && (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))) || "Failed to start bg session");
+      return data;
+    });
+  },
+  async bgGetImage() {
+    // Add a cache buster; some browsers otherwise keep showing the first image.
+    const r = await fetch(`/api/background_labeler/image?ts=${Date.now()}`);
+    if (!r.ok) throw new Error((await r.json()).detail || "Failed to get bg image");
+    const blob = await r.blob();
+    const idx = parseInt(r.headers.get("X-Index") || "0", 10);
+    const name = r.headers.get("X-Name") || "";
+    const decision = r.headers.get("X-Decision") || "skip";
+    return {blob, idx, name, decision};
+  },
+  async bgSetIndex(index) {
+    return fetch(`/api/background_labeler/set_index?index=${encodeURIComponent(index)}`, {method: "POST"}).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((data.detail && (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))) || "Failed to set index");
+      return data;
+    });
+  },
+  async bgDecide(action) {
+    return fetch(`/api/background_labeler/decide`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({action}),
+    }).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((data.detail && (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))) || "Failed to decide");
+      return data;
+    });
+  },
+  async bgStatus() {
+    return fetch(`/api/background_labeler/status`).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((data.detail && (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))) || "Failed to get bg status");
+      return data;
+    });
+  },
+  async bgFinish() {
+    return fetch(`/api/background_labeler/finish`, {method: "POST"}).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((data.detail && (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))) || "Failed to finish");
+      return data;
+    });
+  },
   async listDatasets() {
     return fetch(`/api/datasets`).then(async r => {
       if (!r.ok) throw new Error((await r.json()).detail || "Failed to list datasets");
@@ -101,6 +161,32 @@ const api = {
       return data;
     });
   },
+  async markDatasetBackground(imageIdx) {
+    return fetch(`/api/datasets/background`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({image_idx: imageIdx})
+    }).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const d = data.detail;
+        const msg = (typeof d === "string") ? d : JSON.stringify(d || data);
+        throw new Error(msg || "Failed to mark dataset background");
+      }
+      return data;
+    });
+  },
+  async unmarkDatasetBackground(imageIdx) {
+    return fetch(`/api/datasets/background?image_idx=${encodeURIComponent(imageIdx)}`, {method: "DELETE"}).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const d = data.detail;
+        const msg = (typeof d === "string") ? d : JSON.stringify(d || data);
+        throw new Error(msg || "Failed to unmark dataset background");
+      }
+      return data;
+    });
+  },
   async getClasses(modelName) {
     return fetch(`/api/model/${encodeURIComponent(modelName)}/classes`).then(async r => {
       if (!r.ok) throw new Error((await r.json()).detail || "Failed to load classes");
@@ -142,6 +228,32 @@ const api = {
   },
   async deleteAnnotation(annId) {
     return fetch(`/api/annotations/${encodeURIComponent(annId)}`, {method: "DELETE"}).then(r => r.json());
+  },
+  async markBackground(frameIdx, model) {
+    return fetch(`/api/background`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({frame_idx: frameIdx, model})
+    }).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const d = data.detail;
+        const msg = (typeof d === "string") ? d : JSON.stringify(d || data);
+        throw new Error(msg || "Failed to mark background");
+      }
+      return data;
+    });
+  },
+  async unmarkBackground(frameIdx, model) {
+    return fetch(`/api/background?frame_idx=${encodeURIComponent(frameIdx)}&model=${encodeURIComponent(model)}`, {method: "DELETE"}).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const d = data.detail;
+        const msg = (typeof d === "string") ? d : JSON.stringify(d || data);
+        throw new Error(msg || "Failed to unmark background");
+      }
+      return data;
+    });
   },
   async exportAll() {
     return fetch(`/api/export`, {method: "POST"}).then(async r => {
@@ -237,6 +349,16 @@ const state = {
   datasetImageIdx: 0,
   datasetImageName: "",
 
+  // background labeler
+  bgLoaded: false,
+  bgDataset: null,
+  bgModel: null,
+  bgTotal: 0,
+  bgIdx: 0,
+  bgSelected: 0,
+  bgSkipped: 0,
+  bgOutRoot: "",
+
   // drawing
   dragging: false,
   dragStart: null,
@@ -280,6 +402,15 @@ function resetWorkspaceUI(message) {
   state.datasetImageIdx = 0;
   state.datasetImageName = "";
 
+  state.bgLoaded = false;
+  state.bgDataset = null;
+  state.bgModel = null;
+  state.bgTotal = 0;
+  state.bgIdx = 0;
+  state.bgSelected = 0;
+  state.bgSkipped = 0;
+  state.bgOutRoot = "";
+
   state.dragging = false;
   state.dragStart = null;
   state.dragRect = null;
@@ -306,20 +437,32 @@ function resetWorkspaceUI(message) {
 function setMode(mode) {
   state.mode = mode;
   const isVideo = (mode === "video");
+  const isDataset = (mode === "dataset");
+  const isBg = (mode === "bg");
 
   $("tabVideo").classList.toggle("tabActive", isVideo);
-  $("tabDataset").classList.toggle("tabActive", !isVideo);
+  $("tabDataset").classList.toggle("tabActive", isDataset);
+  $("tabBg").classList.toggle("tabActive", isBg);
 
   // Header controls
   $("videoControls").classList.toggle("hidden", !isVideo);
 
   // Viewer controls
-  $("datasetControls").classList.toggle("hidden", isVideo);
+  $("datasetControls").classList.toggle("hidden", !isDataset);
+  $("bgControls").classList.toggle("hidden", !isBg);
   $("startBtn").closest(".transport").classList.toggle("hidden", !isVideo);
 
   // Sidebar titles + global list
-  $("currentTitle").textContent = isVideo ? "Current frame boxes" : "Current image boxes";
-  $("globalTitle").textContent = isVideo ? "All annotations (click to jump)" : "All annotations";
+  if (isVideo) {
+    $("currentTitle").textContent = "Current frame boxes";
+    $("globalTitle").textContent = "All annotations (click to jump)";
+  } else if (isDataset) {
+    $("currentTitle").textContent = "Current image boxes";
+    $("globalTitle").textContent = "All annotations";
+  } else {
+    $("currentTitle").textContent = "Background Labeler";
+    $("globalTitle").textContent = "All annotations";
+  }
   $("globalList").classList.toggle("hidden", !isVideo);
   if (!isVideo) {
     $("globalList").innerHTML = "";
@@ -387,8 +530,10 @@ function imageToCanvas(ix, iy) {
 function draw() {
   if (state.mode === "video") {
     if (!state.videoLoaded) return;
-  } else {
+  } else if (state.mode === "dataset") {
     if (!state.datasetLoaded) return;
+  } else {
+    if (!state.bgLoaded) return;
   }
 
   canvasSizeToDisplaySize(state.canvas);
@@ -438,6 +583,36 @@ async function refreshLists() {
     // current image list
     const ul = $("currentList");
     ul.innerHTML = "";
+
+    // Background marker entry (dataset)
+    if (state.frameAnnotations.length === 0) {
+      const liBg = document.createElement("li");
+      liBg.className = "item";
+      const mainBg = document.createElement("div");
+      mainBg.className = "itemMain";
+      const titleBg = document.createElement("div");
+      titleBg.className = "itemTitle";
+      titleBg.textContent = `BACKGROUND (${state.datasetModel || ""})`;
+      const subBg = document.createElement("div");
+      subBg.className = "itemSub";
+      subBg.textContent = "Empty label file will be saved";
+      mainBg.appendChild(titleBg); mainBg.appendChild(subBg);
+      const btnsBg = document.createElement("div");
+      btnsBg.className = "itemBtns";
+      const setBg = document.createElement("button");
+      setBg.className = "btn";
+      setBg.textContent = "Mark";
+      setBg.onclick = async (e) => {
+        e.stopPropagation();
+        await api.markDatasetBackground(state.datasetImageIdx);
+        await refreshLists();
+      };
+      btnsBg.appendChild(setBg);
+      liBg.appendChild(mainBg);
+      liBg.appendChild(btnsBg);
+      ul.appendChild(liBg);
+    }
+
     for (const a of state.frameAnnotations) {
       const li = document.createElement("li");
       li.className = "item";
@@ -476,12 +651,43 @@ async function refreshLists() {
   if (!state.videoLoaded) return;
   const frameData = await api.getFrameAnnotations(state.frameIdx);
   state.frameAnnotations = frameData.annotations || [];
+  const backgroundModels = frameData.background_models || [];
   const allData = await api.getAllAnnotations();
   state.allAnnotations = allData.annotations || [];
 
   // current frame
   const ul = $("currentList");
   ul.innerHTML = "";
+
+  // Background marker entries (video)
+  for (const m of backgroundModels) {
+    const liBg = document.createElement("li");
+    liBg.className = "item";
+    const mainBg = document.createElement("div");
+    mainBg.className = "itemMain";
+    const titleBg = document.createElement("div");
+    titleBg.className = "itemTitle";
+    titleBg.textContent = `BACKGROUND (${m})`;
+    const subBg = document.createElement("div");
+    subBg.className = "itemSub";
+    subBg.textContent = "Empty label file will be exported";
+    mainBg.appendChild(titleBg); mainBg.appendChild(subBg);
+    const btnsBg = document.createElement("div");
+    btnsBg.className = "itemBtns";
+    const delBg = document.createElement("button");
+    delBg.className = "btn danger";
+    delBg.textContent = "Delete";
+    delBg.onclick = async (e) => {
+      e.stopPropagation();
+      await api.unmarkBackground(state.frameIdx, m);
+      await refreshLists();
+    };
+    btnsBg.appendChild(delBg);
+    liBg.appendChild(mainBg);
+    liBg.appendChild(btnsBg);
+    ul.appendChild(liBg);
+  }
+
   for (const a of state.frameAnnotations) {
     const li = document.createElement("li");
     li.className = "item";
@@ -526,10 +732,16 @@ async function refreshLists() {
     main.className = "itemMain";
     const title = document.createElement("div");
     title.className = "itemTitle";
-    title.textContent = `f${String(a.frame_idx).padStart(6, "0")}  ${a.model}/${a.class_name}`;
+    if (a.kind === "background" || a.class_name === "BACKGROUND") {
+      title.textContent = `f${String(a.frame_idx).padStart(6, "0")}  BACKGROUND (${a.model})`;
+    } else {
+      title.textContent = `f${String(a.frame_idx).padStart(6, "0")}  ${a.model}/${a.class_name}`;
+    }
     const sub = document.createElement("div");
     sub.className = "itemSub";
-    sub.textContent = `[${a.x1},${a.y1}] → [${a.x2},${a.y2}]`;
+    sub.textContent = (a.kind === "background" || a.class_name === "BACKGROUND")
+      ? "empty label file"
+      : `[${a.x1},${a.y1}] → [${a.x2},${a.y2}]`;
     main.appendChild(title); main.appendChild(sub);
 
     const btns = document.createElement("div");
@@ -542,7 +754,11 @@ async function refreshLists() {
     del.textContent = "Delete";
     del.onclick = async (e) => {
       e.stopPropagation();
-      await api.deleteAnnotation(a.id);
+      if (a.kind === "background" || a.class_name === "BACKGROUND") {
+        await api.unmarkBackground(a.frame_idx, a.model);
+      } else {
+        await api.deleteAnnotation(a.id);
+      }
       state.dirty = true;
       await refreshLists();
       draw();
@@ -703,6 +919,7 @@ function openModalForRect(rect) {
   state.modalSelectedClass = null;
   $("modalError").textContent = "";
   $("classFilter").value = "";
+  $("backgroundCheck").checked = false;
   $("modal").classList.remove("hidden");
   $("classFilter").focus();
 
@@ -776,30 +993,48 @@ function renderClassList() {
 async function onModalSave() {
   const model = $("modalModelSelect").value;
   const cls = state.modalSelectedClass;
+  const asBackground = $("backgroundCheck").checked;
   if (!model) {
     $("modalError").textContent = "Pick a model.";
     return;
   }
-  if (!cls) {
+  if (!asBackground && !cls) {
     $("modalError").textContent = "Pick a class.";
     return;
   }
   const r = state.modalRect;
   try {
     if (state.mode === "dataset") {
-      await api.addDatasetAnnotation({
-        image_idx: state.datasetImageIdx,
-        class_name: cls,
-        x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2
-      });
+      if (asBackground) {
+        if ((state.frameAnnotations || []).length > 0) {
+          $("modalError").textContent = "Please remove all annotations from current image to select it as background.";
+          return;
+        }
+        await api.markDatasetBackground(state.datasetImageIdx);
+      } else {
+        await api.addDatasetAnnotation({
+          image_idx: state.datasetImageIdx,
+          class_name: cls,
+          x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2
+        });
+      }
     } else {
-      await api.addAnnotation({
-        frame_idx: state.frameIdx,
-        model,
-        class_name: cls,
-        x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2
-      });
-      state.dirty = true;
+      if (asBackground) {
+        if ((state.frameAnnotations || []).length > 0) {
+          $("modalError").textContent = "Please remove all annotations from current frame to select it as background.";
+          return;
+        }
+        await api.markBackground(state.frameIdx, model);
+        state.dirty = true;
+      } else {
+        await api.addAnnotation({
+          frame_idx: state.frameIdx,
+          model,
+          class_name: cls,
+          x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2
+        });
+        state.dirty = true;
+      }
     }
     closeModal();
     await refreshLists();
@@ -881,6 +1116,14 @@ function installHotkeys() {
     if (state.mode === "dataset") {
       if (e.key === "ArrowLeft") { e.preventDefault(); await renderDatasetImage(state.datasetImageIdx - 1); }
       if (e.key === "ArrowRight") { e.preventDefault(); await renderDatasetImage(state.datasetImageIdx + 1); }
+      return;
+    }
+
+    if (state.mode === "bg") {
+      if (e.key === "b" || e.key === "B") { e.preventDefault(); await window.__bgBackground?.(); }
+      if (e.key === "s" || e.key === "S") { e.preventDefault(); await window.__bgSkip?.(); }
+      if (e.key === "ArrowLeft") { e.preventDefault(); await window.__bgPrev?.(); }
+      if (e.key === "ArrowRight") { e.preventDefault(); await window.__bgNext?.(); }
       return;
     }
 
@@ -1009,6 +1252,144 @@ async function init() {
     }
   };
 
+  // ---- Background Labeler ----
+  $("tabBg").onclick = async () => {
+    if (state.dirty) {
+      const ok = window.confirm("You have un-exported video annotations. Switch and lose them?");
+      if (!ok) return;
+    }
+    resetWorkspaceUI("Background Labeler");
+    setMode("bg");
+    try {
+      const cfgBg = await api.getBgConfig();
+      const dsSel = $("bgDatasetSelect");
+      dsSel.innerHTML = "";
+      for (const name of (cfgBg.datasets || [])) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        dsSel.appendChild(opt);
+      }
+      const mSel = $("bgModelSelect");
+      mSel.innerHTML = "";
+      for (const name of (cfgBg.models || [])) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        mSel.appendChild(opt);
+      }
+      const cSel = $("bgCameraSelect");
+      cSel.innerHTML = "";
+      for (const name of (cfgBg.camera_filters || ["ALL"])) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        cSel.appendChild(opt);
+      }
+      setStatus(`Background Labeler. Datasets: ${cfgBg.datasets_dir}`);
+    } catch (e) {
+      setStatus(`BG config failed: ${e.message || e}`);
+    }
+  };
+
+  async function bgRenderCurrent() {
+    const mySeq = ++state.navSeq;
+    const {blob, idx, name, decision} = await api.bgGetImage();
+    if (mySeq !== state.navSeq) return;
+    state.bgIdx = idx;
+    state.bgLoaded = true;
+
+    const url = URL.createObjectURL(blob);
+    await new Promise((resolve, reject) => {
+      state.img.onload = () => resolve();
+      state.img.onerror = reject;
+      state.img.src = url;
+    });
+    URL.revokeObjectURL(url);
+    if (mySeq !== state.navSeq) return;
+
+    state.imgW = state.img.naturalWidth || state.imgW;
+    state.imgH = state.img.naturalHeight || state.imgH;
+    state.frameAnnotations = [];
+    $("currentList").innerHTML = "";
+    // UI: highlight current decision (default skip)
+    $("bgBtn").classList.toggle("active", decision === "background");
+    $("skipBtn").classList.toggle("active", decision !== "background");
+    draw();
+    setStatus(`BG ${state.bgDataset} | ${state.bgIdx + 1}/${state.bgTotal} | selected=${state.bgSelected} skipped=${state.bgSkipped} | ${name}`);
+  }
+
+  async function bgDecide(action) {
+    if (!state.bgLoaded) return;
+    const res = await api.bgDecide(action);
+    state.bgSelected = res.selected || state.bgSelected;
+    state.bgSkipped = res.skipped || state.bgSkipped;
+    if (res.done) {
+      setStatus(`Done. Output: ${state.bgOutRoot}`);
+      return;
+    }
+    await bgRenderCurrent();
+  }
+
+  window.__bgBackground = async () => {
+    try { await bgDecide("background"); } catch (e) { setStatus(`BG error: ${e.message || e}`); }
+  };
+  window.__bgSkip = async () => {
+    try { await bgDecide("skip"); } catch (e) { setStatus(`BG error: ${e.message || e}`); }
+  };
+
+  $("bgStartBtn").onclick = async () => {
+    const ds = $("bgDatasetSelect").value;
+    const model = $("bgModelSelect").value;
+    const cam = $("bgCameraSelect").value || "ALL";
+    const shuffled = $("bgShuffleSelect").value === "1";
+    if (!ds || !model) {
+      window.alert("Pick dataset and target model.");
+      return;
+    }
+    try {
+      resetWorkspaceUI("Starting background session…");
+      setMode("bg");
+      const res = await api.bgStart({dataset_name: ds, target_model: model, camera_filter: cam, shuffled});
+      state.bgLoaded = true;
+      state.bgDataset = ds;
+      state.bgModel = model;
+      state.bgTotal = res.total || 0;
+      state.bgSelected = 0;
+      state.bgSkipped = 0;
+      state.bgOutRoot = res.out_root || "";
+      await bgRenderCurrent();
+    } catch (e) {
+      setStatus(`BG start failed: ${e.message || e}`);
+      window.alert(`BG start failed: ${e.message || e}`);
+    }
+  };
+  $("bgBtn").onclick = async () => { await window.__bgBackground(); };
+  $("skipBtn").onclick = async () => { await window.__bgSkip(); };
+  $("bgPrevBtn").onclick = async () => {
+    if (!state.bgLoaded) return;
+    await api.bgSetIndex(Math.max(0, state.bgIdx - 1));
+    await bgRenderCurrent();
+  };
+  $("bgNextBtn").onclick = async () => {
+    if (!state.bgLoaded) return;
+    await api.bgSetIndex(Math.min(state.bgTotal - 1, state.bgIdx + 1));
+    await bgRenderCurrent();
+  };
+
+  window.__bgPrev = async () => { await $("bgPrevBtn").onclick(); };
+  window.__bgNext = async () => { await $("bgNextBtn").onclick(); };
+  $("bgFinishBtn").onclick = async () => {
+    try {
+      const res = await api.bgFinish();
+      resetWorkspaceUI("Background session finished.");
+      setMode("bg");
+      if (res.out_root) window.alert(`Background session finished.\n\nOutput:\n${res.out_root}`);
+    } catch (e) {
+      window.alert(`Finish failed: ${e.message || e}`);
+    }
+  };
+
   $("loadDatasetBtn").onclick = async () => {
     const dsName = $("datasetSelect").value;
     if (!dsName) {
@@ -1073,6 +1454,10 @@ async function init() {
     try {
       const res = await api.saveDataset("overwrite");
       window.alert(`Saved (overwrite).\n\n${res.output_dataset_path}`);
+      if (res.cleared) {
+        resetWorkspaceUI("Dataset saved. Dataset unloaded.");
+        setMode("dataset");
+      }
     } catch (e) {
       window.alert(`Save failed: ${e.message || e}`);
     }
@@ -1082,6 +1467,10 @@ async function init() {
     try {
       const res = await api.saveDataset("create_new");
       window.alert(`Saved as _fixed.\n\n${res.output_dataset_path}`);
+      if (res.cleared) {
+        resetWorkspaceUI("Dataset saved. Dataset unloaded.");
+        setMode("dataset");
+      }
     } catch (e) {
       window.alert(`Save failed: ${e.message || e}`);
     }

@@ -36,6 +36,7 @@ class DatasetSession:
     img_files: List[Path] = field(default_factory=list)  # absolute paths
     img_sizes: Dict[int, Tuple[int, int]] = field(default_factory=dict)  # idx -> (w,h)
     ann_by_image: Dict[int, List[DatasetAnnotation]] = field(default_factory=dict)
+    background_images: set[int] = field(default_factory=set)
 
     def new_id(self) -> str:
         return uuid.uuid4().hex

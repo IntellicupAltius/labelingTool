@@ -38,6 +38,8 @@ class AppState:
     # Annotations
     ann_by_frame: Dict[int, List[Annotation]] = field(default_factory=dict)
     last_annotation: Optional[Tuple[str, str]] = None  # (model, class_name)
+    # Background markers: frame_idx -> set(models)
+    background_by_frame: Dict[int, set[str]] = field(default_factory=dict)
 
     # Where we save work/export
     output_base_dir: Path = field(default_factory=lambda: Path.cwd() / "output")
@@ -50,6 +52,7 @@ class AppState:
         self.img_h = 0
         self.ann_by_frame.clear()
         self.last_annotation = None
+        self.background_by_frame.clear()
 
     def new_annotation_id(self) -> str:
         return uuid.uuid4().hex

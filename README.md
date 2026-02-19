@@ -94,6 +94,30 @@ From the Dataset Fixer tab:
 - **Save (overwrite)**: writes fixed labels into the same dataset folder
 - **Save as _fixed**: writes into `<dataset_name>_fixed/` (copies/hardlinks images + writes labels)
 
+## Background Labeler (third tab)
+
+This module is for generating **high-quality negative/background samples fast** (no boxes).
+
+### Flow
+
+1. Select source dataset (`<dataset>/images`)
+2. Select target model (the model you’re generating negatives for)
+3. Optional: camera filter (e.g. `SANK_DESNO`)
+4. Rapid decisions:
+   - **B** = background
+   - **S** = skip / contains target object
+
+### Output structure
+
+Only images marked as background are copied to:
+
+`<datasets_dir>/<dataset_name>_background/<model_name>/`
+
+- `images/` (copied/hardlinked)
+- `labels/` (empty `.txt` files with the same stem as the image)
+
+Nothing overwrites your original dataset.
+
 ### Hotkeys
 
 - `P`: play/pause

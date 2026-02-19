@@ -82,6 +82,10 @@ select:focus, input[type="text"]:focus { border-color: rgba(45, 212, 191, 0.6); 
 .btn.primary { background: linear-gradient(180deg, rgba(45,212,191,0.25), rgba(45,212,191,0.08)); border-color: rgba(45,212,191,0.45); }
 .btn.danger { background: rgba(251, 113, 133, 0.1); border-color: rgba(251, 113, 133, 0.45); }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn.active {
+  border-color: rgba(96, 165, 250, 0.65);
+  background: rgba(96, 165, 250, 0.14);
+}
 
 /* (upload input removed/disabled for now) */
 

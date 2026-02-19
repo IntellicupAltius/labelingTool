@@ -40,6 +40,13 @@ from web_labeler.dataset import (
     save_dataset_session,
     ann_to_dict,
 )
+from web_labeler.background_labeler import (
+    BgSession,
+    start_session as bg_start_session,
+    copy_background_image,
+    remove_background_image,
+    sanitize_part,
+)
 
 
 def ensure_dir(p: Path):
@@ -75,6 +82,11 @@ class AddAnnotationRequest(BaseModel):
     y2: int
 
 
+class MarkBackgroundRequest(BaseModel):
+    frame_idx: int
+    model: str
+
+
 class ExportRequest(BaseModel):
     bar_counter: Optional[str] = Field(None, description="Override BAR_COUNTER_INFO (e.g. SANK_LEVO)")
 
@@ -105,6 +117,23 @@ class DatasetUpdateAnnRequest(BaseModel):
     y1: Optional[int] = None
     x2: Optional[int] = None
     y2: Optional[int] = None
+
+
+class DatasetMarkBackgroundRequest(BaseModel):
+    image_idx: int
+
+
+class BgStartRequest(BaseModel):
+    dataset_name: str
+    target_model: str
+    camera_filter: str = "ALL"  # e.g. SANK_DESNO
+    shuffled: bool = True
+    seed: int = 1337
+
+
+class BgDecisionRequest(BaseModel):
+    action: str  # "background" | "skip"
+
 
 
 def create_app() -> FastAPI:
@@ -206,6 +235,7 @@ def create_app() -> FastAPI:
     reader = VideoReader()
     video_lock = threading.Lock()
     dataset_session: Optional[DatasetSession] = None
+    bg_session: Optional[BgSession] = None
 
     try:
         # Avoid OpenCV internal thread pools competing with FFmpeg (stability/perf).
@@ -284,6 +314,135 @@ def create_app() -> FastAPI:
     def datasets_list():
         return {"datasets_dir": str(datasets_dir), "datasets": list_dataset_folders(datasets_dir)}
 
+    # ---------------- Background Labeler API ----------------
+    @app.get("/api/background_labeler/config")
+    def bg_config():
+        refresh_models()
+        models = sorted(list(state.model_to_names.keys()))
+        # camera filters from bar counter options + ALL
+        bar_counter_options = cfg.get("bar_counter_options") or ["SANK_LEVO", "SANK_DESNO", "SANK_TOCILICA"]
+        camera_filters = ["ALL"] + [str(x) for x in bar_counter_options]
+        return {
+            "datasets_dir": str(datasets_dir),
+            "datasets": list_dataset_folders(datasets_dir),
+            "models": models,
+            "camera_filters": camera_filters,
+        }
+
+    @app.post("/api/background_labeler/start")
+    def bg_start(req: BgStartRequest = Body(...)):
+        nonlocal bg_session
+        refresh_models()
+        if req.target_model not in state.model_to_names:
+            raise HTTPException(status_code=400, detail="Invalid model")
+        try:
+            bg_session = bg_start_session(
+                datasets_dir=datasets_dir,
+                dataset_name=req.dataset_name,
+                target_model=req.target_model,
+                camera_filter=req.camera_filter,
+                shuffled=bool(req.shuffled),
+                seed=int(req.seed),
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {
+            "session_id": bg_session.id,
+            "dataset_name": bg_session.dataset_name,
+            "target_model": bg_session.target_model,
+            "total": len(bg_session.img_files),
+            "out_root": str(bg_session.out_root),
+        }
+
+    @app.get("/api/background_labeler/status")
+    def bg_status():
+        if bg_session is None:
+            return {"loaded": False}
+        return {
+            "loaded": True,
+            "session_id": bg_session.id,
+            "dataset_name": bg_session.dataset_name,
+            "target_model": bg_session.target_model,
+            "idx": bg_session.idx,
+            "total": len(bg_session.img_files),
+            "selected": len(bg_session.selected),
+            "skipped": len(bg_session.skipped),
+            "out_root": str(bg_session.out_root),
+            "done": bg_session.done(),
+        }
+
+    @app.get("/api/background_labeler/image")
+    def bg_image():
+        if bg_session is None:
+            raise HTTPException(status_code=400, detail="No background session loaded")
+        p = bg_session.current_path()
+        if p is None:
+            raise HTTPException(status_code=400, detail="No more images")
+        media = "image/jpeg" if p.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+        decision = "background" if bg_session.idx in bg_session.selected else "skip"
+        return FileResponse(
+            str(p),
+            media_type=media,
+            headers={
+                "X-Index": str(bg_session.idx),
+                "X-Name": p.name,
+                "X-Decision": decision,
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
+
+    @app.post("/api/background_labeler/set_index")
+    def bg_set_index(index: int = Query(..., ge=0)):
+        if bg_session is None:
+            raise HTTPException(status_code=400, detail="No background session loaded")
+        bg_session.idx = max(0, min(int(index), len(bg_session.img_files)))
+        return {"ok": True, "idx": bg_session.idx, "total": len(bg_session.img_files)}
+
+    @app.post("/api/background_labeler/decide")
+    def bg_decide(req: BgDecisionRequest = Body(...)):
+        if bg_session is None:
+            raise HTTPException(status_code=400, detail="No background session loaded")
+        if bg_session.done():
+            return {"ok": True, "done": True}
+        action = (req.action or "").lower().strip()
+        cur_idx = bg_session.idx
+        p = bg_session.current_path()
+        if p is None:
+            return {"ok": True, "done": True}
+
+        if action == "background":
+            # copy immediately for speed
+            copy_background_image(bg_session, p)
+            bg_session.selected.add(cur_idx)
+            bg_session.skipped.discard(cur_idx)
+        elif action == "skip":
+            # if previously selected, remove file outputs
+            if cur_idx in bg_session.selected:
+                remove_background_image(bg_session, p)
+                bg_session.selected.discard(cur_idx)
+            bg_session.skipped.add(cur_idx)
+        else:
+            raise HTTPException(status_code=400, detail="Invalid action")
+
+        bg_session.idx += 1
+        return {"ok": True, "idx": bg_session.idx, "done": bg_session.done(), "selected": len(bg_session.selected), "skipped": len(bg_session.skipped)}
+
+    @app.post("/api/background_labeler/finish")
+    def bg_finish():
+        nonlocal bg_session
+        if bg_session is None:
+            return {"ok": True, "cleared": True}
+        if len(bg_session.selected) == 0:
+            # Do not clear; allow user to continue selecting backgrounds.
+            raise HTTPException(
+                status_code=400,
+                detail="No images marked as BACKGROUND. Select at least 1 background (B) before finishing.",
+            )
+        out_root = str(bg_session.out_root)
+        bg_session = None
+        return {"ok": True, "cleared": True, "out_root": out_root}
+
     @app.post("/api/datasets/load")
     def datasets_load(req: DatasetLoadRequest = Body(...)):
         nonlocal dataset_session
@@ -326,13 +485,20 @@ def create_app() -> FastAPI:
     def datasets_add_annotation(req: DatasetAddAnnRequest = Body(...)):
         if dataset_session is None:
             raise HTTPException(status_code=400, detail="No dataset loaded")
+        idx = int(req.image_idx)
+        # Background and boxes are mutually exclusive.
+        if idx in dataset_session.background_images:
+            raise HTTPException(
+                status_code=400,
+                detail="This image is marked as BACKGROUND. Remove background mark before adding any annotations.",
+            )
         names = state.model_to_names.get(dataset_session.model, [])
         if req.class_name not in names:
             raise HTTPException(status_code=400, detail="Invalid class")
         class_id = names.index(req.class_name)
         a = DatasetAnnotation(
             id=dataset_session.new_id(),
-            image_idx=int(req.image_idx),
+            image_idx=idx,
             class_id=class_id,
             class_name=req.class_name,
             x1=int(req.x1),
@@ -379,10 +545,31 @@ def create_app() -> FastAPI:
 
     @app.post("/api/datasets/save")
     def datasets_save(req: DatasetSaveRequest = Body(...)):
+        nonlocal dataset_session
         if dataset_session is None:
             raise HTTPException(status_code=400, detail="No dataset loaded")
         out_path = save_dataset_session(dataset_session, req.strategy)
-        return {"ok": True, "output_dataset_path": str(out_path)}
+        dataset_session = None
+        return {"ok": True, "output_dataset_path": str(out_path), "cleared": True}
+
+    @app.post("/api/datasets/background")
+    def datasets_mark_background(req: DatasetMarkBackgroundRequest = Body(...)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        idx = int(req.image_idx)
+        if dataset_session.ann_by_image.get(idx):
+            raise HTTPException(status_code=400, detail="Please remove all annotations from current image to select it as background.")
+        dataset_session.background_images.add(idx)
+        return {"ok": True}
+
+    @app.delete("/api/datasets/background")
+    def datasets_unmark_background(image_idx: int = Query(...)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        idx = int(image_idx)
+        removed = idx in dataset_session.background_images
+        dataset_session.background_images.discard(idx)
+        return {"ok": True, "removed": removed}
 
     def _output_root_for_video_name(video_name: str) -> Path:
         """
@@ -694,13 +881,33 @@ def create_app() -> FastAPI:
         if frame is None:
             # global list for sidebar
             items = []
-            for f in sorted(state.ann_by_frame.keys()):
-                for a in state.ann_by_frame[f]:
-                    items.append(asdict(a))
+            frames = set(state.ann_by_frame.keys())
+            frames.update(state.background_by_frame.keys())
+            for f in sorted(frames):
+                for a in state.ann_by_frame.get(f, []):
+                    d = asdict(a)
+                    d["kind"] = "box"
+                    items.append(d)
+                for m in sorted(list(state.background_by_frame.get(f, set()))):
+                    items.append(
+                        {
+                            "id": f"bg:{f}:{m}",
+                            "kind": "background",
+                            "frame_idx": int(f),
+                            "model": str(m),
+                            "class_name": "BACKGROUND",
+                            "class_id": -1,
+                            "x1": 0,
+                            "y1": 0,
+                            "x2": 0,
+                            "y2": 0,
+                        }
+                    )
             return {"annotations": items}
 
         anns = state.ann_by_frame.get(int(frame), [])
-        return {"frame_idx": int(frame), "annotations": [asdict(a) for a in anns]}
+        bgs = sorted(list(state.background_by_frame.get(int(frame), set())))
+        return {"frame_idx": int(frame), "annotations": [asdict(a) for a in anns], "background_models": bgs}
 
     @app.post("/api/annotations")
     def add_annotation(req: AddAnnotationRequest):
@@ -714,10 +921,18 @@ def create_app() -> FastAPI:
         if req.class_name not in names:
             raise HTTPException(status_code=400, detail="Invalid class")
 
+        frame_idx = int(req.frame_idx)
+        # Background and boxes are mutually exclusive.
+        if state.background_by_frame.get(frame_idx):
+            raise HTTPException(
+                status_code=400,
+                detail="This frame is marked as BACKGROUND. Remove background mark before adding any annotations.",
+            )
+
         class_id = names.index(req.class_name)
         ann = Annotation(
             id=state.new_annotation_id(),
-            frame_idx=int(req.frame_idx),
+            frame_idx=frame_idx,
             model=req.model,
             class_name=req.class_name,
             class_id=int(class_id),
@@ -729,6 +944,35 @@ def create_app() -> FastAPI:
         state.ann_by_frame.setdefault(ann.frame_idx, []).append(ann)
         state.last_annotation = (req.model, req.class_name)
         return {"ok": True, "annotation": asdict(ann)}
+
+    @app.post("/api/background")
+    def mark_background(req: MarkBackgroundRequest = Body(...)):
+        """
+        Mark a frame as background for a model.
+        Export will write the frame image and an EMPTY label file for that model.
+        """
+        if state.video_path is None:
+            raise HTTPException(status_code=400, detail="No video loaded")
+        refresh_models()
+        if req.model not in state.model_to_names:
+            raise HTTPException(status_code=400, detail="Invalid model")
+        frame_idx = int(req.frame_idx)
+        if state.ann_by_frame.get(frame_idx):
+            raise HTTPException(status_code=400, detail="Please remove all annotations from current frame to select it as background.")
+        state.background_by_frame.setdefault(frame_idx, set()).add(req.model)
+        return {"ok": True}
+
+    @app.delete("/api/background")
+    def unmark_background(frame_idx: int = Query(...), model: str = Query(...)):
+        s = state.background_by_frame.get(int(frame_idx))
+        if not s:
+            return {"ok": True, "removed": False}
+        if model in s:
+            s.remove(model)
+            if not s:
+                state.background_by_frame.pop(int(frame_idx), None)
+            return {"ok": True, "removed": True}
+        return {"ok": True, "removed": False}
 
     @app.delete("/api/annotations/{ann_id}")
     def delete_annotation(ann_id: str):
@@ -751,8 +995,9 @@ def create_app() -> FastAPI:
         if state.video_path is None or reader.meta is None:
             raise HTTPException(status_code=400, detail="No video loaded")
 
-        frames = [f for f, anns in state.ann_by_frame.items() if anns]
-        frames.sort()
+        frames = set(f for f, anns in state.ann_by_frame.items() if anns)
+        frames.update(state.background_by_frame.keys())
+        frames = sorted(frames)
         if not frames:
             raise HTTPException(status_code=400, detail="Nothing to export")
 
@@ -794,6 +1039,8 @@ def create_app() -> FastAPI:
             for a in state.ann_by_frame.get(f, []):
                 by_model.setdefault(a.model, []).append(a)
 
+            bg_models = state.background_by_frame.get(f, set())
+
             for model, anns in by_model.items():
                 model_part = sanitize_filename_part(model)
                 model_root = out_root / model_part
@@ -813,6 +1060,25 @@ def create_app() -> FastAPI:
                 with open(txt_out, "w", encoding="utf-8") as fp:
                     for a in anns:
                         fp.write(yolo_line(a.class_id, a.x1, a.y1, a.x2, a.y2, state.img_w, state.img_h) + "\n")
+                written_label_files += 1
+
+            # Background exports (empty label file). Image/label names must match.
+            for model in sorted(bg_models):
+                model_part = sanitize_filename_part(model)
+                model_root = out_root / model_part
+                images_dir = model_root / "images"
+                labels_dir = model_root / "labels"
+                ensure_dir(images_dir)
+                ensure_dir(labels_dir)
+
+                img_out = images_dir / f"{base}.jpg"
+                txt_out = labels_dir / f"{base}.txt"
+
+                ok = cv2.imwrite(str(img_out), frame_bgr)
+                if ok:
+                    written_images += 1
+                with open(txt_out, "w", encoding="utf-8") as fp:
+                    fp.write("")
                 written_label_files += 1
 
         # After export: clear workspace (close video + remove annotations), as requested.
