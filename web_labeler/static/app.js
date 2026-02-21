@@ -1295,13 +1295,7 @@ async function init() {
       }
       // Show existing dir path label (Mode 2) - display path from config
       const existingLabel = $("bgExistingDirLabel");
-      if (cfgBg.has_existing && cfgBg.existing_path) {
-        existingLabel.textContent = cfgBg.existing_path;
-      } else {
-        // Default: show relative path even if folder doesn't exist yet
-        const datasetsDir = cfgBg.datasets_dir.replace(/\\/g, "/");
-        existingLabel.textContent = `${datasetsDir}/existing`;
-      }
+      existingLabel.textContent = cfgBg.existing_path || `${cfgBg.datasets_dir}/existing`;
       // Mode selector change handler
       $("bgModeSelect").onchange = () => {
         const mode = $("bgModeSelect").value;
@@ -1379,8 +1373,7 @@ async function init() {
       }
       req.folder_path = folder;
     } else if (mode === "existing") {
-      // Always use "existing" relative to datasets_dir (from config)
-      req.existing_datasets_dir = "existing";
+      // Backend uses configured existing_datasets_dir from config, no need to send it
     }
     try {
       resetWorkspaceUI("Starting background session…");

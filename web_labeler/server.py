@@ -159,6 +159,7 @@ def create_app() -> FastAPI:
             "videos_dir": "",
             "output_dir": "",
             "datasets_dir": "",
+            "existing_datasets_dir": "",  # defaults to {datasets_dir}/existing
             "bar_counter_options": ["SANK_LEVO", "SANK_DESNO", "SANK_TOCILICA"],
         }
         if not config_path.exists():
@@ -179,7 +180,7 @@ def create_app() -> FastAPI:
 
             # allow overriding only some keys
             merged = dict(default_cfg)
-            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir"):
+            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir", "existing_datasets_dir"):
                 if isinstance(cfg.get(k), str) and cfg.get(k).strip():
                     merged[k] = cfg[k].strip()
             if isinstance(cfg.get("bar_counter_options"), list) and cfg.get("bar_counter_options"):
@@ -225,6 +226,13 @@ def create_app() -> FastAPI:
     videos_dir = _resolve_cfg_path("videos_dir", base_dir / "data" / "videos")
     output_dir = _resolve_cfg_path("output_dir", base_dir / "output")
     datasets_dir = _resolve_cfg_path("datasets_dir", Path(_default_data_root() / "datasets"))
+    
+    # Resolve existing_datasets_dir (defaults to {datasets_dir}/existing)
+    existing_datasets_dir_cfg = cfg.get("existing_datasets_dir", "").strip()
+    if existing_datasets_dir_cfg:
+        existing_datasets_dir = Path(existing_datasets_dir_cfg).expanduser().resolve()
+    else:
+        existing_datasets_dir = datasets_dir / "existing"
 
     debug = os.getenv("LABELER_DEBUG", "").strip() not in ("", "0", "false", "False")
     logging.basicConfig(level=(logging.DEBUG if debug else logging.INFO))
@@ -327,16 +335,15 @@ def create_app() -> FastAPI:
         # camera filters from bar counter options + ALL
         bar_counter_options = cfg.get("bar_counter_options") or ["SANK_LEVO", "SANK_DESNO", "SANK_TOCILICA"]
         camera_filters = ["ALL"] + [str(x) for x in bar_counter_options]
-        # Check if datasets/existing/ exists
-        existing_path = datasets_dir / "existing"
-        has_existing = existing_path.exists() and existing_path.is_dir()
+        # Use configured existing_datasets_dir
+        has_existing = existing_datasets_dir.exists() and existing_datasets_dir.is_dir()
         return {
             "datasets_dir": str(datasets_dir),
             "datasets": list_dataset_folders(datasets_dir),
             "models": models,
             "camera_filters": camera_filters,
             "has_existing": has_existing,
-            "existing_path": str(existing_path) if has_existing else None,
+            "existing_path": str(existing_datasets_dir),
         }
 
     @app.post("/api/background_labeler/start")
@@ -369,16 +376,9 @@ def create_app() -> FastAPI:
                     datasets_dir=datasets_dir,
                 )
             elif mode == "existing":
-                # Mode 2: From existing datasets
-                if req.existing_datasets_dir:
-                    existing_path = Path(req.existing_datasets_dir)
-                    if not existing_path.is_absolute():
-                        existing_path = datasets_dir / existing_path
-                else:
-                    # Default: datasets/existing/
-                    existing_path = datasets_dir / "existing"
+                # Mode 2: From existing datasets - always use configured path
                 bg_session = start_session_existing_mode(
-                    existing_datasets_dir=existing_path,
+                    existing_datasets_dir=existing_datasets_dir,
                     target_model=req.target_model,
                     camera_filter=req.camera_filter,
                     shuffled=bool(req.shuffled),
