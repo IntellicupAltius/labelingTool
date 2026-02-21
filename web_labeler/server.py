@@ -43,6 +43,8 @@ from web_labeler.dataset import (
 from web_labeler.background_labeler import (
     BgSession,
     start_session as bg_start_session,
+    start_session_folder_mode,
+    start_session_existing_mode,
     copy_background_image,
     remove_background_image,
     sanitize_part,
@@ -124,7 +126,10 @@ class DatasetMarkBackgroundRequest(BaseModel):
 
 
 class BgStartRequest(BaseModel):
-    dataset_name: str
+    mode: str = "folder"  # "folder" or "existing"
+    dataset_name: Optional[str] = None  # for folder mode: folder name/path; for existing: not used
+    folder_path: Optional[str] = None  # for folder mode: explicit folder path (relative to datasets_dir or absolute)
+    existing_datasets_dir: Optional[str] = None  # for existing mode: path to datasets/existing/ (relative to datasets_dir or absolute)
     target_model: str
     camera_filter: str = "ALL"  # e.g. SANK_DESNO
     shuffled: bool = True
@@ -322,11 +327,16 @@ def create_app() -> FastAPI:
         # camera filters from bar counter options + ALL
         bar_counter_options = cfg.get("bar_counter_options") or ["SANK_LEVO", "SANK_DESNO", "SANK_TOCILICA"]
         camera_filters = ["ALL"] + [str(x) for x in bar_counter_options]
+        # Check if datasets/existing/ exists
+        existing_path = datasets_dir / "existing"
+        has_existing = existing_path.exists() and existing_path.is_dir()
         return {
             "datasets_dir": str(datasets_dir),
             "datasets": list_dataset_folders(datasets_dir),
             "models": models,
             "camera_filters": camera_filters,
+            "has_existing": has_existing,
+            "existing_path": str(existing_path) if has_existing else None,
         }
 
     @app.post("/api/background_labeler/start")
@@ -335,19 +345,52 @@ def create_app() -> FastAPI:
         refresh_models()
         if req.target_model not in state.model_to_names:
             raise HTTPException(status_code=400, detail="Invalid model")
+
+        mode = (req.mode or "folder").lower().strip()
         try:
-            bg_session = bg_start_session(
-                datasets_dir=datasets_dir,
-                dataset_name=req.dataset_name,
-                target_model=req.target_model,
-                camera_filter=req.camera_filter,
-                shuffled=bool(req.shuffled),
-                seed=int(req.seed),
-            )
+            if mode == "folder":
+                # Mode 1: Open folder / Manual set
+                if req.folder_path:
+                    # Explicit path (can be absolute or relative to datasets_dir)
+                    folder_path = Path(req.folder_path)
+                    if not folder_path.is_absolute():
+                        folder_path = datasets_dir / folder_path
+                elif req.dataset_name:
+                    # Legacy: treat dataset_name as folder name
+                    folder_path = datasets_dir / req.dataset_name
+                else:
+                    raise ValueError("folder_path or dataset_name required for folder mode")
+                bg_session = start_session_folder_mode(
+                    folder_path=folder_path,
+                    target_model=req.target_model,
+                    camera_filter=req.camera_filter,
+                    shuffled=bool(req.shuffled),
+                    seed=int(req.seed),
+                    datasets_dir=datasets_dir,
+                )
+            elif mode == "existing":
+                # Mode 2: From existing datasets
+                if req.existing_datasets_dir:
+                    existing_path = Path(req.existing_datasets_dir)
+                    if not existing_path.is_absolute():
+                        existing_path = datasets_dir / existing_path
+                else:
+                    # Default: datasets/existing/
+                    existing_path = datasets_dir / "existing"
+                bg_session = start_session_existing_mode(
+                    existing_datasets_dir=existing_path,
+                    target_model=req.target_model,
+                    camera_filter=req.camera_filter,
+                    shuffled=bool(req.shuffled),
+                    seed=int(req.seed),
+                )
+            else:
+                raise ValueError(f"Invalid mode: {mode} (must be 'folder' or 'existing')")
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
         return {
             "session_id": bg_session.id,
+            "mode": bg_session.mode,
             "dataset_name": bg_session.dataset_name,
             "target_model": bg_session.target_model,
             "total": len(bg_session.img_files),
@@ -361,6 +404,7 @@ def create_app() -> FastAPI:
         return {
             "loaded": True,
             "session_id": bg_session.id,
+            "mode": bg_session.mode,
             "dataset_name": bg_session.dataset_name,
             "target_model": bg_session.target_model,
             "idx": bg_session.idx,
@@ -412,10 +456,15 @@ def create_app() -> FastAPI:
             return {"ok": True, "done": True}
 
         if action == "background":
-            # copy immediately for speed
-            copy_background_image(bg_session, p)
-            bg_session.selected.add(cur_idx)
-            bg_session.skipped.discard(cur_idx)
+            # copy immediately for speed (duplicate protection built-in)
+            copied = copy_background_image(bg_session, p)
+            if copied:
+                bg_session.selected.add(cur_idx)
+                bg_session.skipped.discard(cur_idx)
+            # If duplicate, still mark as selected (already exported)
+            else:
+                bg_session.selected.add(cur_idx)
+                bg_session.skipped.discard(cur_idx)
         elif action == "skip":
             # if previously selected, remove file outputs
             if cur_idx in bg_session.selected:

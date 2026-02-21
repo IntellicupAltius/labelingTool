@@ -58,10 +58,27 @@
 
         <!-- Background Labeler controls -->
         <div id="bgControls" class="transport hidden">
-          <label class="field" style="min-width: 260px;">
-            <div class="label">Source dataset</div>
-            <select id="bgDatasetSelect"></select>
+          <label class="field" style="min-width: 200px;">
+            <div class="label">Mode</div>
+            <select id="bgModeSelect">
+              <option value="folder">Open Folder</option>
+              <option value="existing">From Existing</option>
+            </select>
           </label>
+          <!-- Mode 1: Folder mode -->
+          <div id="bgModeFolder" class="bgModeGroup">
+            <label class="field" style="min-width: 260px;">
+              <div class="label">Source folder</div>
+              <select id="bgFolderSelect"></select>
+            </label>
+          </div>
+          <!-- Mode 2: Existing mode -->
+          <div id="bgModeExisting" class="bgModeGroup hidden">
+            <div class="field" style="min-width: 260px; display: flex; align-items: center; padding: 6px 0;">
+              <div class="label" style="margin-right: 8px;">Looking in:</div>
+              <div id="bgExistingDirLabel" style="font-weight: 600; color: #333;">—</div>
+            </div>
+          </div>
           <label class="field" style="min-width: 220px;">
             <div class="label">Target model</div>
             <select id="bgModelSelect"></select>

@@ -1262,14 +1262,20 @@ async function init() {
     setMode("bg");
     try {
       const cfgBg = await api.getBgConfig();
-      const dsSel = $("bgDatasetSelect");
-      dsSel.innerHTML = "";
+      // Populate folder select (Mode 1)
+      const folderSel = $("bgFolderSelect");
+      folderSel.innerHTML = "";
+      const optAll = document.createElement("option");
+      optAll.value = "";
+      optAll.textContent = "-- Select folder --";
+      folderSel.appendChild(optAll);
       for (const name of (cfgBg.datasets || [])) {
         const opt = document.createElement("option");
         opt.value = name;
         opt.textContent = name;
-        dsSel.appendChild(opt);
+        folderSel.appendChild(opt);
       }
+      // Populate model select
       const mSel = $("bgModelSelect");
       mSel.innerHTML = "";
       for (const name of (cfgBg.models || [])) {
@@ -1278,6 +1284,7 @@ async function init() {
         opt.textContent = name;
         mSel.appendChild(opt);
       }
+      // Populate camera filter
       const cSel = $("bgCameraSelect");
       cSel.innerHTML = "";
       for (const name of (cfgBg.camera_filters || ["ALL"])) {
@@ -1286,6 +1293,22 @@ async function init() {
         opt.textContent = name;
         cSel.appendChild(opt);
       }
+      // Show existing dir path label (Mode 2) - display path from config
+      const existingLabel = $("bgExistingDirLabel");
+      if (cfgBg.has_existing && cfgBg.existing_path) {
+        existingLabel.textContent = cfgBg.existing_path;
+      } else {
+        // Default: show relative path even if folder doesn't exist yet
+        const datasetsDir = cfgBg.datasets_dir.replace(/\\/g, "/");
+        existingLabel.textContent = `${datasetsDir}/existing`;
+      }
+      // Mode selector change handler
+      $("bgModeSelect").onchange = () => {
+        const mode = $("bgModeSelect").value;
+        $("bgModeFolder").classList.toggle("hidden", mode !== "folder");
+        $("bgModeExisting").classList.toggle("hidden", mode !== "existing");
+      };
+      $("bgModeSelect").onchange(); // initial toggle
       setStatus(`Background Labeler. Datasets: ${cfgBg.datasets_dir}`);
     } catch (e) {
       setStatus(`BG config failed: ${e.message || e}`);
@@ -1339,20 +1362,32 @@ async function init() {
   };
 
   $("bgStartBtn").onclick = async () => {
-    const ds = $("bgDatasetSelect").value;
+    const mode = $("bgModeSelect").value;
     const model = $("bgModelSelect").value;
     const cam = $("bgCameraSelect").value || "ALL";
     const shuffled = $("bgShuffleSelect").value === "1";
-    if (!ds || !model) {
-      window.alert("Pick dataset and target model.");
+    if (!model) {
+      window.alert("Pick target model.");
       return;
+    }
+    let req = {mode, target_model: model, camera_filter: cam, shuffled};
+    if (mode === "folder") {
+      const folder = $("bgFolderSelect").value;
+      if (!folder) {
+        window.alert("Pick source folder.");
+        return;
+      }
+      req.folder_path = folder;
+    } else if (mode === "existing") {
+      // Always use "existing" relative to datasets_dir (from config)
+      req.existing_datasets_dir = "existing";
     }
     try {
       resetWorkspaceUI("Starting background session…");
       setMode("bg");
-      const res = await api.bgStart({dataset_name: ds, target_model: model, camera_filter: cam, shuffled});
+      const res = await api.bgStart(req);
       state.bgLoaded = true;
-      state.bgDataset = ds;
+      state.bgDataset = res.dataset_name || "";
       state.bgModel = model;
       state.bgTotal = res.total || 0;
       state.bgSelected = 0;
