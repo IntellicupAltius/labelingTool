@@ -512,11 +512,24 @@ def create_app() -> FastAPI:
                 except Exception:
                     pass
 
-        # Zip and remove folder
+        # Zip and remove folder.
+        # Name: {folder_name}_{model}_background.zip for folder/legacy modes.
+        # For existing mode the out_root name already encodes model+background+timestamp.
+        model_slug = re.sub(r"[^A-Z0-9]+", "_", (model or "").upper()).strip("_")
+        if bg_session.mode in ("folder", "legacy"):
+            # out_root = .../datasets/{folder_name}_background/{model}/
+            # zip lands next to {folder_name}_background/, i.e. in datasets_dir
+            zip_dir = out_root.parent.parent
+            zip_dir.mkdir(parents=True, exist_ok=True)
+            zip_name = f"{bg_session.dataset_name}_{model_slug}_background"
+            zip_target = zip_dir / f"{zip_name}.zip"
+        else:
+            # existing mode: out_root.name is already {model}_background_{timestamp}
+            zip_target = out_root.parent / f"{out_root.name}.zip"
         zip_path_str = str(out_root)
         if out_root.exists():
             try:
-                zp = _zip_batch(out_root)
+                zp = _zip_batch(out_root, zip_path=zip_target)
                 zip_path_str = str(zp)
                 shutil.rmtree(out_root)
             except Exception as e:
@@ -664,11 +677,15 @@ def create_app() -> FastAPI:
                     pass  # ignore copy errors
         
         # Zip the output so the labeler can drop it directly.
-        # For create_new: delete the folder after zipping (it's a derivative copy).
+        # Name: {dataset_name}_{model}.zip so pipeline knows the target model.
+        # For create_new: delete the _fixed folder after zipping.
         # For overwrite: keep the folder (it's the labeler's source dataset).
+        model_slug = re.sub(r"[^A-Z0-9]+", "_", (model or "").upper()).strip("_")
+        zip_name = f"{dataset_session.dataset_path.name}_{model_slug}"
+        zip_target = out_path.parent / f"{zip_name}.zip"
         zip_path_str = str(out_path)
         try:
-            zp = _zip_batch(out_path)
+            zp = _zip_batch(out_path, zip_path=zip_target)
             zip_path_str = str(zp)
             if req.strategy == "create_new":
                 shutil.rmtree(out_path)
@@ -725,14 +742,16 @@ def create_app() -> FastAPI:
         dataset_session.deleted_images.discard(idx)
         return {"ok": True, "removed": removed}
 
-    def _zip_batch(folder: Path) -> Path:
+    def _zip_batch(folder: Path, zip_path: Optional[Path] = None) -> Path:
         """
-        Zip a batch folder into <folder>.zip beside it.
+        Zip a batch folder. Default zip name is <folder>.zip beside it.
+        Pass zip_path to use a custom output path/name.
         The zip contains the folder itself at the root (pipeline expects a single
         top-level folder inside the zip with images/ labels/ data.yaml).
         Returns the zip path.
         """
-        zip_path = folder.parent / f"{folder.name}.zip"
+        if zip_path is None:
+            zip_path = folder.parent / f"{folder.name}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for file in sorted(folder.rglob("*")):
                 if file.is_file():
