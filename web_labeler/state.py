@@ -24,6 +24,7 @@ class AppState:
     # Models
     models_dir: Path
     model_to_names: Dict[str, List[str]] = field(default_factory=dict)
+    model_to_yaml_path: Dict[str, Path] = field(default_factory=dict)  # model name -> yaml file path
 
     # Videos
     videos_dir: Path = field(default_factory=lambda: Path.cwd() / "data" / "videos")

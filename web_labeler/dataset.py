@@ -37,6 +37,7 @@ class DatasetSession:
     img_sizes: Dict[int, Tuple[int, int]] = field(default_factory=dict)  # idx -> (w,h)
     ann_by_image: Dict[int, List[DatasetAnnotation]] = field(default_factory=dict)
     background_images: set[int] = field(default_factory=set)
+    deleted_images: set[int] = field(default_factory=set)  # image indices marked for deletion
 
     def new_id(self) -> str:
         return uuid.uuid4().hex
@@ -153,8 +154,8 @@ def load_dataset_session(dataset_path: Path, model: str, class_names: List[str])
 def save_dataset_session(sess: DatasetSession, strategy: str) -> Path:
     """
     strategy:
-      - overwrite: write labels into the same dataset folder
-      - create_new: write into <dataset>_fixed, copying/linking images and writing labels
+      - overwrite: write labels into the same dataset folder, delete images/labels marked for deletion
+      - create_new: write into <dataset>_fixed, copying/linking images and writing labels (skip deleted)
     Returns the output dataset path.
     """
     strategy = (strategy or "").lower().strip()
@@ -171,9 +172,11 @@ def save_dataset_session(sess: DatasetSession, strategy: str) -> Path:
     images_dir.mkdir(parents=True, exist_ok=True)
     labels_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy/link images if create_new
+    # Copy/link images if create_new (skip deleted images)
     if strategy == "create_new":
-        for src in sess.img_files:
+        for i, src in enumerate(sess.img_files):
+            if i in sess.deleted_images:
+                continue  # skip deleted images
             dst = images_dir / src.name
             if dst.exists():
                 continue
@@ -182,14 +185,37 @@ def save_dataset_session(sess: DatasetSession, strategy: str) -> Path:
             except Exception:
                 shutil.copy2(src, dst)
 
-    # Write labels
+    # Write labels (skip deleted images)
     for i, img_path in enumerate(sess.img_files):
+        if i in sess.deleted_images:
+            continue  # skip deleted images
         w, h = sess.img_sizes[i]
         anns = sess.ann_by_image.get(i, [])
         out_txt = labels_dir / f"{img_path.stem}.txt"
         with open(out_txt, "w", encoding="utf-8") as fp:
             for a in anns:
                 fp.write(_xyxy_to_yolo(a.class_id, a.x1, a.y1, a.x2, a.y2, w, h) + "\n")
+
+    # Delete images and labels marked for deletion (only when overwriting)
+    if strategy == "overwrite" and sess.deleted_images:
+        for i in sess.deleted_images:
+            if i >= len(sess.img_files):
+                continue
+            img_path = sess.img_files[i]
+            # Delete image file
+            img_file = sess.images_dir / img_path.name
+            if img_file.exists():
+                try:
+                    img_file.unlink()
+                except Exception:
+                    pass
+            # Delete label file
+            label_file = sess.labels_dir / f"{img_path.stem}.txt"
+            if label_file.exists():
+                try:
+                    label_file.unlink()
+                except Exception:
+                    pass
 
     return out_path
 
