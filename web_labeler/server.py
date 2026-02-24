@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 import logging
 import platform
+import zipfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -31,7 +33,7 @@ from web_labeler import __version__ as app_version
 from web_labeler.state import Annotation, AppState
 from web_labeler.video_io import VideoReader, clamp
 from web_labeler.yolo import load_yolo_names_from_yaml, yolo_line
-from web_labeler.naming import ParsedVideoName, parse_video_name, export_base_name, output_video_dirname
+from web_labeler.naming import ParsedVideoName, parse_video_name, export_base_name, output_video_dirname, batch_dirname
 from web_labeler.dataset import (
     DatasetSession,
     DatasetAnnotation,
@@ -122,6 +124,10 @@ class DatasetUpdateAnnRequest(BaseModel):
 
 
 class DatasetMarkBackgroundRequest(BaseModel):
+    image_idx: int
+
+
+class DatasetMarkDeleteRequest(BaseModel):
     image_idx: int
 
 
@@ -276,14 +282,18 @@ def create_app() -> FastAPI:
 
     def refresh_models() -> Dict[str, List[str]]:
         model_to_names: Dict[str, List[str]] = {}
+        model_to_yaml: Dict[str, Path] = {}
         if not state.models_dir.exists():
             return model_to_names
         for yaml_path in list(state.models_dir.glob("*.yaml")) + list(state.models_dir.glob("*.yml")):
             try:
-                model_to_names[yaml_path.stem] = load_yolo_names_from_yaml(yaml_path)
+                model_name = yaml_path.stem
+                model_to_names[model_name] = load_yolo_names_from_yaml(yaml_path)
+                model_to_yaml[model_name] = yaml_path
             except Exception:
                 continue
         state.model_to_names = model_to_names
+        state.model_to_yaml_path = model_to_yaml
         return model_to_names
 
     def list_videos() -> List[str]:
@@ -488,9 +498,32 @@ def create_app() -> FastAPI:
                 status_code=400,
                 detail="No images marked as BACKGROUND. Select at least 1 background (B) before finishing.",
             )
-        out_root = str(bg_session.out_root)
+        out_root = bg_session.out_root
+        model = bg_session.target_model
+
+        # Copy data.yaml (needed by ingestion pipeline)
+        refresh_models()
+        yaml_src = state.model_to_yaml_path.get(model)
+        if yaml_src and yaml_src.exists():
+            yaml_dst = out_root / "data.yaml"
+            if not yaml_dst.exists():
+                try:
+                    shutil.copy2(yaml_src, yaml_dst)
+                except Exception:
+                    pass
+
+        # Zip and remove folder
+        zip_path_str = str(out_root)
+        if out_root.exists():
+            try:
+                zp = _zip_batch(out_root)
+                zip_path_str = str(zp)
+                shutil.rmtree(out_root)
+            except Exception as e:
+                logger.warning("Could not zip background batch %s: %s", out_root, e)
+
         bg_session = None
-        return {"ok": True, "cleared": True, "out_root": out_root}
+        return {"ok": True, "cleared": True, "zip_path": zip_path_str}
 
     @app.post("/api/datasets/load")
     def datasets_load(req: DatasetLoadRequest = Body(...)):
@@ -527,8 +560,16 @@ def create_app() -> FastAPI:
     def datasets_annotations(index: int = Query(..., ge=0)):
         if dataset_session is None:
             raise HTTPException(status_code=400, detail="No dataset loaded")
-        anns = dataset_session.ann_by_image.get(int(index), [])
-        return {"image_idx": int(index), "annotations": [ann_to_dict(a) for a in anns]}
+        idx = int(index)
+        anns = dataset_session.ann_by_image.get(idx, [])
+        is_background = idx in dataset_session.background_images
+        is_deleted = idx in dataset_session.deleted_images
+        return {
+            "image_idx": idx,
+            "annotations": [ann_to_dict(a) for a in anns],
+            "is_background": is_background,
+            "is_deleted": is_deleted,
+        }
 
     @app.post("/api/datasets/annotations")
     def datasets_add_annotation(req: DatasetAddAnnRequest = Body(...)):
@@ -592,14 +633,53 @@ def create_app() -> FastAPI:
                 removed = True
         return {"ok": True, "removed": removed}
 
+    @app.get("/api/datasets/status")
+    def datasets_status():
+        if dataset_session is None:
+            return {"loaded": False}
+        return {
+            "loaded": True,
+            "total_images": len(dataset_session.img_files),
+            "deleted_count": len(dataset_session.deleted_images),
+            "background_count": len(dataset_session.background_images),
+        }
+
     @app.post("/api/datasets/save")
     def datasets_save(req: DatasetSaveRequest = Body(...)):
         nonlocal dataset_session
         if dataset_session is None:
             raise HTTPException(status_code=400, detail="No dataset loaded")
+        deleted_count = len(dataset_session.deleted_images)
         out_path = save_dataset_session(dataset_session, req.strategy)
+        
+        # Copy data.yaml file to output dataset directory
+        model = dataset_session.model
+        yaml_src = state.model_to_yaml_path.get(model)
+        if yaml_src and yaml_src.exists():
+            yaml_dst = out_path / "data.yaml"
+            if not yaml_dst.exists():
+                try:
+                    shutil.copy2(yaml_src, yaml_dst)
+                except Exception:
+                    pass  # ignore copy errors
+        
+        # Zip the output so the labeler can drop it directly.
+        # For create_new: delete the folder after zipping (it's a derivative copy).
+        # For overwrite: keep the folder (it's the labeler's source dataset).
+        zip_path_str = str(out_path)
+        try:
+            zp = _zip_batch(out_path)
+            zip_path_str = str(zp)
+            if req.strategy == "create_new":
+                shutil.rmtree(out_path)
+        except Exception as e:
+            logger.warning("Could not zip dataset %s: %s", out_path, e)
+
+        result = {"ok": True, "zip_path": zip_path_str, "cleared": True}
+        if deleted_count > 0:
+            result["deleted_count"] = deleted_count
         dataset_session = None
-        return {"ok": True, "output_dataset_path": str(out_path), "cleared": True}
+        return result
 
     @app.post("/api/datasets/background")
     def datasets_mark_background(req: DatasetMarkBackgroundRequest = Body(...)):
@@ -619,6 +699,45 @@ def create_app() -> FastAPI:
         removed = idx in dataset_session.background_images
         dataset_session.background_images.discard(idx)
         return {"ok": True, "removed": removed}
+
+    @app.post("/api/datasets/delete")
+    def datasets_mark_delete(req: DatasetMarkDeleteRequest = Body(...)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        idx = int(req.image_idx)
+        if idx < 0 or idx >= len(dataset_session.img_files):
+            raise HTTPException(status_code=400, detail="Invalid image index")
+        # Can't delete if it has annotations (must remove annotations first)
+        if dataset_session.ann_by_image.get(idx):
+            raise HTTPException(
+                status_code=400,
+                detail="Please remove all annotations from current image before marking it for deletion.",
+            )
+        dataset_session.deleted_images.add(idx)
+        return {"ok": True, "deleted": True}
+
+    @app.delete("/api/datasets/delete")
+    def datasets_unmark_delete(image_idx: int = Query(...)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        idx = int(image_idx)
+        removed = idx in dataset_session.deleted_images
+        dataset_session.deleted_images.discard(idx)
+        return {"ok": True, "removed": removed}
+
+    def _zip_batch(folder: Path) -> Path:
+        """
+        Zip a batch folder into <folder>.zip beside it.
+        The zip contains the folder itself at the root (pipeline expects a single
+        top-level folder inside the zip with images/ labels/ data.yaml).
+        Returns the zip path.
+        """
+        zip_path = folder.parent / f"{folder.name}.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for file in sorted(folder.rglob("*")):
+                if file.is_file():
+                    zf.write(file, Path(folder.name) / file.relative_to(folder))
+        return zip_path
 
     def _output_root_for_video_name(video_name: str) -> Path:
         """
@@ -1068,15 +1187,16 @@ def create_app() -> FastAPI:
                 detail={"error": "BAR_COUNTER_MISSING", "options": bar_counter_options, "video_name": state.video_path.name},
             )
 
-        # Export root uses VIDEO_NAME (GUID removed), not the shortened prefix.
+        # Per-model batch folders (ingestion-pipeline compatible).
         # Layout:
-        #   <output>/<VIDEO_NAME>/<MODEL>/images/<BASE>.jpg
-        #   <output>/<VIDEO_NAME>/<MODEL>/labels/<BASE>.txt
-        out_root = _output_root_for_video_name(state.video_path.name)
-        ensure_dir(out_root)
+        #   <output>/<VIDEO_PREFIX>_<MODEL>/images/<BASE>.jpg
+        #   <output>/<VIDEO_PREFIX>_<MODEL>/labels/<BASE>.txt
+        #   <output>/<VIDEO_PREFIX>_<MODEL>/data.yaml
+        model_roots: Dict[str, Path] = {}
 
         written_images = 0
         written_label_files = 0
+        copied_yaml_models: set = set()
 
         for f in frames:
             with video_lock:
@@ -1091,8 +1211,9 @@ def create_app() -> FastAPI:
             bg_models = state.background_by_frame.get(f, set())
 
             for model, anns in by_model.items():
-                model_part = sanitize_filename_part(model)
-                model_root = out_root / model_part
+                if model not in model_roots:
+                    model_roots[model] = state.output_base_dir / batch_dirname(state.video_path.name, model)
+                model_root = model_roots[model]
                 images_dir = model_root / "images"
                 labels_dir = model_root / "labels"
                 ensure_dir(images_dir)
@@ -1110,11 +1231,24 @@ def create_app() -> FastAPI:
                     for a in anns:
                         fp.write(yolo_line(a.class_id, a.x1, a.y1, a.x2, a.y2, state.img_w, state.img_h) + "\n")
                 written_label_files += 1
+                
+                # Copy data.yaml file to model output directory (once per model)
+                if model not in copied_yaml_models:
+                    yaml_src = state.model_to_yaml_path.get(model)
+                    if yaml_src and yaml_src.exists():
+                        yaml_dst = model_root / "data.yaml"
+                        if not yaml_dst.exists():
+                            try:
+                                shutil.copy2(yaml_src, yaml_dst)
+                                copied_yaml_models.add(model)
+                            except Exception:
+                                pass  # ignore copy errors
 
             # Background exports (empty label file). Image/label names must match.
             for model in sorted(bg_models):
-                model_part = sanitize_filename_part(model)
-                model_root = out_root / model_part
+                if model not in model_roots:
+                    model_roots[model] = state.output_base_dir / batch_dirname(state.video_path.name, model)
+                model_root = model_roots[model]
                 images_dir = model_root / "images"
                 labels_dir = model_root / "labels"
                 ensure_dir(images_dir)
@@ -1129,6 +1263,30 @@ def create_app() -> FastAPI:
                 with open(txt_out, "w", encoding="utf-8") as fp:
                     fp.write("")
                 written_label_files += 1
+                
+                # Copy data.yaml file to model output directory (once per model)
+                if model not in copied_yaml_models:
+                    yaml_src = state.model_to_yaml_path.get(model)
+                    if yaml_src and yaml_src.exists():
+                        yaml_dst = model_root / "data.yaml"
+                        if not yaml_dst.exists():
+                            try:
+                                shutil.copy2(yaml_src, yaml_dst)
+                                copied_yaml_models.add(model)
+                            except Exception:
+                                pass  # ignore copy errors
+
+        # Zip each model batch folder and remove the source folder.
+        zip_paths = []
+        for model, mr in sorted(model_roots.items()):
+            if mr.exists():
+                try:
+                    zp = _zip_batch(mr)
+                    zip_paths.append(str(zp))
+                    shutil.rmtree(mr)
+                except Exception as e:
+                    logger.warning("Could not zip %s: %s", mr, e)
+                    zip_paths.append(str(mr))
 
         # After export: clear workspace (close video + remove annotations), as requested.
         with video_lock:
@@ -1141,9 +1299,7 @@ def create_app() -> FastAPI:
         return JSONResponse(
             {
                 "ok": True,
-                "output_root": str(out_root),
-                "images_dir": str(out_root),
-                "labels_dir": str(out_root),
+                "zip_paths": zip_paths,
                 "written_images": written_images,
                 "written_label_files": written_label_files,
                 "frames_labeled": len(frames),

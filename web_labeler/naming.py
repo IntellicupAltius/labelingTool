@@ -89,6 +89,24 @@ def export_base_name(parsed: ParsedVideoName, frame_idx: int) -> str:
     return f"{ts}_{parsed.prefix}_f{(int(frame_idx) + 1):06d}"
 
 
+def batch_dirname(video_filename: str, model_name: str, max_len: int = 140) -> str:
+    """
+    Batch folder name = video prefix + model name.
+    This is the folder that gets zipped and dropped into the ingestion pipeline.
+
+    Example:
+      video: blaznavac_sank_levo_{GUID}_20251205090046.mp4
+      model: glasses
+      → BLAZNAVAC_SANK_LEVO_20251205090046_GLASSES
+    """
+    video_part = output_video_dirname(video_filename, max_len=max_len)
+    model_part = re.sub(r"[^A-Z0-9]+", "_", model_name.upper().strip()).strip("_")
+    result = f"{video_part}_{model_part}"
+    if len(result) > max_len:
+        result = result[:max_len].rstrip("_")
+    return result or "BATCH"
+
+
 def output_video_dirname(filename: str, max_len: int = 140) -> str:
     """
     Folder name for exports based on the *video name*, but without GUID / trailing (001).

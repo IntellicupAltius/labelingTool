@@ -120,6 +120,17 @@ const api = {
       return data;
     });
   },
+  async getDatasetStatus() {
+    return fetch(`/api/datasets/status`).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const d = data.detail;
+        const msg = (typeof d === "string") ? d : JSON.stringify(d || data);
+        throw new Error(msg || "Failed to get dataset status");
+      }
+      return data;
+    });
+  },
   async addDatasetAnnotation(payload) {
     return fetch(`/api/datasets/annotations`, {
       method: "POST",
@@ -579,35 +590,102 @@ async function refreshLists() {
     const data = await api.getDatasetAnnotations(state.datasetImageIdx);
     state.frameAnnotations = data.annotations || [];
     state.allAnnotations = [];
+    const isBackground = data.is_background || false;
+    const isDeleted = data.is_deleted || false;
 
     // current image list
     const ul = $("currentList");
     ul.innerHTML = "";
 
-    // Background marker entry (dataset)
-    if (state.frameAnnotations.length === 0) {
+    // Deletion marker entry (always shown if marked for deletion)
+    if (isDeleted) {
+      const liDel = document.createElement("li");
+      liDel.className = "item";
+      liDel.style.backgroundColor = "#fee";
+      liDel.style.borderLeft = "3px solid #c00";
+      const mainDel = document.createElement("div");
+      mainDel.className = "itemMain";
+      const titleDel = document.createElement("div");
+      titleDel.className = "itemTitle";
+      titleDel.textContent = "🗑️ MARKED FOR DELETION";
+      titleDel.style.color = "#c00";
+      titleDel.style.fontWeight = "bold";
+      const subDel = document.createElement("div");
+      subDel.className = "itemSub";
+      subDel.textContent = "Image and label will be deleted on save (overwrite)";
+      mainDel.appendChild(titleDel); mainDel.appendChild(subDel);
+      const btnsDel = document.createElement("div");
+      btnsDel.className = "itemBtns";
+      const unsetDel = document.createElement("button");
+      unsetDel.className = "btn";
+      unsetDel.textContent = "Unmark";
+      unsetDel.onclick = async (e) => {
+        e.stopPropagation();
+        await api.unmarkDatasetDelete(state.datasetImageIdx);
+        await refreshLists();
+      };
+      btnsDel.appendChild(unsetDel);
+      liDel.appendChild(mainDel);
+      liDel.appendChild(btnsDel);
+      ul.appendChild(liDel);
+    }
+
+    // Background marker entry (dataset) - only if no annotations and not deleted
+    if (state.frameAnnotations.length === 0 && !isDeleted) {
       const liBg = document.createElement("li");
       liBg.className = "item";
+      if (isBackground) {
+        liBg.style.backgroundColor = "#efe";
+        liBg.style.borderLeft = "3px solid #0a0";
+      }
       const mainBg = document.createElement("div");
       mainBg.className = "itemMain";
       const titleBg = document.createElement("div");
       titleBg.className = "itemTitle";
-      titleBg.textContent = `BACKGROUND (${state.datasetModel || ""})`;
+      titleBg.textContent = isBackground ? `✅ BACKGROUND (${state.datasetModel || ""})` : `BACKGROUND (${state.datasetModel || ""})`;
       const subBg = document.createElement("div");
       subBg.className = "itemSub";
-      subBg.textContent = "Empty label file will be saved";
+      subBg.textContent = isBackground ? "Empty label file will be saved" : "Click Mark to set as background";
       mainBg.appendChild(titleBg); mainBg.appendChild(subBg);
       const btnsBg = document.createElement("div");
       btnsBg.className = "itemBtns";
-      const setBg = document.createElement("button");
-      setBg.className = "btn";
-      setBg.textContent = "Mark";
-      setBg.onclick = async (e) => {
-        e.stopPropagation();
-        await api.markDatasetBackground(state.datasetImageIdx);
-        await refreshLists();
-      };
-      btnsBg.appendChild(setBg);
+      if (!isBackground) {
+        const setBg = document.createElement("button");
+        setBg.className = "btn";
+        setBg.textContent = "Mark";
+        setBg.onclick = async (e) => {
+          e.stopPropagation();
+          await api.markDatasetBackground(state.datasetImageIdx);
+          await refreshLists();
+        };
+        btnsBg.appendChild(setBg);
+      } else {
+        const unsetBg = document.createElement("button");
+        unsetBg.className = "btn";
+        unsetBg.textContent = "Unmark";
+        unsetBg.onclick = async (e) => {
+          e.stopPropagation();
+          await api.unmarkDatasetBackground(state.datasetImageIdx);
+          await refreshLists();
+        };
+        btnsBg.appendChild(unsetBg);
+      }
+      // Delete button (only if no annotations and not background)
+      if (!isBackground) {
+        const delBtn = document.createElement("button");
+        delBtn.className = "btn";
+        delBtn.style.backgroundColor = "#c00";
+        delBtn.style.color = "#fff";
+        delBtn.textContent = "Delete";
+        delBtn.onclick = async (e) => {
+          e.stopPropagation();
+          if (window.confirm("Mark this image for deletion? It will be removed from the dataset when you save (overwrite).")) {
+            await api.markDatasetDelete(state.datasetImageIdx);
+            await refreshLists();
+          }
+        };
+        btnsBg.appendChild(delBtn);
+      }
       liBg.appendChild(mainBg);
       liBg.appendChild(btnsBg);
       ul.appendChild(liBg);
@@ -1412,7 +1490,7 @@ async function init() {
       const res = await api.bgFinish();
       resetWorkspaceUI("Background session finished.");
       setMode("bg");
-      if (res.out_root) window.alert(`Background session finished.\n\nOutput:\n${res.out_root}`);
+      if (res.zip_path) window.alert(`Background session finished.\n\nZip ready to send:\n${res.zip_path}`);
     } catch (e) {
       window.alert(`Finish failed: ${e.message || e}`);
     }
@@ -1480,8 +1558,18 @@ async function init() {
   $("saveOverwriteBtn").onclick = async () => {
     if (!state.datasetLoaded) return;
     try {
+      // Check for deletions
+      const status = await api.getDatasetStatus();
+      if (status.deleted_count > 0) {
+        const confirmMsg = `WARNING: ${status.deleted_count} image(s) marked for deletion.\n\nThese will be permanently removed from the dataset.\n\nContinue?`;
+        if (!window.confirm(confirmMsg)) return;
+      }
       const res = await api.saveDataset("overwrite");
-      window.alert(`Saved (overwrite).\n\n${res.output_dataset_path}`);
+      let msg = `Saved (overwrite).\n\nZip ready to send:\n${res.zip_path}`;
+      if (res.deleted_count > 0) {
+        msg += `\n\n${res.deleted_count} image(s) deleted.`;
+      }
+      window.alert(msg);
       if (res.cleared) {
         resetWorkspaceUI("Dataset saved. Dataset unloaded.");
         setMode("dataset");
@@ -1494,7 +1582,11 @@ async function init() {
     if (!state.datasetLoaded) return;
     try {
       const res = await api.saveDataset("create_new");
-      window.alert(`Saved as _fixed.\n\n${res.output_dataset_path}`);
+      let msg = `Saved as _fixed.\n\nZip ready to send:\n${res.zip_path}`;
+      if (res.deleted_count > 0) {
+        msg += `\n\nNote: ${res.deleted_count} deleted image(s) were excluded from _fixed dataset.`;
+      }
+      window.alert(msg);
       if (res.cleared) {
         resetWorkspaceUI("Dataset saved. Dataset unloaded.");
         setMode("dataset");
@@ -1567,8 +1659,9 @@ async function init() {
         }
       }
       state.dirty = false;
-      setStatus(`Export complete: ${res.output_root}`);
-      window.alert(`Export complete.\n\nImages: ${res.images_dir}\nLabels: ${res.labels_dir}\n\nFrames: ${res.frames_labeled}\nLabel files: ${res.written_label_files}`);
+      const zipList = (res.zip_paths || []).join("\n");
+      setStatus(`Export complete: ${(res.zip_paths || []).length} zip(s) ready`);
+      window.alert(`Export complete.\n\nZip(s) ready to send:\n${zipList}\n\nFrames: ${res.frames_labeled}\nLabel files: ${res.written_label_files}`);
 
       // After export, backend clears workspace; mirror that in the UI.
       if (res.cleared) {
