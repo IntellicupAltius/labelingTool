@@ -308,16 +308,17 @@ const api = {
   }
 };
 
-const speedMap = {
-  1: {step: 1, delay: 35, mult: 1},
-  2: {step: 2, delay: 30, mult: 2},
-  3: {step: 4, delay: 25, mult: 4},
-  4: {step: 6, delay: 22, mult: 6},
-  5: {step: 8, delay: 20, mult: 8},
-  6: {step: 10, delay: 18, mult: 10},
-  7: {step: 12, delay: 16, mult: 12},
-  8: {step: 16, delay: 14, mult: 16},
-};
+function buildSpeedMap() {
+  return {
+    1: {step: 1,  delay: 50, label: "x1"},
+    2: {step: 2,  delay: 40, label: "x2"},
+    3: {step: 4,  delay: 30, label: "x4"},
+    4: {step: 8,  delay: 22, label: "x8"},
+    5: {step: 16, delay: 18, label: "x16"},
+    6: {step: 32, delay: 14, label: "x32"},
+  };
+}
+let speedMap = buildSpeedMap();
 
 const state = {
   config: null,
@@ -875,7 +876,7 @@ async function renderFrame(idx) {
 
   const mm = state.fps > 0 ? Math.floor((state.frameIdx / state.fps) / 60) : 0;
   const ss = state.fps > 0 ? Math.floor((state.frameIdx / state.fps) % 60) : 0;
-  setStatus(`${state.videoName} | Frame ${state.frameIdx + 1} | ${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")} | speed x${speedMap[state.speed].mult}`);
+  setStatus(`${state.videoName} | Frame ${state.frameIdx + 1} | ${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")} | speed ${speedMap[state.speed].label}`);
 
   // Stop playback at end, or if the server couldn't reach the requested frame.
   if (endReached || (Number.isFinite(requestedIdx) && frameIdx < requestedIdx)) {
@@ -969,7 +970,7 @@ function startPlayback() {
 
       const mm = state.fps > 0 ? Math.floor((state.frameIdx / state.fps) / 60) : 0;
       const ss = state.fps > 0 ? Math.floor((state.frameIdx / state.fps) % 60) : 0;
-      setStatus(`${state.videoName} | Frame ${state.frameIdx + 1} | ${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")} | speed x${speedMap[state.speed].mult}`);
+      setStatus(`${state.videoName} | Frame ${state.frameIdx + 1} | ${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")} | speed ${speedMap[state.speed].label}`);
 
       if (endReached) {
         stopPlayback();
@@ -1208,8 +1209,8 @@ function installHotkeys() {
     if (e.key === "p" || e.key === "P") { e.preventDefault(); togglePlay(); }
     if (e.key === "Home") { e.preventDefault(); await gotoFrame(0); }
     if (e.key === "End") { e.preventDefault(); await gotoFrame(state.totalFrames - 1); }
-    if (e.shiftKey && e.key === "ArrowLeft") { e.preventDefault(); await gotoFrame(state.frameIdx - 50); }
-    if (e.shiftKey && e.key === "ArrowRight") { e.preventDefault(); await gotoFrame(state.frameIdx + 50); }
+    if (e.shiftKey && e.key === "ArrowLeft") { e.preventDefault(); await gotoFrame(state.frameIdx - Math.round((state.fps || 25) * 10)); }
+    if (e.shiftKey && e.key === "ArrowRight") { e.preventDefault(); await gotoFrame(state.frameIdx + Math.round((state.fps || 25) * 10)); }
   });
 }
 
@@ -1258,9 +1259,15 @@ async function init() {
     state.frameIdx = 0;
     state.dirty = false;
     stopPlayback();
-    await renderFrame(0);
+    // Rebuild speed map for this video's actual FPS, then refresh label.
+    speedMap = buildSpeedMap();
+    $("speedText").textContent = speedMap[state.speed].label;
     if ((res.loaded_existing || 0) > 0) {
-      setStatus(`Loaded existing labels: ${res.loaded_existing}`);
+      const lastFrame = (res.last_annotated_frame != null) ? res.last_annotated_frame : 0;
+      await gotoFrame(lastFrame);
+      setStatus(`Loaded ${res.loaded_existing} existing labels — jumped to last annotated frame (${lastFrame + 1})`);
+    } else {
+      await renderFrame(0);
     }
     if ((res.models_loaded || 0) === 0) {
       setStatus(`Video loaded. Now add model *.yaml in: ${state.config?.models_dir || ""}`);
@@ -1615,7 +1622,7 @@ async function init() {
         const info = await api.getVideoInfo(v);
         if (info.has_exports) {
           const ok2 = window.confirm(
-            `This video already has exports on disk:\n\n${info.output_root}\n\nImages: ${info.image_files}\nLabels: ${info.label_files}\n\nLoad anyway?`
+            `This video already has exports on disk:\n\n${info.output_root}\n\nImages: ${info.image_files}   Labels: ${info.label_files}\n\nLoad existing annotations and continue from where you left off?`
           );
           if (!ok2) return;
           loadExisting = true; // user said "yes" => load exported labels back into workspace
@@ -1639,6 +1646,9 @@ async function init() {
 
   $("exportBtn").onclick = async () => {
     if (!state.videoLoaded) return;
+    if ($("exportBtn").disabled) return; // prevent double-click
+    $("exportBtn").disabled = true;
+    $("exportBtn").textContent = "Exporting…";
     stopPlayback();
     try {
       setStatus("Exporting… (this may take a bit)");
@@ -1670,24 +1680,32 @@ async function init() {
     } catch (e) {
       setStatus(`Export error: ${e.message || e}`);
       window.alert(`Export failed: ${e.message || e}`);
+    } finally {
+      $("exportBtn").disabled = false;
+      $("exportBtn").textContent = "Export ALL";
     }
   };
 
   $("playBtn").onclick = () => togglePlay();
   $("startBtn").onclick = async () => { stopPlayback(); await gotoFrame(0); };
   $("endBtn").onclick = async () => { stopPlayback(); await gotoFrame(state.totalFrames - 1); };
-  $("backBtn").onclick = async () => { stopPlayback(); await gotoFrame(state.frameIdx - 50); };
-  $("fwdBtn").onclick = async () => { stopPlayback(); await gotoFrame(state.frameIdx + 50); };
+  function skip10s(dir) {
+    const frames = Math.round((state.fps || 25) * 10);
+    stopPlayback();
+    return gotoFrame(state.frameIdx + dir * frames);
+  }
+  $("backBtn").onclick = () => skip10s(-1);
+  $("fwdBtn").onclick = () => skip10s(+1);
 
   $("speedSlider").oninput = (e) => {
     state.speed = parseInt(e.target.value, 10);
-    $("speedText").textContent = `x${speedMap[state.speed].mult}`;
+    $("speedText").textContent = speedMap[state.speed].label;
     if (state.playing) {
       stopPlayback();
       startPlayback();
     }
   };
-  $("speedText").textContent = `x${speedMap[state.speed].mult}`;
+  $("speedText").textContent = speedMap[state.speed].label;
 
   ms.onchange = () => {
     mms.value = ms.value;

@@ -774,113 +774,167 @@ def create_app() -> FastAPI:
         """
         return state.output_base_dir / sanitize_filename_part(output_video_dirname(video_name))
 
-    def _load_existing_exports_into_state(video_name: str) -> int:
+    def _load_existing_exports_into_state(video_name: str) -> tuple:
         """
-        Loads existing exported YOLO labels (per-model folders) back into the in-memory workspace.
-        Expects files:
-          <output>/<VIDEO_NAME>/<MODEL>/labels/<BASE>.txt
-        where <BASE> ends with `_f%06d`.
+        Loads existing exported YOLO labels back into the in-memory workspace.
+        Searches output_base_dir for batch folders (VIDEO_PREFIX_MODEL/) and zip files
+        (VIDEO_PREFIX_MODEL.zip) that match this video — handles both in-progress exports
+        (folders still on disk) and completed exports (zipped).
+        Returns (loaded_count, last_annotated_frame_idx).
         """
         if state.video_path is None:
-            return 0
-        out_root = _output_root_for_video_name(video_name)
-        if not out_root.exists():
-            return 0
+            return 0, 0
+        if not state.output_base_dir.exists():
+            return 0, 0
+
+        video_prefix = output_video_dirname(video_name)  # e.g., BLAZNAVAC_SANK_LEVO_20251205090046
+        sep = video_prefix + "_"
 
         loaded = 0
-        # clear again just in case
+        last_frame = -1
         state.ann_by_frame.clear()
         state.last_annotation = None
 
-        for model_root in sorted([p for p in out_root.iterdir() if p.is_dir()]):
-            model = model_root.name
-            labels_dir = model_root / "labels"
-            if not labels_dir.exists():
-                continue
+        def _resolve_model_key(raw: str) -> str:
+            """Find the actual model key in state.model_to_names (case-insensitive)."""
+            for k in state.model_to_names:
+                if k.lower() == raw.lower():
+                    return k
+            return raw.lower()
 
-            # class names for this model (if present)
-            names = state.model_to_names.get(model, [])
-
-            for txt_path in sorted(labels_dir.glob("*.txt")):
-                m = re.search(r"_f(\d{6})$", txt_path.stem)
-                if not m:
-                    continue
-                frame_idx = int(m.group(1)) - 1
-                if frame_idx < 0:
+        def _parse_label_lines(lines, frame_idx: int, model_key: str):
+            nonlocal loaded, last_frame
+            names = state.model_to_names.get(model_key, [])
+            img_w = max(1, int(state.img_w))
+            img_h = max(1, int(state.img_h))
+            any_loaded = False
+            for line in lines:
+                parts = line.strip().split()
+                if len(parts) != 5:
                     continue
                 try:
-                    lines = txt_path.read_text(encoding="utf-8").splitlines()
+                    class_id = int(parts[0])
+                    cx, cy, bw, bh = map(float, parts[1:])
                 except Exception:
                     continue
-                for line in lines:
-                    parts = line.strip().split()
-                    if len(parts) != 5:
-                        continue
+                x1 = int((cx - bw / 2.0) * img_w)
+                y1 = int((cy - bh / 2.0) * img_h)
+                x2 = int((cx + bw / 2.0) * img_w)
+                y2 = int((cy + bh / 2.0) * img_h)
+                x1 = clamp(x1, 0, img_w - 1)
+                y1 = clamp(y1, 0, img_h - 1)
+                x2 = clamp(x2, 0, img_w - 1)
+                y2 = clamp(y2, 0, img_h - 1)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                class_name = names[class_id] if 0 <= class_id < len(names) else f"class_{class_id}"
+                ann = Annotation(
+                    id=state.new_annotation_id(),
+                    frame_idx=frame_idx,
+                    model=model_key,
+                    class_name=class_name,
+                    class_id=class_id,
+                    x1=x1, y1=y1, x2=x2, y2=y2,
+                )
+                state.ann_by_frame.setdefault(frame_idx, []).append(ann)
+                loaded += 1
+                any_loaded = True
+            if any_loaded and frame_idx > last_frame:
+                last_frame = frame_idx
+
+        def _load_label_text(text: str, filename_stem: str, model_key: str):
+            m = re.search(r"_f(\d{6})$", filename_stem)
+            if not m:
+                return
+            frame_idx = int(m.group(1)) - 1
+            if frame_idx < 0:
+                return
+            _parse_label_lines(text.splitlines(), frame_idx, model_key)
+
+        # 1. Batch folders on disk: output_base_dir / VIDEO_PREFIX_MODEL /
+        #    (present when export was interrupted before zip+delete)
+        models_from_folders: set = set()
+        for batch_dir in sorted(state.output_base_dir.iterdir()):
+            if not batch_dir.is_dir() or not batch_dir.name.startswith(sep):
+                continue
+            raw_model = batch_dir.name[len(sep):]
+            mk = _resolve_model_key(raw_model)
+            labels_dir = batch_dir / "labels"
+            if labels_dir.exists():
+                for txt_path in sorted(labels_dir.glob("*.txt")):
                     try:
-                        class_id = int(parts[0])
-                        cx, cy, bw, bh = map(float, parts[1:])
+                        _load_label_text(txt_path.read_text(encoding="utf-8"), txt_path.stem, mk)
                     except Exception:
-                        continue
+                        pass
+            models_from_folders.add(mk)
 
-                    # YOLO normalized -> pixel box
-                    img_w = max(1, int(state.img_w))
-                    img_h = max(1, int(state.img_h))
-                    x1 = int((cx - bw / 2.0) * img_w)
-                    y1 = int((cy - bh / 2.0) * img_h)
-                    x2 = int((cx + bw / 2.0) * img_w)
-                    y2 = int((cy + bh / 2.0) * img_h)
-                    x1 = clamp(x1, 0, img_w - 1)
-                    y1 = clamp(y1, 0, img_h - 1)
-                    x2 = clamp(x2, 0, img_w - 1)
-                    y2 = clamp(y2, 0, img_h - 1)
-                    if x2 <= x1 or y2 <= y1:
-                        continue
-
-                    class_name = names[class_id] if 0 <= class_id < len(names) else f"class_{class_id}"
-                    ann = Annotation(
-                        id=state.new_annotation_id(),
-                        frame_idx=frame_idx,
-                        model=model,
-                        class_name=class_name,
-                        class_id=class_id,
-                        x1=x1,
-                        y1=y1,
-                        x2=x2,
-                        y2=y2,
-                    )
-                    state.ann_by_frame.setdefault(frame_idx, []).append(ann)
-                    loaded += 1
+        # 2. Zip files: output_base_dir / VIDEO_PREFIX_MODEL.zip
+        #    (normal case after a completed export)
+        for zip_path in sorted(state.output_base_dir.glob("*.zip")):
+            if not zip_path.stem.startswith(sep):
+                continue
+            raw_model = zip_path.stem[len(sep):]
+            mk = _resolve_model_key(raw_model)
+            if mk in models_from_folders:
+                continue  # already loaded from folder; skip to avoid duplicates
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    for entry in zf.namelist():
+                        norm = entry.replace("\\", "/")
+                        parts_e = norm.split("/")
+                        if len(parts_e) >= 2 and parts_e[-2] == "labels" and norm.endswith(".txt"):
+                            try:
+                                text = zf.read(entry).decode("utf-8")
+                                _load_label_text(text, Path(parts_e[-1]).stem, mk)
+                            except Exception:
+                                pass
+            except Exception as e:
+                logger.warning("Could not read zip %s: %s", zip_path, e)
 
         if debug:
-            logger.debug("Loaded %s existing annotations from %s", loaded, out_root)
-        return loaded
+            logger.debug("Loaded %s existing annotations, last_frame=%s from %s", loaded, last_frame, state.output_base_dir)
+        return loaded, max(0, last_frame)
 
     @app.get("/api/video/info")
     def video_info(video_name: str = Query(...)):
         """
         Lightweight info used by the UI to warn if a video already has exported files.
+        Checks for batch folders (VIDEO_PREFIX_MODEL/) and zip files (VIDEO_PREFIX_MODEL.zip)
+        in the output_base_dir — both layouts produced by the export pipeline.
         """
-        out_root = _output_root_for_video_name(video_name)
-        # New export layout is per-model:
-        #   <out_root>/<model>/images/*.jpg
-        #   <out_root>/<model>/labels/*.txt
+        video_prefix = output_video_dirname(video_name)
+        sep = video_prefix + "_"
         img_count = 0
         lbl_count = 0
-        if out_root.exists():
-            for p in out_root.rglob("*"):
-                if not p.is_file():
+
+        if state.output_base_dir.exists():
+            for p in state.output_base_dir.iterdir():
+                if not p.name.startswith(sep):
                     continue
-                suf = p.suffix.lower()
-                if suf in (".jpg", ".jpeg", ".png") and p.parent.name == "images":
-                    img_count += 1
-                elif suf == ".txt" and p.parent.name == "labels":
-                    lbl_count += 1
+                if p.is_dir():
+                    for f in p.rglob("*"):
+                        if not f.is_file():
+                            continue
+                        suf = f.suffix.lower()
+                        if suf in (".jpg", ".jpeg", ".png") and f.parent.name == "images":
+                            img_count += 1
+                        elif suf == ".txt" and f.parent.name == "labels":
+                            lbl_count += 1
+                elif p.suffix.lower() == ".zip":
+                    try:
+                        with zipfile.ZipFile(p, "r") as zf:
+                            for entry in zf.namelist():
+                                norm = entry.replace("\\", "/")
+                                if "/labels/" in norm and norm.endswith(".txt"):
+                                    lbl_count += 1
+                                elif "/images/" in norm and norm.lower().endswith((".jpg", ".jpeg", ".png")):
+                                    img_count += 1
+                    except Exception:
+                        lbl_count += 1  # fallback: at least count the zip
 
         return {
             "video_name": video_name,
-            "output_root": str(out_root),
-            "images_dir": str(out_root),
-            "labels_dir": str(out_root),
+            "output_root": str(state.output_base_dir),
             "image_files": img_count,
             "label_files": lbl_count,
             "has_exports": (img_count > 0 or lbl_count > 0),
@@ -965,9 +1019,10 @@ def create_app() -> FastAPI:
             logger.debug("Loaded video=%s frames=%s fps=%s size=%sx%s", p.name, state.total_frames, state.fps, state.img_w, state.img_h)
 
         loaded_existing = 0
+        last_annotated_frame = 0
         if req.load_existing_exports:
             with video_lock:
-                loaded_existing = _load_existing_exports_into_state(p.name)
+                loaded_existing, last_annotated_frame = _load_existing_exports_into_state(p.name)
 
         return {
             "video_name": p.name,
@@ -977,6 +1032,7 @@ def create_app() -> FastAPI:
             "height": state.img_h,
             "models_loaded": len(state.model_to_names),
             "loaded_existing": loaded_existing,
+            "last_annotated_frame": last_annotated_frame,
         }
 
     @app.get("/api/video/status")
