@@ -8,107 +8,145 @@
 </head>
 <body>
   <div class="app">
+
+    <!-- ── Top bar: brand + tabs + status ─────────────────────────────── -->
     <header class="topbar">
       <div class="brand">Labeling Tool</div>
-
       <div class="tabs">
-        <button id="tabVideo" class="tabBtn tabActive">Video Labeler</button>
-        <button id="tabDataset" class="tabBtn">Dataset Fixer</button>
-        <button id="tabBg" class="tabBtn">Background Labeler</button>
+        <button id="tabVideo"    class="tabBtn tabActive">Video Labeler</button>
+        <button id="tabDataset"  class="tabBtn">Dataset Fixer</button>
+        <button id="tabBg"       class="tabBtn">Background Labeler</button>
+        <button id="tabAnalyzer" class="tabBtn">Analyzer</button>
       </div>
+      <div id="status" class="status">Starting…</div>
+    </header>
 
-      <div id="videoControls" class="controls">
-        <label class="field">
+    <!-- ── Mode bar: consistent zone, one strip visible at a time ──────── -->
+    <div class="modebar">
+
+      <!-- Video Labeler controls -->
+      <div id="videoControls" class="modestrip hidden">
+        <label class="field" style="min-width:240px;">
           <div class="label">Video</div>
           <select id="videoSelect"></select>
         </label>
-
-        <button id="uploadVideoBtn" class="btn" disabled title="Disabled for now. Copy videos into the videos folder.">Upload…</button>
-        <button id="loadVideoBtn" class="btn primary">Load</button>
-
-        <label class="field">
+        <button id="uploadVideoBtn" class="btn" disabled title="Copy videos into the videos folder.">Upload…</button>
+        <button id="loadVideoBtn"   class="btn primary">Load</button>
+        <label class="field" style="min-width:180px;">
           <div class="label">Model</div>
           <select id="modelSelect"></select>
         </label>
-
-        <button id="exportBtn" class="btn">Export ALL</button>
+        <div class="modestrip-sep"></div>
+        <button id="exportBtn"        class="btn">Export ALL</button>
+        <button id="videoTestModeBtn" class="btn" title="Toggle test mode to add per-image tags">🧪 Test Mode: OFF</button>
       </div>
 
-      <div class="rightControls">
-        <div id="status" class="status">Starting…</div>
+      <!-- Dataset Fixer controls -->
+      <div id="datasetControls" class="modestrip hidden">
+        <label class="field" style="min-width:260px;">
+          <div class="label">Dataset</div>
+          <select id="datasetSelect"></select>
+        </label>
+        <button id="loadDatasetBtn" class="btn primary">Load Dataset</button>
+        <div class="modestrip-sep"></div>
+        <button id="prevImgBtn" class="btn">Prev</button>
+        <button id="nextImgBtn" class="btn">Next</button>
+        <div class="modestrip-sep"></div>
+        <button id="saveOverwriteBtn" class="btn">Save (overwrite)</button>
+        <button id="saveFixedBtn"     class="btn">Save as _fixed</button>
+        <div class="modestrip-sep"></div>
+        <button id="testModeBtn" class="btn" title="Toggle test mode to add per-image tags">🧪 Test Mode: OFF</button>
       </div>
-    </header>
 
+      <!-- Background Labeler controls -->
+      <div id="bgControls" class="modestrip hidden">
+        <label class="field" style="min-width:160px;">
+          <div class="label">Mode</div>
+          <select id="bgModeSelect">
+            <option value="folder">Open Folder</option>
+            <option value="existing">From Existing</option>
+          </select>
+        </label>
+        <div id="bgModeFolder" class="bgModeGroup">
+          <label class="field" style="min-width:220px;">
+            <div class="label">Source folder</div>
+            <select id="bgFolderSelect"></select>
+          </label>
+        </div>
+        <div id="bgModeExisting" class="bgModeGroup hidden">
+          <div class="field" style="min-width:220px; display:flex; align-items:center; padding:6px 0;">
+            <div class="label" style="margin-right:8px; white-space:nowrap;">Looking in:</div>
+            <div id="bgExistingDirLabel" style="font-weight:600; color:var(--text);">—</div>
+          </div>
+        </div>
+        <label class="field" style="min-width:180px;">
+          <div class="label">Target model</div>
+          <select id="bgModelSelect"></select>
+        </label>
+        <label class="field" style="min-width:160px;">
+          <div class="label">Camera filter</div>
+          <select id="bgCameraSelect"></select>
+        </label>
+        <label class="field" style="min-width:110px;">
+          <div class="label">Shuffle</div>
+          <select id="bgShuffleSelect">
+            <option value="1">Yes</option>
+            <option value="0">No</option>
+          </select>
+        </label>
+        <button id="bgStartBtn" class="btn primary">Start</button>
+        <div class="modestrip-sep"></div>
+        <button id="bgBtn"      class="btn primary">B = Background</button>
+        <button id="skipBtn"    class="btn">S = Skip</button>
+        <button id="bgPrevBtn"  class="btn">Prev</button>
+        <button id="bgNextBtn"  class="btn">Next</button>
+        <button id="bgFinishBtn" class="btn">Finish</button>
+      </div>
+
+      <!-- Analyzer controls -->
+      <div id="analyzerControls" class="modestrip hidden">
+        <label class="field" style="min-width:180px;">
+          <div class="label">Model</div>
+          <select id="analyzerModelSelect"></select>
+        </label>
+        <div class="modestrip-sep"></div>
+        <button id="analyzerModeInspector" class="btn primary">Inspector</button>
+        <button id="analyzerModeOverlap"   class="btn">Overlap Report</button>
+        <div class="modestrip-sep"></div>
+        <!-- Inspector actions -->
+        <div id="analyzerInspectorBar" style="display:flex;align-items:center;gap:8px;">
+          <button id="analyzerUploadBtn" class="btn">Upload Image</button>
+          <input id="analyzerFileInput" type="file" accept="image/*" style="display:none"/>
+          <button id="analyzerAnalyzeBtn" class="btn primary" disabled>Analyze</button>
+          <button id="analyzerClearBtn"   class="btn" style="display:none">Clear</button>
+          <span id="analyzerInspectorHint" style="color:var(--muted);font-size:12px;">Upload an image, then draw a bounding box around the object</span>
+        </div>
+        <!-- Overlap actions -->
+        <div id="analyzerOverlapBar" style="display:flex;align-items:center;gap:8px;display:none;">
+          <label class="field" style="min-width:120px;">
+            <div class="label">Samples/class</div>
+            <input id="analyzerSamplesInput" type="number" value="20" min="5" max="100" style="width:70px;"/>
+          </label>
+          <button id="analyzerRunReportBtn" class="btn primary">Run Report</button>
+          <div id="analyzerOverlapProgress" class="hidden" style="display:flex;align-items:center;gap:8px;">
+            <div class="analyzerProgressBar"><div id="analyzerProgressFill" class="analyzerProgressFill"></div></div>
+            <span id="analyzerProgressText" style="color:var(--muted);font-size:12px;"></span>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /modebar -->
+    <!-- ── Main area ───────────────────────────────────────────────────── -->
     <main class="main">
       <section class="viewer">
-        <!-- Dataset Fixer controls -->
-        <div id="datasetControls" class="transport hidden">
-          <label class="field" style="min-width: 260px;">
-            <div class="label">Dataset</div>
-            <select id="datasetSelect"></select>
-          </label>
-          <button id="loadDatasetBtn" class="btn primary">Load Dataset</button>
 
-          <button id="prevImgBtn" class="btn">Prev</button>
-          <button id="nextImgBtn" class="btn">Next</button>
-
-          <button id="saveOverwriteBtn" class="btn">Save (overwrite)</button>
-          <button id="saveFixedBtn" class="btn">Save as _fixed</button>
-        </div>
-
-        <!-- Background Labeler controls -->
-        <div id="bgControls" class="transport hidden">
-          <label class="field" style="min-width: 200px;">
-            <div class="label">Mode</div>
-            <select id="bgModeSelect">
-              <option value="folder">Open Folder</option>
-              <option value="existing">From Existing</option>
-            </select>
-          </label>
-          <!-- Mode 1: Folder mode -->
-          <div id="bgModeFolder" class="bgModeGroup">
-            <label class="field" style="min-width: 260px;">
-              <div class="label">Source folder</div>
-              <select id="bgFolderSelect"></select>
-            </label>
-          </div>
-          <!-- Mode 2: Existing mode -->
-          <div id="bgModeExisting" class="bgModeGroup hidden">
-            <div class="field" style="min-width: 260px; display: flex; align-items: center; padding: 6px 0;">
-              <div class="label" style="margin-right: 8px;">Looking in:</div>
-              <div id="bgExistingDirLabel" style="font-weight: 600; color: #333;">—</div>
-            </div>
-          </div>
-          <label class="field" style="min-width: 220px;">
-            <div class="label">Target model</div>
-            <select id="bgModelSelect"></select>
-          </label>
-          <label class="field" style="min-width: 190px;">
-            <div class="label">Camera filter</div>
-            <select id="bgCameraSelect"></select>
-          </label>
-          <label class="field" style="min-width: 150px;">
-            <div class="label">Shuffle</div>
-            <select id="bgShuffleSelect">
-              <option value="1">Yes</option>
-              <option value="0">No</option>
-            </select>
-          </label>
-          <button id="bgStartBtn" class="btn primary">Start</button>
-          <button id="bgBtn" class="btn primary">B = Background</button>
-          <button id="skipBtn" class="btn">S = Skip</button>
-          <button id="bgPrevBtn" class="btn">Prev</button>
-          <button id="bgNextBtn" class="btn">Next</button>
-          <button id="bgFinishBtn" class="btn">Finish</button>
-        </div>
-
-        <div class="transport">
+        <!-- Video transport — hidden until video mode active -->
+        <div class="transport hidden">
           <button id="startBtn" class="btn">⟵⟵ Start</button>
-          <button id="playBtn" class="btn primary">Play [P]</button>
-          <button id="backBtn" class="btn">-10s</button>
-          <button id="fwdBtn" class="btn">+10s</button>
-          <button id="endBtn" class="btn">End ⟶⟶</button>
-
+          <button id="playBtn"  class="btn primary">Play [P]</button>
+          <button id="backBtn"  class="btn">-10s</button>
+          <button id="fwdBtn"   class="btn">+10s</button>
+          <button id="endBtn"   class="btn">End ⟶⟶</button>
           <div class="speed">
             <div class="speedLabel">Speed</div>
             <input id="speedSlider" type="range" min="1" max="6" step="1" value="4"/>
@@ -126,6 +164,11 @@
       </section>
 
       <aside class="sidebar">
+        <div id="frameTagsPanel" class="panel hidden" style="border-left:3px solid #7c3aed; padding:8px 10px; background:rgba(124,58,237,0.12);">
+          <div class="panelTitle" style="color:#c4b5fd; margin-bottom:6px;">🧪 Frame Tags</div>
+          <div id="frameTagsContent"></div>
+        </div>
+
         <div class="panel">
           <div id="currentTitle" class="panelTitle">Current frame boxes</div>
           <ul id="currentList" class="list"></ul>
@@ -137,9 +180,59 @@
         </div>
       </aside>
     </main>
-  </div>
 
-  <!-- Modal for label assign -->
+    <!-- ── Analyzer panel (shown instead of main when Analyzer tab active) ── -->
+    <div id="analyzerPanel" class="analyzerPanel hidden">
+
+      <!-- Inspector sub-panel -->
+      <div id="analyzerInspectorPanel" class="analyzerSplit">
+        <div class="analyzerLeft">
+          <div id="analyzerCanvasWrap" class="analyzerCanvasWrap">
+            <canvas id="analyzerCanvas" class="analyzerCanvas"></canvas>
+            <div id="analyzerCanvasPlaceholder" class="analyzerCanvasPlaceholder">
+              Upload an image to begin
+            </div>
+          </div>
+        </div>
+        <div class="analyzerRight">
+          <div id="analyzerResultsPlaceholder" class="analyzerResultsPlaceholder">
+            Results will appear here after analysis
+          </div>
+          <div id="analyzerResults" class="hidden">
+            <div class="analyzerSection">
+              <div class="analyzerSectionTitle">Class Scores</div>
+              <div id="analyzerScoreList" class="analyzerScoreList"></div>
+            </div>
+            <div class="analyzerSection" id="analyzerExamplesSection" style="display:none">
+              <div class="analyzerSectionTitle">Examples from top match: <span id="analyzerTopClass"></span></div>
+              <div id="analyzerExampleGrid" class="analyzerExampleGrid"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Overlap sub-panel -->
+      <div id="analyzerOverlapPanel" class="hidden" style="padding:20px;overflow-y:auto;height:100%;">
+        <div id="analyzerOverlapPlaceholder" style="color:var(--muted);text-align:center;margin-top:60px;">
+          Select a model and run the overlap report to detect class confusion in your training data.
+        </div>
+        <div id="analyzerOverlapResults" class="hidden">
+          <div class="analyzerSection">
+            <div class="analyzerSectionTitle">Flagged Pairs <span style="color:var(--muted);font-size:12px;">(confusion rate ≥ 15%)</span></div>
+            <div id="analyzerFlaggedList" class="analyzerFlaggedList"></div>
+          </div>
+          <div class="analyzerSection">
+            <div class="analyzerSectionTitle">Per-Class Accuracy</div>
+            <div id="analyzerClassAccList" class="analyzerClassAccList"></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  </div><!-- /app -->
+
+  <!-- ── Label assignment modal ─────────────────────────────────────────── -->
   <div id="modal" class="modal hidden">
     <div class="modalCard">
       <div class="modalTitle">Assign label</div>
@@ -159,8 +252,8 @@
       </div>
 
       <div class="modalRow">
-        <label class="field full" style="flex-direction: row; align-items: center; gap: 10px;">
-          <input id="backgroundCheck" type="checkbox" />
+        <label class="field full" style="flex-direction:row; align-items:center; gap:10px;">
+          <input id="backgroundCheck" type="checkbox"/>
           <div style="display:flex; flex-direction:column; gap:2px;">
             <div style="font-weight:800;">Background (no boxes)</div>
             <div class="label">Creates an empty label file for this model/frame. Only allowed if current frame has no annotations.</div>
@@ -173,7 +266,7 @@
       </div>
 
       <div class="modalActions">
-        <button id="modalSaveBtn" class="btn primary">Save (Enter)</button>
+        <button id="modalSaveBtn"   class="btn primary">Save (Enter)</button>
         <button id="modalCancelBtn" class="btn">Cancel (Esc)</button>
       </div>
 
@@ -184,5 +277,3 @@
   <script src="/static/app.js"></script>
 </body>
 </html>
-
-

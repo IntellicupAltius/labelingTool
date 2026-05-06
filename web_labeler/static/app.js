@@ -284,6 +284,49 @@ const api = {
       return data;
     });
   },
+  async getTestMode() {
+    return fetch("/api/datasets/test_mode").then(r => r.json());
+  },
+  async setTestMode(testMode) {
+    return fetch("/api/datasets/test_mode", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({test_mode: testMode}),
+    }).then(r => r.json());
+  },
+  async getImageTags(imageIdx) {
+    return fetch(`/api/datasets/tags?image_idx=${encodeURIComponent(imageIdx)}`).then(r => r.json());
+  },
+  async setImageTags(imageIdx, tags) {
+    return fetch("/api/datasets/tags", {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({image_idx: imageIdx, tags}),
+    }).then(r => r.json());
+  },
+  async getFrameTags(frameIdx) {
+    return fetch(`/api/frame/tags?frame_idx=${frameIdx}`).then(r => r.json());
+  },
+  async setFrameTags(frameIdx, frameTags, bboxTags, bboxVariations) {
+    return fetch("/api/frame/tags", {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({frame_idx: frameIdx, frame_tags: frameTags, bbox_tags: bboxTags, bbox_variations: bboxVariations || {}}),
+    }).then(r => r.json());
+  },
+  async getDatasetTags(imageIdx) {
+    return fetch(`/api/datasets/tags?image_idx=${imageIdx}`).then(r => r.json());
+  },
+  async setDatasetTags(imageIdx, frameTags, bboxTags, bboxVariations) {
+    return fetch("/api/datasets/tags", {
+      method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({image_idx: imageIdx, frame_tags: frameTags, bbox_tags: bboxTags, bbox_variations: bboxVariations || {}}),
+    }).then(r => r.json());
+  },
+  async getClassVariations() {
+    return fetch("/api/class_variations").then(r => r.json());
+  },
   async exportAllWithBarCounter(barCounter) {
     return fetch(`/api/export`, {
       method: "POST",
@@ -360,6 +403,11 @@ const state = {
   datasetImageCount: 0,
   datasetImageIdx: 0,
   datasetImageName: "",
+
+  testMode: false,
+  imageTags: [],
+  videoFrameTags: {},  // {frame_idx: {frame_tags: [], bbox_tags: {ann_id: []}, bbox_variations: {ann_id: "LABEL"}}}
+  classVariations: {},  // {model: {class: [variation_labels]}} — loaded from server on init
 
   // background labeler
   bgLoaded: false,
@@ -448,23 +496,32 @@ function resetWorkspaceUI(message) {
 
 function setMode(mode) {
   state.mode = mode;
-  const isVideo = (mode === "video");
-  const isDataset = (mode === "dataset");
-  const isBg = (mode === "bg");
+  const isVideo    = (mode === "video");
+  const isDataset  = (mode === "dataset");
+  const isBg       = (mode === "bg");
+  const isAnalyzer = (mode === "analyzer");
 
   $("tabVideo").classList.toggle("tabActive", isVideo);
   $("tabDataset").classList.toggle("tabActive", isDataset);
   $("tabBg").classList.toggle("tabActive", isBg);
+  $("tabAnalyzer").classList.toggle("tabActive", isAnalyzer);
 
-  // Header controls
+  // Modestrip
   $("videoControls").classList.toggle("hidden", !isVideo);
-
-  // Viewer controls
   $("datasetControls").classList.toggle("hidden", !isDataset);
   $("bgControls").classList.toggle("hidden", !isBg);
+  $("analyzerControls").classList.toggle("hidden", !isAnalyzer);
+
+  // Main area: hide normal viewer+sidebar for analyzer, show analyzer panel
+  const mainEl = document.querySelector(".main");
+  if (mainEl) mainEl.style.display = isAnalyzer ? "none" : "";
+  $("analyzerPanel").classList.toggle("hidden", !isAnalyzer);
+  if (isAnalyzer && typeof window.__setAnalyzerSubMode === "function") {
+    window.__setAnalyzerSubMode(analyzerState ? analyzerState.subMode : "inspector");
+  }
+
   $("startBtn").closest(".transport").classList.toggle("hidden", !isVideo);
 
-  // Sidebar titles + global list
   if (isVideo) {
     $("currentTitle").textContent = "Current frame boxes";
     $("globalTitle").textContent = "All annotations (click to jump)";
@@ -585,18 +642,129 @@ function draw() {
   ctx.restore();
 }
 
+function renderFrameTagsPanel(frameIdx, frameTagsData) {
+  const panel = $("frameTagsPanel");
+  if (!state.testMode) { panel.classList.add("hidden"); return; }
+  panel.classList.remove("hidden");
+
+  const FRAME_TAGS = ["low_light", "busy", "force_day", "force_night"];
+  const OVERRIDE_TAGS = ["force_day", "force_night"];
+  const currentFrameTags = (frameTagsData && frameTagsData.frame_tags) ? [...frameTagsData.frame_tags] : [];
+
+  const content = $("frameTagsContent");
+  content.innerHTML = "";
+  const grid = document.createElement("div");
+  grid.style.cssText = "display:flex; flex-wrap:wrap; gap:6px;";
+
+  for (const tag of FRAME_TAGS) {
+    const isOverride = OVERRIDE_TAGS.includes(tag);
+    const lbl = document.createElement("label");
+    lbl.style.cssText = `display:flex; align-items:center; gap:3px; font-size:12px; cursor:pointer; padding:2px 6px; border-radius:4px; background:${isOverride ? "#fef3c7" : "#ede9fe"}; border:1px solid ${isOverride ? "#f59e0b" : "#a78bfa"}; color:${isOverride ? "#713f12" : "#3b0764"};`;
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.dataset.tag = tag;
+    cb.checked = currentFrameTags.includes(tag);
+    cb.addEventListener("change", async () => {
+      let tags = [...currentFrameTags];
+      if (cb.checked) {
+        if (tag === "force_day") tags = tags.filter(t => t !== "force_night");
+        if (tag === "force_night") tags = tags.filter(t => t !== "force_day");
+        if (!tags.includes(tag)) tags.push(tag);
+      } else {
+        tags = tags.filter(t => t !== tag);
+      }
+      // update currentFrameTags in place
+      currentFrameTags.length = 0;
+      tags.forEach(t => currentFrameTags.push(t));
+      // get current bbox_tags from state and save
+      const existing = state.videoFrameTags[frameIdx] || {};
+      await api.setFrameTags(frameIdx, tags, existing.bbox_tags || {}, existing.bbox_variations || {});
+      state.videoFrameTags[frameIdx] = {frame_tags: tags, bbox_tags: existing.bbox_tags || {}, bbox_variations: existing.bbox_variations || {}};
+      // re-render checkboxes to update visual state
+      renderFrameTagsPanel(frameIdx, state.videoFrameTags[frameIdx]);
+    });
+    const span = document.createElement("span");
+    span.textContent = tag;
+    lbl.appendChild(cb); lbl.appendChild(span);
+    grid.appendChild(lbl);
+  }
+  content.appendChild(grid);
+}
+
 async function refreshLists() {
   if (state.mode === "dataset") {
     if (!state.datasetLoaded) return;
     const data = await api.getDatasetAnnotations(state.datasetImageIdx);
     state.frameAnnotations = data.annotations || [];
     state.allAnnotations = [];
+    let tagsData = {frame_tags: [], bbox_tags: {}, bbox_variations: {}};
+    if (state.testMode) {
+      tagsData = await api.getDatasetTags(state.datasetImageIdx);
+      state.imageTags = tagsData.frame_tags || [];
+    }
     const isBackground = data.is_background || false;
     const isDeleted = data.is_deleted || false;
 
     // current image list
     const ul = $("currentList");
     ul.innerHTML = "";
+
+    // Tag panel (test mode only) — frame-level tags only
+    if (state.testMode) {
+      const liTags = document.createElement("li");
+      liTags.className = "item";
+      liTags.style.backgroundColor = "rgba(124,58,237,0.12)";
+      liTags.style.borderLeft = "3px solid #7c3aed";
+      liTags.style.padding = "8px 10px";
+      liTags.style.flexWrap = "wrap";
+      liTags.style.gap = "4px";
+
+      const tagHeader = document.createElement("div");
+      tagHeader.style.cssText = "font-weight:600; color:#c4b5fd; font-size:11px; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px; width:100%;";
+      tagHeader.textContent = "🧪 Frame Tags";
+      liTags.appendChild(tagHeader);
+
+      const FRAME_TAGS = ["low_light", "busy", "force_day", "force_night"];
+      const OVERRIDE_TAGS = ["force_day", "force_night"];
+      const currentFrameTags = [...(tagsData.frame_tags || [])];
+
+      const tagGrid = document.createElement("div");
+      tagGrid.style.cssText = "display:flex; flex-wrap:wrap; gap:6px; align-items:center;";
+
+      for (const tag of FRAME_TAGS) {
+        const isOverride = OVERRIDE_TAGS.includes(tag);
+        const lbl = document.createElement("label");
+        lbl.style.cssText = `display:flex; align-items:center; gap:3px; font-size:12px; cursor:pointer; padding:2px 6px; border-radius:4px; background:${isOverride ? "#fef3c7" : "#ede9fe"}; border:1px solid ${isOverride ? "#f59e0b" : "#a78bfa"}; color:${isOverride ? "#713f12" : "#3b0764"};`;
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.dataset.tag = tag;
+        cb.checked = currentFrameTags.includes(tag);
+        cb.addEventListener("change", async () => {
+          let tags = [...currentFrameTags];
+          if (cb.checked) {
+            // Mutual exclusion for force_day/force_night
+            if (tag === "force_day") tags = tags.filter(t => t !== "force_night");
+            if (tag === "force_night") tags = tags.filter(t => t !== "force_day");
+            if (!tags.includes(tag)) tags.push(tag);
+          } else {
+            tags = tags.filter(t => t !== tag);
+          }
+          currentFrameTags.length = 0;
+          tags.forEach(t => currentFrameTags.push(t));
+          state.imageTags = tags;
+          await api.setDatasetTags(state.datasetImageIdx, tags, tagsData.bbox_tags || {}, tagsData.bbox_variations || {});
+          await refreshLists();
+        });
+        const span = document.createElement("span");
+        span.textContent = tag;
+        lbl.appendChild(cb);
+        lbl.appendChild(span);
+        tagGrid.appendChild(lbl);
+      }
+
+      liTags.appendChild(tagGrid);
+      ul.appendChild(liTags);
+    }
 
     // Deletion marker entry (always shown if marked for deletion)
     if (isDeleted) {
@@ -719,6 +887,68 @@ async function refreshLists() {
       btns.appendChild(del);
       li.appendChild(main);
       li.appendChild(btns);
+
+      // BBox-level tags + variation (test mode only)
+      if (state.testMode) {
+        const BBOX_TAGS = ["occlusion", "partial", "blurry"];
+        const bboxTagRow = document.createElement("div");
+        bboxTagRow.style.cssText = "display:flex; gap:4px; flex-wrap:wrap; margin-top:4px; padding-top:4px; border-top:1px solid #e0c9ff; align-items:center;";
+        const currentBboxTags = [...((tagsData.bbox_tags && tagsData.bbox_tags[a.id]) || [])];
+
+        for (const tag of BBOX_TAGS) {
+          const lbl = document.createElement("label");
+          lbl.style.cssText = "display:flex; align-items:center; gap:2px; font-size:11px; cursor:pointer; padding:1px 5px; border-radius:3px; background:#dbeafe; border:1px solid #93c5fd; color:#1e3a5f;";
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = currentBboxTags.includes(tag);
+          cb.addEventListener("change", async () => {
+            let tags = [...currentBboxTags];
+            if (cb.checked) { if (!tags.includes(tag)) tags.push(tag); }
+            else { tags = tags.filter(t => t !== tag); }
+            currentBboxTags.length = 0;
+            tags.forEach(t => currentBboxTags.push(t));
+            const updatedBboxTags = {...(tagsData.bbox_tags || {})};
+            updatedBboxTags[a.id] = tags;
+            tagsData.bbox_tags = updatedBboxTags;
+            await api.setDatasetTags(state.datasetImageIdx, tagsData.frame_tags || [], updatedBboxTags, tagsData.bbox_variations || {});
+          });
+          const span = document.createElement("span");
+          span.textContent = tag;
+          lbl.appendChild(cb); lbl.appendChild(span);
+          bboxTagRow.appendChild(lbl);
+        }
+
+        // Variation dropdown — only for classes with known subclasses
+        // In dataset mode a.model is absent; fall back to state.datasetModel
+        const _dsModel = (a.model || state.datasetModel || '').toLowerCase();
+        const modelVars = state.classVariations[_dsModel] || {};
+        const variations = modelVars[a.class_name] || [];
+        if (variations.length > 0) {
+          const sel = document.createElement("select");
+          sel.style.cssText = "font-size:11px; padding:1px 4px; border-radius:3px; border:1px solid #a78bfa; background:#f5f3ff; color:#3b0764; cursor:pointer; max-width:160px;";
+          sel.title = "Variation (subclass)";
+          const blank = document.createElement("option");
+          blank.value = ""; blank.textContent = "— variation —";
+          sel.appendChild(blank);
+          for (const v of variations) {
+            const opt = document.createElement("option");
+            opt.value = v; opt.textContent = v;
+            sel.appendChild(opt);
+          }
+          sel.value = (tagsData.bbox_variations && tagsData.bbox_variations[a.id]) || "";
+          sel.addEventListener("change", async () => {
+            const updatedVariations = {...(tagsData.bbox_variations || {})};
+            if (sel.value) updatedVariations[a.id] = sel.value;
+            else delete updatedVariations[a.id];
+            tagsData.bbox_variations = updatedVariations;
+            await api.setDatasetTags(state.datasetImageIdx, tagsData.frame_tags || [], tagsData.bbox_tags || {}, updatedVariations);
+          });
+          bboxTagRow.appendChild(sel);
+        }
+
+        li.appendChild(bboxTagRow);
+      }
+
       ul.appendChild(li);
     }
 
@@ -733,6 +963,14 @@ async function refreshLists() {
   const backgroundModels = frameData.background_models || [];
   const allData = await api.getAllAnnotations();
   state.allAnnotations = allData.annotations || [];
+
+  if (state.testMode && state.videoLoaded) {
+    const tagsData = await api.getFrameTags(state.frameIdx);
+    state.videoFrameTags[state.frameIdx] = {frame_tags: tagsData.frame_tags || [], bbox_tags: tagsData.bbox_tags || {}, bbox_variations: tagsData.bbox_variations || {}};
+    renderFrameTagsPanel(state.frameIdx, state.videoFrameTags[state.frameIdx]);
+  } else {
+    renderFrameTagsPanel(state.frameIdx, null);
+  }
 
   // current frame
   const ul = $("currentList");
@@ -795,6 +1033,72 @@ async function refreshLists() {
     btns.appendChild(del);
     li.appendChild(main);
     li.appendChild(btns);
+
+    // BBox-level tags + variation (test mode only)
+    if (state.testMode) {
+      const BBOX_TAGS = ["occlusion", "partial", "blurry"];
+      const bboxTagRow = document.createElement("div");
+      bboxTagRow.style.cssText = "display:flex; gap:4px; flex-wrap:wrap; margin-top:4px; padding-top:4px; border-top:1px solid #e0c9ff; align-items:center;";
+      const currentBboxTags = (state.videoFrameTags[state.frameIdx] && state.videoFrameTags[state.frameIdx].bbox_tags)
+        ? [...(state.videoFrameTags[state.frameIdx].bbox_tags[a.id] || [])]
+        : [];
+
+      for (const tag of BBOX_TAGS) {
+        const lbl = document.createElement("label");
+        lbl.style.cssText = "display:flex; align-items:center; gap:2px; font-size:11px; cursor:pointer; padding:1px 5px; border-radius:3px; background:#dbeafe; border:1px solid #93c5fd; color:#1e3a5f;";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = currentBboxTags.includes(tag);
+        cb.addEventListener("change", async () => {
+          let tags = [...currentBboxTags];
+          if (cb.checked) { if (!tags.includes(tag)) tags.push(tag); }
+          else { tags = tags.filter(t => t !== tag); }
+          currentBboxTags.length = 0;
+          tags.forEach(t => currentBboxTags.push(t));
+          const frameEntry = state.videoFrameTags[state.frameIdx] || {frame_tags: [], bbox_tags: {}, bbox_variations: {}};
+          frameEntry.bbox_tags = {...(frameEntry.bbox_tags || {})};
+          frameEntry.bbox_tags[a.id] = tags;
+          state.videoFrameTags[state.frameIdx] = frameEntry;
+          await api.setFrameTags(state.frameIdx, frameEntry.frame_tags || [], frameEntry.bbox_tags, frameEntry.bbox_variations || {});
+        });
+        const span = document.createElement("span");
+        span.textContent = tag;
+        lbl.appendChild(cb); lbl.appendChild(span);
+        bboxTagRow.appendChild(lbl);
+      }
+
+      // Variation dropdown — only for classes with known subclasses
+      const modelVars = state.classVariations[(a.model || '').toLowerCase()] || {};
+      const variations = modelVars[a.class_name] || [];
+      if (variations.length > 0) {
+        const frameEntry = state.videoFrameTags[state.frameIdx] || {};
+        const currentVariation = (frameEntry.bbox_variations && frameEntry.bbox_variations[a.id]) || "";
+        const sel = document.createElement("select");
+        sel.style.cssText = "font-size:11px; padding:1px 4px; border-radius:3px; border:1px solid #a78bfa; background:#f5f3ff; color:#3b0764; cursor:pointer; max-width:160px;";
+        sel.title = "Variation (subclass)";
+        const blank = document.createElement("option");
+        blank.value = ""; blank.textContent = "— variation —";
+        sel.appendChild(blank);
+        for (const v of variations) {
+          const opt = document.createElement("option");
+          opt.value = v; opt.textContent = v;
+          sel.appendChild(opt);
+        }
+        sel.value = currentVariation;
+        sel.addEventListener("change", async () => {
+          const fe = state.videoFrameTags[state.frameIdx] || {frame_tags: [], bbox_tags: {}, bbox_variations: {}};
+          fe.bbox_variations = {...(fe.bbox_variations || {})};
+          if (sel.value) fe.bbox_variations[a.id] = sel.value;
+          else delete fe.bbox_variations[a.id];
+          state.videoFrameTags[state.frameIdx] = fe;
+          await api.setFrameTags(state.frameIdx, fe.frame_tags || [], fe.bbox_tags || {}, fe.bbox_variations);
+        });
+        bboxTagRow.appendChild(sel);
+      }
+
+      li.appendChild(bboxTagRow);
+    }
+
     ul.appendChild(li);
   }
 
@@ -1219,8 +1523,27 @@ async function init() {
   state.ctx = state.canvas.getContext("2d");
 
   setStatus("Loading config…");
-  const cfg = await api.getConfig();
+  const [cfg, classVars, analyzerCfg] = await Promise.all([
+    api.getConfig(),
+    api.getClassVariations(),
+    fetch("/api/analyzer/config").then(r => r.json()).catch(() => ({available: false, models: []})),
+  ]);
   state.config = cfg;
+
+  // Disable Analyzer tab on machines without GPU models (labelers' Windows PCs)
+  if (!analyzerCfg.available) {
+    const tabBtn = $("tabAnalyzer");
+    tabBtn.disabled = true;
+    tabBtn.title = "Analyzer requires GPU server — not available on this machine";
+    tabBtn.style.opacity = "0.35";
+    tabBtn.style.cursor = "not-allowed";
+    tabBtn.onclick = (e) => e.preventDefault();
+  }
+  // Normalize model keys to lowercase so they match regardless of YAML filename casing
+  const _rawVars = classVars || {};
+  state.classVariations = Object.fromEntries(
+    Object.entries(_rawVars).map(([m, classes]) => [m.toLowerCase(), classes])
+  );
   if (cfg.app_version) {
     setStatus(`Loaded (v${cfg.app_version}). Ready.`);
   }
@@ -1294,12 +1617,27 @@ async function init() {
   mms.value = ms.value;
 
   // ---- Tabs ----
+  function disableTestMode() {
+    if (!state.testMode) return;
+    state.testMode = false;
+    state.videoFrameTags = {};
+    api.setTestMode(false).catch(() => {});
+    const label = "🧪 Test Mode: OFF";
+    const styleOff = (btn) => { btn.textContent = label; btn.style.backgroundColor = ""; btn.style.color = ""; };
+    if ($("videoTestModeBtn")) styleOff($("videoTestModeBtn"));
+    if ($("testModeBtn"))      styleOff($("testModeBtn"));
+    if ($("frameTagsPanel"))   $("frameTagsPanel").classList.add("hidden");
+  }
+
   setMode("video");
   $("tabVideo").onclick = () => {
+    disableTestMode();
+    if (state.mode !== "video") resetWorkspaceUI(`Video Labeler. Videos: ${state.config?.videos_dir || ""}`);
     setMode("video");
     setStatus(`Video Labeler. Videos: ${state.config?.videos_dir || ""}`);
   };
   $("tabDataset").onclick = async () => {
+    disableTestMode();
     if (state.dirty) {
       const ok = window.confirm("You have un-exported video annotations. Switch to Dataset Fixer and lose them?");
       if (!ok) return;
@@ -1339,6 +1677,7 @@ async function init() {
 
   // ---- Background Labeler ----
   $("tabBg").onclick = async () => {
+    disableTestMode();
     if (state.dirty) {
       const ok = window.confirm("You have un-exported video annotations. Switch and lose them?");
       if (!ok) return;
@@ -1562,6 +1901,37 @@ async function init() {
     if (!state.datasetLoaded) return;
     await renderDatasetImage(state.datasetImageIdx + 1);
   };
+  $("testModeBtn").addEventListener("click", async () => {
+    const newMode = !state.testMode;
+    await api.setTestMode(newMode);
+    state.testMode = newMode;
+    const label = `🧪 Test Mode: ${newMode ? "ON" : "OFF"}`;
+    $("testModeBtn").textContent = label;
+    $("testModeBtn").style.backgroundColor = newMode ? "#7c3aed" : "";
+    $("testModeBtn").style.color = newMode ? "#fff" : "";
+    if ($("videoTestModeBtn")) {
+      $("videoTestModeBtn").textContent = label;
+      $("videoTestModeBtn").style.backgroundColor = newMode ? "#7c3aed" : "";
+      $("videoTestModeBtn").style.color = newMode ? "#fff" : "";
+    }
+    await refreshLists();
+  });
+
+  $("videoTestModeBtn").addEventListener("click", async () => {
+    const newMode = !state.testMode;
+    await api.setTestMode(newMode);
+    state.testMode = newMode;
+    const label = `🧪 Test Mode: ${newMode ? "ON" : "OFF"}`;
+    $("videoTestModeBtn").textContent = label;
+    $("videoTestModeBtn").style.backgroundColor = newMode ? "#7c3aed" : "";
+    $("videoTestModeBtn").style.color = newMode ? "#fff" : "";
+    if ($("testModeBtn")) {
+      $("testModeBtn").textContent = label;
+      $("testModeBtn").style.backgroundColor = newMode ? "#7c3aed" : "";
+      $("testModeBtn").style.color = newMode ? "#fff" : "";
+    }
+    await refreshLists();
+  });
   $("saveOverwriteBtn").onclick = async () => {
     if (!state.datasetLoaded) return;
     try {
@@ -1735,6 +2105,384 @@ async function init() {
     e.preventDefault();
     e.returnValue = "";
   });
+
+  // ── Analyzer Tab ──────────────────────────────────────────────────────────
+
+  window.analyzerState = {};
+  const analyzerState = window.analyzerState;
+  Object.assign(analyzerState, {
+    subMode: "inspector",    // "inspector" | "overlap"
+    imageLoaded: false,
+    imageW: 0,
+    imageH: 0,
+    bbox: null,              // {x1, y1, x2, y2} in image coords
+    drawing: false,
+    drawStart: null,
+    overlapJobId: null,
+    overlapPollTimer: null,
+    analyzerModels: [],
+  });
+
+  function setAnalyzerSubMode(mode) {
+    window.__setAnalyzerSubMode = setAnalyzerSubMode;
+    analyzerState.subMode = mode;
+    const isInspector = mode === "inspector";
+    $("analyzerModeInspector").classList.toggle("primary", isInspector);
+    $("analyzerModeOverlap").classList.toggle("primary", !isInspector);
+    $("analyzerInspectorBar").style.display = isInspector ? "flex" : "none";
+    $("analyzerOverlapBar").style.display = isInspector ? "none" : "flex";
+    $("analyzerInspectorPanel").style.display = isInspector ? "flex" : "none";
+    $("analyzerOverlapPanel").classList.toggle("hidden", isInspector);
+  }
+
+  $("analyzerModeInspector").onclick = () => setAnalyzerSubMode("inspector");
+  $("analyzerModeOverlap").onclick = () => setAnalyzerSubMode("overlap");
+
+  $("tabAnalyzer").onclick = async () => {
+    disableTestMode();
+    if (state.dirty) {
+      const ok = window.confirm("You have un-exported video annotations. Switch and lose them?");
+      if (!ok) return;
+    }
+    resetWorkspaceUI("Analyzer");
+    setMode("analyzer");
+    setStatus("Analyzer — Inspector: upload an image and draw a bbox to identify objects");
+    try {
+      const cfg = await fetch("/api/analyzer/config").then(r => r.json());
+      analyzerState.analyzerModels = cfg.models || [];
+      const sel = $("analyzerModelSelect");
+      sel.innerHTML = "";
+      for (const m of cfg.models) {
+        const opt = document.createElement("option");
+        opt.value = m; opt.textContent = m;
+        sel.appendChild(opt);
+      }
+    } catch (e) {
+      setStatus(`Analyzer config failed: ${e.message || e}`);
+    }
+  };
+
+  // ── Inspector canvas ───────────────────────────────────────────────────────
+
+  const aCanvas = $("analyzerCanvas");
+  const aCtx = aCanvas.getContext("2d");
+  let _analyzerImg = null;
+
+  function analyzerCanvasToImg(cx, cy) {
+    const rect = aCanvas.getBoundingClientRect();
+    const scaleX = analyzerState.imageW / aCanvas.width;
+    const scaleY = analyzerState.imageH / aCanvas.height;
+    return {
+      x: Math.round((cx - rect.left) * (aCanvas.width / rect.width) * scaleX),
+      y: Math.round((cy - rect.top)  * (aCanvas.height / rect.height) * scaleY),
+    };
+  }
+
+  function analyzerRedraw() {
+    if (!_analyzerImg) return;
+    aCanvas.width = _analyzerImg.naturalWidth;
+    aCanvas.height = _analyzerImg.naturalHeight;
+    aCtx.drawImage(_analyzerImg, 0, 0);
+    if (analyzerState.bbox) {
+      const {x1, y1, x2, y2} = analyzerState.bbox;
+      aCtx.strokeStyle = "#2dd4bf";
+      aCtx.lineWidth = 3;
+      aCtx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      aCtx.fillStyle = "rgba(45,212,191,0.12)";
+      aCtx.fillRect(x1, y1, x2 - x1, y2 - y1);
+    }
+  }
+
+  aCanvas.addEventListener("mousedown", (e) => {
+    if (!analyzerState.imageLoaded) return;
+    const p = analyzerCanvasToImg(e.clientX, e.clientY);
+    analyzerState.drawing = true;
+    analyzerState.drawStart = p;
+    analyzerState.bbox = null;
+    analyzerRedraw();
+  });
+
+  aCanvas.addEventListener("mousemove", (e) => {
+    if (!analyzerState.drawing) return;
+    const p = analyzerCanvasToImg(e.clientX, e.clientY);
+    analyzerState.bbox = {
+      x1: Math.min(analyzerState.drawStart.x, p.x),
+      y1: Math.min(analyzerState.drawStart.y, p.y),
+      x2: Math.max(analyzerState.drawStart.x, p.x),
+      y2: Math.max(analyzerState.drawStart.y, p.y),
+    };
+    analyzerRedraw();
+  });
+
+  aCanvas.addEventListener("mouseup", () => {
+    analyzerState.drawing = false;
+    if (analyzerState.bbox) {
+      const b = analyzerState.bbox;
+      if ((b.x2 - b.x1) < 10 || (b.y2 - b.y1) < 10) {
+        analyzerState.bbox = null;
+      }
+    }
+    $("analyzerAnalyzeBtn").disabled = !analyzerState.bbox;
+    analyzerRedraw();
+  });
+
+  $("analyzerUploadBtn").onclick = () => $("analyzerFileInput").click();
+
+  $("analyzerFileInput").onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      _analyzerImg = img;
+      analyzerState.imageLoaded = true;
+      analyzerState.imageW = img.naturalWidth;
+      analyzerState.imageH = img.naturalHeight;
+      analyzerState.bbox = null;
+      $("analyzerCanvas").style.display = "block";
+      $("analyzerCanvasPlaceholder").style.display = "none";
+      $("analyzerClearBtn").style.display = "";
+      $("analyzerAnalyzeBtn").disabled = true;
+      $("analyzerInspectorHint").textContent = "Draw a bounding box around the object to identify";
+      analyzerRedraw();
+      $("analyzerResults").classList.add("hidden");
+      $("analyzerResultsPlaceholder").style.display = "";
+    };
+    img.src = url;
+    analyzerState._fileRef = file;
+    e.target.value = "";
+  };
+
+  $("analyzerClearBtn").onclick = () => {
+    _analyzerImg = null;
+    analyzerState.imageLoaded = false;
+    analyzerState.bbox = null;
+    aCanvas.style.display = "none";
+    $("analyzerCanvasPlaceholder").style.display = "";
+    $("analyzerClearBtn").style.display = "none";
+    $("analyzerAnalyzeBtn").disabled = true;
+    $("analyzerInspectorHint").textContent = "Upload an image, then draw a bounding box around the object";
+    $("analyzerResults").classList.add("hidden");
+    $("analyzerResultsPlaceholder").style.display = "";
+  };
+
+  $("analyzerAnalyzeBtn").onclick = async () => {
+    if (!analyzerState.imageLoaded || !analyzerState.bbox || !analyzerState._fileRef) return;
+    const model = $("analyzerModelSelect").value;
+    if (!model) { window.alert("Select a model first."); return; }
+
+    $("analyzerAnalyzeBtn").disabled = true;
+    $("analyzerAnalyzeBtn").textContent = "Analyzing…";
+    setStatus("Running inference…");
+
+    try {
+      // Convert file to base64
+      const b64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result.split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(analyzerState._fileRef);
+      });
+
+      const res = await fetch("/api/analyzer/classify", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          model,
+          image_b64: b64,
+          bbox: analyzerState.bbox,
+        }),
+      }).then(async r => {
+        if (!r.ok) throw new Error((await r.json()).detail || "Classify failed");
+        return r.json();
+      });
+
+      renderAnalyzerScores(res.scores || [], model);
+      setStatus("Analysis complete");
+    } catch (e) {
+      setStatus(`Analysis failed: ${e.message || e}`);
+      window.alert(`Analysis failed: ${e.message || e}`);
+    } finally {
+      $("analyzerAnalyzeBtn").disabled = false;
+      $("analyzerAnalyzeBtn").textContent = "Analyze";
+    }
+  };
+
+  function renderAnalyzerScores(scores, model) {
+    $("analyzerResultsPlaceholder").style.display = "none";
+    $("analyzerResults").classList.remove("hidden");
+
+    const list = $("analyzerScoreList");
+    list.innerHTML = "";
+
+    if (!scores.length) {
+      list.innerHTML = "<div style='color:var(--muted);font-size:12px;'>No detections in the selected region.</div>";
+      $("analyzerExamplesSection").style.display = "none";
+      return;
+    }
+
+    const maxConf = scores[0].confidence;
+    scores.slice(0, 10).forEach((s, i) => {
+      const row = document.createElement("div");
+      row.className = "analyzerScoreRow" + (i === 0 ? " top" : "");
+      const pct = maxConf > 0 ? Math.round((s.confidence / maxConf) * 100) : 0;
+      const color = i === 0 ? "var(--accent)" : i < 3 ? "var(--accent2)" : "var(--muted)";
+      row.innerHTML = `
+        <div class="analyzerScoreLabel" title="${s.class}">${s.class}</div>
+        <div class="analyzerScoreBar"><div class="analyzerScoreBarFill" style="width:${pct}%;background:${color}"></div></div>
+        <div class="analyzerScoreVal">${(s.confidence * 100).toFixed(0)}%</div>
+      `;
+      row.onclick = () => loadAnalyzerExamples(model, s.class);
+      list.appendChild(row);
+    });
+
+    // Auto-load examples for top match
+    if (scores.length > 0) {
+      loadAnalyzerExamples(model, scores[0].class);
+    }
+  }
+
+  async function loadAnalyzerExamples(model, className) {
+    $("analyzerTopClass").textContent = className;
+    $("analyzerExamplesSection").style.display = "";
+    const grid = $("analyzerExampleGrid");
+    grid.innerHTML = "<span style='color:var(--muted);font-size:11px;'>Loading…</span>";
+    try {
+      const res = await fetch(`/api/analyzer/examples?model=${encodeURIComponent(model)}&class_name=${encodeURIComponent(className)}&n=4`).then(r => r.json());
+      grid.innerHTML = "";
+      if (!res.examples || !res.examples.length) {
+        grid.innerHTML = "<span style='color:var(--muted);font-size:11px;'>No examples found</span>";
+        return;
+      }
+      for (const src of res.examples) {
+        const img = document.createElement("img");
+        img.className = "analyzerExampleImg";
+        img.src = src;
+        img.title = className;
+        grid.appendChild(img);
+      }
+    } catch (e) {
+      grid.innerHTML = `<span style='color:var(--danger);font-size:11px;'>${e.message || e}</span>`;
+    }
+  }
+
+  // ── Overlap Report ─────────────────────────────────────────────────────────
+
+  $("analyzerRunReportBtn").onclick = async () => {
+    const model = $("analyzerModelSelect").value;
+    if (!model) { window.alert("Select a model first."); return; }
+    const samples = parseInt($("analyzerSamplesInput").value) || 20;
+
+    $("analyzerRunReportBtn").disabled = true;
+    $("analyzerOverlapProgress").classList.remove("hidden");
+    $("analyzerProgressFill").style.width = "0%";
+    $("analyzerProgressText").textContent = "Starting…";
+    $("analyzerOverlapResults").classList.add("hidden");
+    $("analyzerOverlapPlaceholder").style.display = "none";
+    setStatus(`Running overlap report for ${model}…`);
+
+    try {
+      const res = await fetch("/api/analyzer/overlap_report", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({model, samples}),
+      }).then(async r => {
+        if (!r.ok) throw new Error((await r.json()).detail || "Failed to start report");
+        return r.json();
+      });
+      analyzerState.overlapJobId = res.job_id;
+      if (analyzerState.overlapPollTimer) clearInterval(analyzerState.overlapPollTimer);
+      analyzerState.overlapPollTimer = setInterval(pollOverlapJob, 1500);
+    } catch (e) {
+      setStatus(`Overlap report failed: ${e.message || e}`);
+      $("analyzerRunReportBtn").disabled = false;
+      $("analyzerOverlapProgress").classList.add("hidden");
+    }
+  };
+
+  async function pollOverlapJob() {
+    if (!analyzerState.overlapJobId) return;
+    try {
+      const status = await fetch(`/api/analyzer/overlap_status?job_id=${analyzerState.overlapJobId}`).then(r => r.json());
+      const prog = status.progress || {};
+      const done = prog.done || 0;
+      const total = prog.total || 0;
+      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      $("analyzerProgressFill").style.width = pct + "%";
+      $("analyzerProgressText").textContent = total > 0
+        ? `${done}/${total} images${prog.current_class ? " — " + prog.current_class : ""}`
+        : "Loading model…";
+
+      if (status.status === "done") {
+        clearInterval(analyzerState.overlapPollTimer);
+        analyzerState.overlapPollTimer = null;
+        $("analyzerProgressFill").style.width = "100%";
+        $("analyzerProgressText").textContent = "Done";
+        $("analyzerRunReportBtn").disabled = false;
+        renderOverlapResults(status.result);
+        setStatus(`Overlap report complete — ${(status.result?.flagged_pairs || []).length} flagged pairs`);
+      } else if (status.status === "error") {
+        clearInterval(analyzerState.overlapPollTimer);
+        analyzerState.overlapPollTimer = null;
+        $("analyzerRunReportBtn").disabled = false;
+        $("analyzerProgressText").textContent = "Error";
+        setStatus(`Overlap report error: ${status.error || "unknown"}`);
+        window.alert(`Overlap report failed:\n${status.error || "unknown error"}`);
+      }
+    } catch (e) {
+      // transient network error — keep polling
+    }
+  }
+
+  function renderOverlapResults(result) {
+    if (!result) return;
+    $("analyzerOverlapResults").classList.remove("hidden");
+
+    // Flagged pairs
+    const flaggedList = $("analyzerFlaggedList");
+    flaggedList.innerHTML = "";
+    const flagged = result.flagged_pairs || [];
+    if (!flagged.length) {
+      flaggedList.innerHTML = "<div style='color:var(--muted);font-size:12px;'>No flagged pairs above 15% confusion rate. Dataset looks clean.</div>";
+    } else {
+      for (const fp of flagged) {
+        const row = document.createElement("div");
+        row.className = "analyzerFlaggedRow";
+        row.innerHTML = `
+          <span style="font-weight:700;color:var(--text)">${fp.class_a}</span>
+          <span style="color:var(--muted)">confused as</span>
+          <span style="font-weight:700;color:var(--danger)">${fp.class_b}</span>
+          <span style="color:var(--muted);font-size:11px;">(${fp.count} images)</span>
+          <div class="analyzerFlaggedRate">${Math.round(fp.rate * 100)}%</div>
+        `;
+        flaggedList.appendChild(row);
+      }
+    }
+
+    // Per-class accuracy
+    const accList = $("analyzerClassAccList");
+    accList.innerHTML = "";
+    const perClass = result.per_class || {};
+    const sorted = Object.entries(perClass).sort((a, b) => a[1].accuracy - b[1].accuracy);
+    for (const [cls, info] of sorted) {
+      const pct = Math.round(info.accuracy * 100);
+      const color = pct >= 85 ? "var(--accent)" : pct >= 60 ? "#f59e0b" : "var(--danger)";
+      const row = document.createElement("div");
+      row.className = "analyzerAccRow";
+      const confused = Object.entries(info.confused_as || {})
+        .filter(([k]) => !k.startsWith("__"))
+        .slice(0, 2)
+        .map(([k, v]) => `${k}(${v})`)
+        .join(", ");
+      row.innerHTML = `
+        <div style="min-width:160px;font-size:11px;font-weight:600;">${cls}</div>
+        <div class="analyzerAccBar"><div class="analyzerAccFill" style="width:${pct}%;background:${color}"></div></div>
+        <div style="width:36px;text-align:right;font-size:11px;color:${color}">${pct}%</div>
+        ${confused ? `<div style="font-size:10px;color:var(--muted);margin-left:6px;">→ ${confused}</div>` : ""}
+      `;
+      accList.appendChild(row);
+    }
+  }
 }
 
 window.addEventListener("DOMContentLoaded", () => {

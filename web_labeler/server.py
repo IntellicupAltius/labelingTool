@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -52,6 +53,7 @@ from web_labeler.background_labeler import (
     remove_background_image,
     sanitize_part,
 )
+from web_labeler import analyzer as _analyzer
 
 
 def ensure_dir(p: Path):
@@ -59,6 +61,58 @@ def ensure_dir(p: Path):
 
 
 logger = logging.getLogger("labeler")
+
+
+def _pos_to_variation_label(pos_name: str) -> str:
+    """Derive a short variation label from a POS article name."""
+    label = pos_name.strip()
+    label = re.sub(r'\s+0[,\.]\d+\s*$', '', label).strip()   # strip size suffix
+    label = re.sub(r'^Aleksic\s+', '', label, flags=re.IGNORECASE).strip()  # strip "Aleksic " prefix
+    label = label.upper().replace(' ', '_')
+    return label
+
+
+def _build_class_variations(article_map_path: Path) -> Dict[str, Dict[str, List[str]]]:
+    """Parse article_map.yaml → {model: {class: [variation_labels]}}.
+    Only classes with ≥2 active (status: incl) POS articles get an entry.
+    """
+    if not article_map_path or not article_map_path.exists():
+        return {}
+    try:
+        import yaml
+        data = yaml.safe_load(article_map_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("Could not parse article_map for class variations: %s", e)
+        return {}
+
+    class_articles: Dict[tuple, List[str]] = {}
+    for article in data.get("articles", []):
+        if article.get("status") != "incl":
+            continue
+        pos_name = str(article.get("pos_name", "")).strip()
+        if not pos_name:
+            continue
+        for mapping in article.get("mappings", []):
+            model = mapping.get("model")
+            cls = mapping.get("class")
+            if not model or not cls:
+                continue
+            key = (model, cls)
+            if key not in class_articles:
+                class_articles[key] = []
+            if pos_name not in class_articles[key]:
+                class_articles[key].append(pos_name)
+
+    result: Dict[str, Dict[str, List[str]]] = {}
+    for (model, cls), pos_names in class_articles.items():
+        labels = list(dict.fromkeys(_pos_to_variation_label(p) for p in pos_names))  # ordered dedup
+        if len(labels) < 2:
+            continue
+        if model not in result:
+            result[model] = {}
+        result[model][cls] = labels
+
+    return result
 
 
 def sanitize_filename_part(s: str) -> str:
@@ -146,6 +200,38 @@ class BgStartRequest(BaseModel):
 class BgDecisionRequest(BaseModel):
     action: str  # "background" | "skip"
 
+
+class TestModeRequest(BaseModel):
+    test_mode: bool
+
+class ImageTagsRequest(BaseModel):
+    image_idx: int
+    tags: List[str]
+
+
+class FrameTagsRequest(BaseModel):
+    frame_idx: int
+    frame_tags: List[str] = []
+    bbox_tags: Dict[str, List[str]] = {}       # ann_id → [tags]
+    bbox_variations: Dict[str, str] = {}       # ann_id → variation label (single string)
+
+
+class DatasetTagsRequest(BaseModel):
+    image_idx: int
+    frame_tags: List[str] = []
+    bbox_tags: Dict[str, List[str]] = {}       # ann_id → [tags]
+    bbox_variations: Dict[str, str] = {}       # ann_id → variation label (single string)
+
+
+class AnalyzerClassifyRequest(BaseModel):
+    model: str
+    image_b64: str  # base64-encoded image (JPEG/PNG)
+    bbox: Optional[Dict] = None  # {x1,y1,x2,y2} in pixels
+
+
+class AnalyzerOverlapRequest(BaseModel):
+    model: str
+    samples: int = 20
 
 
 def create_app() -> FastAPI:
@@ -255,7 +341,29 @@ def create_app() -> FastAPI:
     reader = VideoReader()
     video_lock = threading.Lock()
     dataset_session: Optional[DatasetSession] = None
+    test_mode: bool = False
     bg_session: Optional[BgSession] = None
+
+    # Build class variations from article_map (optional — graceful if missing)
+    _article_map_path_cfg = cfg.get("article_map_path", "").strip()
+    _article_map_path = (
+        Path(_article_map_path_cfg).expanduser().resolve()
+        if _article_map_path_cfg
+        else Path.home() / "Projects" / "IntelliCup" / "utils" / "blaznavac_article_map.yaml"
+    )
+    class_variations: Dict[str, Dict[str, List[str]]] = _build_class_variations(_article_map_path)
+    logger.info("Class variations loaded for models: %s", list(class_variations.keys()))
+
+    # Configure analyzer (server-side YOLO inference)
+    _analyzer.configure(
+        models_root=cfg.get("analyzer_models_root", "").strip()
+                   or os.getenv("ANALYZER_MODELS_ROOT", "/opt/intellicup/models"),
+        raw_root=cfg.get("analyzer_raw_root", "").strip()
+                or os.getenv("ANALYZER_RAW_ROOT", "/opt/intellicup/datasets/raw/blaznavac"),
+        models_python=cfg.get("analyzer_models_python", "").strip()
+                     or os.getenv("ANALYZER_MODELS_PYTHON", "/opt/interpreters/INTELLICUP_MODELS/bin/python"),
+    )
+    logger.info("Analyzer available: %s", _analyzer.is_available())
 
     try:
         # Avoid OpenCV internal thread pools competing with FFmpeg (stability/perf).
@@ -332,6 +440,11 @@ def create_app() -> FastAPI:
             "bar_counter_options": bar_counter_options,
             "bar_counter_detected": detected,
         }
+
+    @app.get("/api/class_variations")
+    def get_class_variations():
+        """Return {model: {class: [variation_labels]}} for classes with ≥2 active POS articles."""
+        return class_variations
 
     # ---------------- Dataset Fixer API ----------------
     @app.get("/api/datasets")
@@ -543,9 +656,67 @@ def create_app() -> FastAPI:
         bg_session = None
         return {"ok": True, "cleared": True, "zip_path": zip_path_str}
 
+    # ── Analyzer API ──────────────────────────────────────────────────────────
+
+    @app.get("/api/analyzer/config")
+    def analyzer_config():
+        available = _analyzer.is_available()
+        models = _analyzer.get_available_models() if available else []
+        return {"available": available, "models": models}
+
+    @app.post("/api/analyzer/classify")
+    def analyzer_classify(req: AnalyzerClassifyRequest = Body(...)):
+        if not _analyzer.is_available():
+            raise HTTPException(status_code=503, detail="Analyzer not available on this machine")
+        try:
+            image_bytes = base64.b64decode(req.image_b64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 image")
+        try:
+            scores = _analyzer.classify_image(req.model, image_bytes, req.bbox)
+            return {"scores": scores}
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            logger.exception("classify error")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/analyzer/examples")
+    def analyzer_examples(model: str = Query(...), class_name: str = Query(...), n: int = Query(4)):
+        if not _analyzer.is_available():
+            raise HTTPException(status_code=503, detail="Analyzer not available on this machine")
+        try:
+            examples = _analyzer.get_class_examples(model, class_name, n=n)
+            return {"examples": examples}
+        except Exception as e:
+            logger.exception("examples error")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/analyzer/overlap_report")
+    def analyzer_overlap_report(req: AnalyzerOverlapRequest = Body(...)):
+        if not _analyzer.is_available():
+            raise HTTPException(status_code=503, detail="Analyzer not available on this machine")
+        try:
+            job_id = _analyzer.start_overlap_report(req.model, samples=req.samples)
+            return {"job_id": job_id}
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            logger.exception("overlap report start error")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/analyzer/overlap_status")
+    def analyzer_overlap_status(job_id: str = Query(...)):
+        status = _analyzer.get_job_status(job_id)
+        if not status:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return status
+
+    # ── Datasets API ──────────────────────────────────────────────────────────
+
     @app.post("/api/datasets/load")
     def datasets_load(req: DatasetLoadRequest = Body(...)):
-        nonlocal dataset_session
+        nonlocal dataset_session, test_mode
         refresh_models()
         names = state.model_to_names.get(req.model)
         if not names:
@@ -554,6 +725,7 @@ def create_app() -> FastAPI:
         if ds_path.parent != datasets_dir or not ds_path.exists():
             raise HTTPException(status_code=404, detail="Dataset not found")
         dataset_session = load_dataset_session(ds_path, model=req.model, class_names=names)
+        test_mode = False
         mismatch = (req.model.lower() not in req.dataset_name.lower())
         return {
             "dataset_name": req.dataset_name,
@@ -664,12 +836,12 @@ def create_app() -> FastAPI:
 
     @app.post("/api/datasets/save")
     def datasets_save(req: DatasetSaveRequest = Body(...)):
-        nonlocal dataset_session
+        nonlocal dataset_session, test_mode
         if dataset_session is None:
             raise HTTPException(status_code=400, detail="No dataset loaded")
         deleted_count = len(dataset_session.deleted_images)
         out_path = save_dataset_session(dataset_session, req.strategy)
-        
+
         # Copy data.yaml file to output dataset directory
         model = dataset_session.model
         yaml_src = state.model_to_yaml_path.get(model)
@@ -680,7 +852,42 @@ def create_app() -> FastAPI:
                     shutil.copy2(yaml_src, yaml_dst)
                 except Exception:
                     pass  # ignore copy errors
-        
+
+        # Write image_tags.json if any tags are set
+        if dataset_session.image_tags:
+            tags_by_stem = {}
+            for idx, entry in dataset_session.image_tags.items():
+                if not (0 <= idx < len(dataset_session.img_files)):
+                    continue
+                # Handle old flat format
+                if isinstance(entry, list):
+                    entry = {"frame_tags": entry, "bbox_tags": {}}
+                frame_tags = entry.get("frame_tags", [])
+                stored_bbox_tags = entry.get("bbox_tags", {})
+                stored_bbox_variations = entry.get("bbox_variations", {})
+                if not frame_tags and not any(stored_bbox_tags.values()) and not any(stored_bbox_variations.values()):
+                    continue
+                stem = dataset_session.img_files[idx].stem
+                anns = dataset_session.ann_by_image.get(idx, [])
+                bbox_tags_list = []
+                for a in anns:
+                    ann_tags = stored_bbox_tags.get(a.id, [])
+                    ann_variation = stored_bbox_variations.get(a.id, "")
+                    entry_dict = {
+                        "class": a.class_name,
+                        "bbox": [a.x1, a.y1, a.x2, a.y2],
+                        "tags": ann_tags,
+                    }
+                    if ann_variation:
+                        entry_dict["variation"] = ann_variation
+                    bbox_tags_list.append(entry_dict)
+                tags_by_stem[stem] = {"frame_tags": frame_tags, "bbox_tags": bbox_tags_list}
+            if tags_by_stem:
+                (out_path / "image_tags.json").write_text(
+                    json.dumps(tags_by_stem, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+
         # Zip the output so the labeler can drop it directly.
         # Naming convention: zip name == folder inside zip (so unzipped content is identifiable).
         # Format: {DATASET_NAME}_{MODEL}_{TIMESTAMP}
@@ -704,6 +911,7 @@ def create_app() -> FastAPI:
         if deleted_count > 0:
             result["deleted_count"] = deleted_count
         dataset_session = None
+        test_mode = False
         return result
 
     @app.post("/api/datasets/background")
@@ -749,6 +957,81 @@ def create_app() -> FastAPI:
         removed = idx in dataset_session.deleted_images
         dataset_session.deleted_images.discard(idx)
         return {"ok": True, "removed": removed}
+
+    @app.get("/api/datasets/test_mode")
+    def datasets_get_test_mode():
+        return {"test_mode": test_mode}
+
+    @app.post("/api/datasets/test_mode")
+    def datasets_set_test_mode(req: TestModeRequest = Body(...)):
+        nonlocal test_mode
+        test_mode = req.test_mode
+        return {"ok": True, "test_mode": test_mode}
+
+    @app.get("/api/datasets/tags")
+    def datasets_get_tags(image_idx: int = Query(..., ge=0)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        idx = int(image_idx)
+        entry = dataset_session.image_tags.get(idx, {})
+        if isinstance(entry, list):  # old format
+            entry = {"frame_tags": entry, "bbox_tags": {}}
+        frame_tags = entry.get("frame_tags", [])
+        bbox_tags = entry.get("bbox_tags", {})
+        bbox_variations = entry.get("bbox_variations", {})
+        return {"image_idx": idx, "frame_tags": frame_tags, "bbox_tags": bbox_tags, "bbox_variations": bbox_variations}
+
+    @app.put("/api/datasets/tags")
+    def datasets_set_tags(req: DatasetTagsRequest = Body(...)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        idx = int(req.image_idx)
+        # Validate frame_tags
+        valid_frame_tags = {"low_light", "busy", "force_day", "force_night"}
+        frame_tags = [t for t in req.frame_tags if t in valid_frame_tags]
+        # force_day and force_night are mutually exclusive
+        if "force_day" in frame_tags and "force_night" in frame_tags:
+            frame_tags = [t for t in frame_tags if t != "force_night"]
+        # Validate bbox_tags
+        valid_bbox_tags = {"occlusion", "partial", "blurry"}
+        bbox_tags = {ann_id: [t for t in tags if t in valid_bbox_tags] for ann_id, tags in req.bbox_tags.items()}
+        # Store bbox_variations (any non-empty string value accepted)
+        bbox_variations = {ann_id: v for ann_id, v in req.bbox_variations.items() if v and isinstance(v, str)}
+        if frame_tags or any(bbox_tags.values()) or any(bbox_variations.values()):
+            dataset_session.image_tags[idx] = {"frame_tags": frame_tags, "bbox_tags": bbox_tags, "bbox_variations": bbox_variations}
+        else:
+            dataset_session.image_tags.pop(idx, None)
+        return {"ok": True, "image_idx": idx, "frame_tags": frame_tags, "bbox_tags": bbox_tags, "bbox_variations": bbox_variations}
+
+    @app.get("/api/frame/tags")
+    def get_frame_tags(frame_idx: int = Query(..., ge=0)):
+        entry = state.frame_tags_by_frame.get(int(frame_idx), {})
+        return {
+            "frame_idx": int(frame_idx),
+            "frame_tags": entry.get("frame_tags", []),
+            "bbox_tags": entry.get("bbox_tags", {}),
+            "bbox_variations": entry.get("bbox_variations", {}),
+        }
+
+    @app.put("/api/frame/tags")
+    def set_frame_tags(req: FrameTagsRequest = Body(...)):
+        frame_idx = int(req.frame_idx)
+        # Validate frame_tags
+        valid_frame_tags = {"low_light", "busy", "force_day", "force_night"}
+        frame_tags = [t for t in req.frame_tags if t in valid_frame_tags]
+        # Enforce mutual exclusion
+        if "force_day" in frame_tags and "force_night" in frame_tags:
+            frame_tags = [t for t in frame_tags if t != "force_night"]
+        # Validate bbox_tags
+        valid_bbox_tags = {"occlusion", "partial", "blurry"}
+        bbox_tags = {ann_id: [t for t in tags if t in valid_bbox_tags] for ann_id, tags in req.bbox_tags.items()}
+        # Store bbox_variations (any non-empty string value accepted)
+        bbox_variations = {ann_id: v for ann_id, v in req.bbox_variations.items() if v and isinstance(v, str)}
+        if frame_tags or any(bbox_tags.values()) or any(bbox_variations.values()):
+            state.frame_tags_by_frame[frame_idx] = {"frame_tags": frame_tags, "bbox_tags": bbox_tags, "bbox_variations": bbox_variations}
+        else:
+            state.frame_tags_by_frame.pop(frame_idx, None)
+        return {"ok": True, "frame_idx": frame_idx, "frame_tags": frame_tags, "bbox_tags": bbox_tags, "bbox_variations": bbox_variations}
 
     def _zip_batch(folder: Path, zip_path: Optional[Path] = None, arcname: Optional[str] = None) -> Path:
         """
@@ -1360,6 +1643,44 @@ def create_app() -> FastAPI:
                                 copied_yaml_models.add(model)
                             except Exception:
                                 pass  # ignore copy errors
+
+        # Write image_tags.json per model batch (before zipping)
+        if state.frame_tags_by_frame:
+            for model, mr in model_roots.items():
+                if not mr.exists():
+                    continue
+                # Collect all frames that belong to this model batch
+                model_frames = set()
+                for f, anns in state.ann_by_frame.items():
+                    if any(a.model == model for a in anns):
+                        model_frames.add(f)
+                for f, bg_models in state.background_by_frame.items():
+                    if model in bg_models:
+                        model_frames.add(f)
+                tags_by_stem = {}
+                for f in sorted(model_frames):
+                    entry = state.frame_tags_by_frame.get(f, {})
+                    frame_tags = entry.get("frame_tags", [])
+                    stored_bbox_tags = entry.get("bbox_tags", {})
+                    if not frame_tags and not any(stored_bbox_tags.values()):
+                        continue
+                    base = export_base_name(parsed, f)
+                    # Build bbox_tags_list: ALL annotations for this model on this frame
+                    frame_anns = [a for a in state.ann_by_frame.get(f, []) if a.model == model]
+                    bbox_tags_list = []
+                    for a in frame_anns:
+                        ann_tags = stored_bbox_tags.get(a.id, [])
+                        bbox_tags_list.append({
+                            "class": a.class_name,
+                            "bbox": [a.x1, a.y1, a.x2, a.y2],
+                            "tags": ann_tags,
+                        })
+                    tags_by_stem[base] = {"frame_tags": frame_tags, "bbox_tags": bbox_tags_list}
+                if tags_by_stem:
+                    (mr / "image_tags.json").write_text(
+                        json.dumps(tags_by_stem, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
 
         # Zip each model batch folder and remove the source folder.
         zip_paths = []
