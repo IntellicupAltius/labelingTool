@@ -38,6 +38,7 @@ class DatasetSession:
     ann_by_image: Dict[int, List[DatasetAnnotation]] = field(default_factory=dict)
     background_images: set[int] = field(default_factory=set)
     deleted_images: set[int] = field(default_factory=set)  # image indices marked for deletion
+    image_tags: Dict[int, Dict] = field(default_factory=dict)  # image idx → {frame_tags: [], bbox_tags: {ann_id: []}}
 
     def new_id(self) -> str:
         return uuid.uuid4().hex

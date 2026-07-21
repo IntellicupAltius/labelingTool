@@ -175,7 +175,7 @@ class VideoReader:
 
         # 3) End-of-video or decode hiccup: return the last readable frame and mark end reached.
         # Try stepping backward a bit from target to find a decodable frame.
-        for back in range(0, 80):
+        for back in range(0, 600):
             cand = max(0, target_idx - back)
             try:
                 self._set_pos_frames(cand)
@@ -198,6 +198,14 @@ class VideoReader:
             self.frame_idx = last_idx
             self.end_reached = True
             return last_idx, last
+
+        # All seeks failed (severely truncated file). Return the last frame we ever
+        # successfully read in this session rather than crashing the server.
+        if self._last_bgr is not None:
+            self.end_reached = True
+            if self._debug:
+                self._log.warning("safe_seek_read: all fallbacks failed for frame %s — returning last known frame %s", target_idx, self.frame_idx)
+            return self.frame_idx, self._last_bgr
 
         raise RuntimeError(f"Could not read frame {target_idx}")
 

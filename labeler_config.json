@@ -1,5 +1,7 @@
 {
   "data_root": "~/LabelingToolData",
   "datasets_dir": "~/LabelingToolData/datasets",
-  "bar_counter_options": ["SANK_LEVO", "SANK_DESNO", "SANK_TOCILICA"]
+  "bar_counter_options": ["SANK_LEVO", "SANK_DESNO", "SANK_TOCILICA"],
+  "article_map_path": "~/Projects/IntelliCup/utils/blaznavac_article_map.yaml",
+  "raw_base_path": "/opt/intellicup/datasets/raw/blaznavac"
 }

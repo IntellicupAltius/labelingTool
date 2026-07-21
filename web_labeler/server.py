@@ -43,6 +43,8 @@ from web_labeler.dataset import (
     load_dataset_session,
     save_dataset_session,
     ann_to_dict,
+    _read_image_size,
+    _yolo_to_xyxy,
 )
 from web_labeler.background_labeler import (
     BgSession,
@@ -273,7 +275,7 @@ def create_app() -> FastAPI:
 
             # allow overriding only some keys
             merged = dict(default_cfg)
-            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir", "existing_datasets_dir"):
+            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir", "existing_datasets_dir", "raw_base_path"):
                 if isinstance(cfg.get(k), str) and cfg.get(k).strip():
                     merged[k] = cfg[k].strip()
             if isinstance(cfg.get("bar_counter_options"), list) and cfg.get("bar_counter_options"):
@@ -327,6 +329,10 @@ def create_app() -> FastAPI:
     else:
         existing_datasets_dir = datasets_dir / "existing"
 
+    # Resolve raw_base_path (optional — raw datasets organised by model/class)
+    raw_base_path_cfg = cfg.get("raw_base_path", "").strip()
+    raw_base_path: Optional[Path] = Path(raw_base_path_cfg).expanduser().resolve() if raw_base_path_cfg else None
+
     debug = os.getenv("LABELER_DEBUG", "").strip() not in ("", "0", "false", "False")
     logging.basicConfig(level=(logging.DEBUG if debug else logging.INFO))
     if debug:
@@ -343,6 +349,7 @@ def create_app() -> FastAPI:
     dataset_session: Optional[DatasetSession] = None
     test_mode: bool = False
     bg_session: Optional[BgSession] = None
+    raw_session: Optional[DatasetSession] = None
 
     # Build class variations from article_map (optional — graceful if missing)
     _article_map_path_cfg = cfg.get("article_map_path", "").strip()
@@ -373,6 +380,14 @@ def create_app() -> FastAPI:
 
     static_dir = Path(__file__).resolve().parent / "static"
     app = FastAPI(title="Labeling Tool (Browser)", version="0.1.0")
+
+    @app.exception_handler(Exception)
+    async def _json_error_handler(request: Request, exc: Exception):
+        # Without this, an unhandled exception falls through to Starlette's
+        # plain-text 500 page, which breaks the frontend's `await r.json()`
+        # calls (it sees "Internal Server Error" instead of JSON).
+        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500, content={"detail": str(exc) or "Internal server error"})
 
     @app.middleware("http")
     async def no_cache_for_static_and_root(request: Request, call_next):
@@ -439,6 +454,7 @@ def create_app() -> FastAPI:
             "videos": videos,
             "bar_counter_options": bar_counter_options,
             "bar_counter_detected": detected,
+            "raw_configured": raw_base_path is not None and raw_base_path.is_dir(),
         }
 
     @app.get("/api/class_variations")
@@ -450,6 +466,114 @@ def create_app() -> FastAPI:
     @app.get("/api/datasets")
     def datasets_list():
         return {"datasets_dir": str(datasets_dir), "datasets": list_dataset_folders(datasets_dir)}
+
+    # ---------------- Raw Dataset API ----------------
+
+    @app.get("/api/raw/models")
+    def raw_list_models():
+        if not raw_base_path or not raw_base_path.is_dir():
+            raise HTTPException(status_code=404, detail="raw_base_path not configured or missing")
+        models = sorted(p.name for p in raw_base_path.iterdir() if p.is_dir() and (p / "images").is_dir())
+        return {"raw_base_path": str(raw_base_path), "models": models}
+
+    @app.get("/api/raw/classes")
+    def raw_list_classes(model: str = Query(...)):
+        if not raw_base_path or not raw_base_path.is_dir():
+            raise HTTPException(status_code=404, detail="raw_base_path not configured or missing")
+        images_dir = raw_base_path / model / "images"
+        if not images_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"images dir not found for model '{model}'")
+        classes = sorted(p.name for p in images_dir.iterdir() if p.is_dir())
+        return {"model": model, "classes": classes}
+
+    @app.post("/api/raw/load")
+    def raw_load(req: dict = Body(...)):
+        nonlocal raw_session
+        model = req.get("model", "").strip()
+        class_name = req.get("class_name", "").strip()
+        if not model or not class_name:
+            raise HTTPException(status_code=400, detail="model and class_name are required")
+        if not raw_base_path or not raw_base_path.is_dir():
+            raise HTTPException(status_code=404, detail="raw_base_path not configured or missing")
+        images_dir = raw_base_path / model / "images" / class_name
+        labels_dir = raw_base_path / model / "labels" / class_name
+        if not images_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"images dir not found: {images_dir}")
+        if not labels_dir.is_dir():
+            labels_dir.mkdir(parents=True, exist_ok=True)
+        refresh_models()
+        # case-insensitive lookup — YAML files may be capitalized (e.g. Bottles.yaml vs bottles)
+        _key = next((k for k in state.model_to_names if k.lower() == model.lower()), None)
+        class_names = state.model_to_names.get(_key) if _key else None
+        class_names = class_names or [class_name]
+        camera = req.get("camera", "").strip().upper()
+        img_files = [p for p in sorted(images_dir.iterdir()) if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}]
+        if camera and camera != "ALL":
+            img_files = [p for p in img_files if camera in p.name.upper()]
+        if not img_files:
+            raise HTTPException(status_code=404, detail=f"No images found in {images_dir}" + (f" for camera {camera}" if camera and camera != "ALL" else ""))
+        sess = DatasetSession(
+            dataset_path=raw_base_path / model,
+            images_dir=images_dir,
+            labels_dir=labels_dir,
+            model=model,
+            img_files=[p.resolve() for p in img_files],
+        )
+        for i, img_path in enumerate(sess.img_files):
+            w, h = _read_image_size(img_path)
+            sess.img_sizes[i] = (w, h)
+            txt = labels_dir / f"{img_path.stem}.txt"
+            anns = []
+            if txt.exists():
+                try:
+                    lines = txt.read_text(encoding="utf-8").splitlines()
+                except Exception:
+                    lines = []
+                for line in lines:
+                    parsed = _yolo_to_xyxy(line, w, h)
+                    if not parsed:
+                        continue
+                    cid, x1, y1, x2, y2 = parsed
+                    cname = class_names[cid] if 0 <= cid < len(class_names) else f"class_{cid}"
+                    anns.append(DatasetAnnotation(
+                        id=sess.new_id(), image_idx=i, class_id=cid, class_name=cname,
+                        x1=x1, y1=y1, x2=x2, y2=y2,
+                    ))
+            sess.ann_by_image[i] = anns
+        raw_session = sess
+        return {
+            "model": model,
+            "class_name": class_name,
+            "images_dir": str(images_dir),
+            "image_count": len(sess.img_files),
+        }
+
+    @app.get("/api/raw/image")
+    def raw_image(index: int = Query(..., ge=0)):
+        if raw_session is None:
+            raise HTTPException(status_code=400, detail="No raw session loaded")
+        if index >= len(raw_session.img_files):
+            raise HTTPException(status_code=400, detail="Index out of range")
+        img_path = raw_session.img_files[index]
+        media = "image/jpeg" if img_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+        return FileResponse(str(img_path), media_type=media, headers={
+            "X-Image-Index": str(index),
+            "X-Image-Name": img_path.name,
+            "Cache-Control": "no-store",
+        })
+
+    @app.get("/api/raw/annotations")
+    def raw_annotations(index: int = Query(..., ge=0)):
+        if raw_session is None:
+            raise HTTPException(status_code=400, detail="No raw session loaded")
+        idx = int(index)
+        anns = raw_session.ann_by_image.get(idx, [])
+        return {
+            "image_idx": idx,
+            "annotations": [ann_to_dict(a) for a in anns],
+            "is_background": False,
+            "is_deleted": False,
+        }
 
     # ---------------- Background Labeler API ----------------
     @app.get("/api/background_labeler/config")
@@ -744,7 +868,11 @@ def create_app() -> FastAPI:
         img_path = dataset_session.image_path(index)
         # Let the browser decode; serve bytes directly
         media = "image/jpeg" if img_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
-        return FileResponse(str(img_path), media_type=media, headers={"X-Image-Index": str(index), "X-Image-Name": img_path.name})
+        return FileResponse(str(img_path), media_type=media, headers={
+            "X-Image-Index": str(index),
+            "X-Image-Name": img_path.name,
+            "Cache-Control": "no-store",
+        })
 
     @app.get("/api/datasets/annotations")
     def datasets_annotations(index: int = Query(..., ge=0)):
@@ -1330,6 +1458,28 @@ def create_app() -> FastAPI:
             "width": state.img_w,
             "height": state.img_h,
         }
+
+    @app.get("/api/video/hints")
+    def get_video_hints(video_name: str = Query(...)):
+        stem = Path(video_name).stem
+        hints_path = videos_dir / f"{stem}_hints.json"
+        if not hints_path.exists():
+            return {"hints": None}
+        try:
+            return json.loads(hints_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"hints": None}
+
+    @app.get("/api/video/case_info")
+    def get_video_case_info(video_name: str = Query(...)):
+        stem = Path(video_name).stem
+        info_path = videos_dir / f"{stem}_info.json"
+        if not info_path.exists():
+            return {"instruction": None}
+        try:
+            return json.loads(info_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"instruction": None}
 
     @app.get("/api/frame")
     def get_frame(index: int = Query(..., ge=0)):

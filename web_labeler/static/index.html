@@ -49,6 +49,20 @@
         </label>
         <button id="loadDatasetBtn" class="btn primary">Load Dataset</button>
         <div class="modestrip-sep"></div>
+        <label class="field" style="min-width:130px;">
+          <div class="label">Raw model</div>
+          <select id="rawModelSelect"></select>
+        </label>
+        <label class="field" style="min-width:180px;">
+          <div class="label">Class</div>
+          <select id="rawClassSelect"></select>
+        </label>
+        <label class="field" style="min-width:140px;">
+          <div class="label">Camera</div>
+          <select id="rawCameraSelect"></select>
+        </label>
+        <button id="loadRawBtn" class="btn">Load from Raw</button>
+        <div class="modestrip-sep"></div>
         <button id="prevImgBtn" class="btn">Prev</button>
         <button id="nextImgBtn" class="btn">Next</button>
         <div class="modestrip-sep"></div>
@@ -153,6 +167,8 @@
             <div id="speedText" class="speedText">x6</div>
           </div>
         </div>
+
+        <div id="caseInfoBanner" style="display:none;"></div>
 
         <div class="canvasWrap">
           <canvas id="canvas" class="canvas"></canvas>

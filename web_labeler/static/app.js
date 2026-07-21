@@ -20,6 +20,12 @@ const api = {
       return r.json();
     });
   },
+  async getVideoHints(videoName) {
+    return fetch(`/api/video/hints?video_name=${encodeURIComponent(videoName)}`).then(r => r.ok ? r.json() : {hints: null});
+  },
+  async getVideoCaseInfo(videoName) {
+    return fetch(`/api/video/case_info?video_name=${encodeURIComponent(videoName)}`).then(r => r.ok ? r.json() : {instruction: null});
+  },
   async getBgConfig() {
     return fetch(`/api/background_labeler/config`).then(async r => {
       const data = await r.json().catch(() => ({}));
@@ -348,6 +354,44 @@ const api = {
       }
       return data;
     });
+  },
+  async rawListModels() {
+    return fetch(`/api/raw/models`).then(async r => {
+      if (!r.ok) throw new Error((await r.json()).detail || "Failed to list raw models");
+      return r.json();
+    });
+  },
+  async rawListClasses(model) {
+    return fetch(`/api/raw/classes?model=${encodeURIComponent(model)}`).then(async r => {
+      if (!r.ok) throw new Error((await r.json()).detail || "Failed to list raw classes");
+      return r.json();
+    });
+  },
+  async rawLoad(model, className, camera) {
+    return fetch(`/api/raw/load`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({model, class_name: className, camera: camera || "ALL"}),
+    }).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || "Failed to load raw dataset");
+      return data;
+    });
+  },
+  async getRawImage(index) {
+    const r = await fetch(`/api/raw/image?index=${index}`);
+    if (!r.ok) throw new Error((await r.json()).detail || "Raw image fetch failed");
+    const blob = await r.blob();
+    const imageIdx = parseInt(r.headers.get("X-Image-Index") || String(index), 10);
+    const imageName = r.headers.get("X-Image-Name") || "";
+    return {blob, imageIdx, imageName};
+  },
+  async getRawAnnotations(index) {
+    return fetch(`/api/raw/annotations?index=${index}`).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || "Failed to get raw annotations");
+      return data;
+    });
   }
 };
 
@@ -398,6 +442,7 @@ const state = {
 
   // dataset fixer
   datasetLoaded: false,
+  rawLoaded: false,
   datasetName: null,
   datasetModel: null,
   datasetImageCount: 0,
@@ -408,6 +453,10 @@ const state = {
   imageTags: [],
   videoFrameTags: {},  // {frame_idx: {frame_tags: [], bbox_tags: {ann_id: []}, bbox_variations: {ann_id: "LABEL"}}}
   classVariations: {},  // {model: {class: [variation_labels]}} — loaded from server on init
+
+  // labeling hints (UV/MPI sidecar)
+  hintData: null,   // parsed _hints.json for current video (UV ghost bbox)
+  caseInfo: null,   // parsed _info.json or _hints.json for current video (instruction banner)
 
   // background labeler
   bgLoaded: false,
@@ -456,6 +505,7 @@ function resetWorkspaceUI(message) {
   state.dirty = false;
 
   state.datasetLoaded = false;
+  state.rawLoaded = false;
   state.datasetName = null;
   state.datasetModel = null;
   state.datasetImageCount = 0;
@@ -491,7 +541,32 @@ function resetWorkspaceUI(message) {
     state.ctx.clearRect(0, 0, state.canvas.width, state.canvas.height);
   }
 
+  state.hintData = null;
+  state.caseInfo = null;
+  renderCaseInfoBanner();
+
   if (message) setStatus(message);
+}
+
+function renderCaseInfoBanner() {
+  const banner = document.getElementById("caseInfoBanner");
+  if (!banner) return;
+  const info = state.caseInfo || state.hintData;
+  if (!info || !info.instruction) {
+    banner.style.display = "none";
+    return;
+  }
+  const isUV  = (info.case_type === "UV");
+  const color = isUV ? "#f97316" : "#3b82f6";
+  const bg    = isUV ? "rgba(249,115,22,0.12)" : "rgba(59,130,246,0.12)";
+  const badge = isUV ? "UV hallucination" : "MPI missing";
+  const cls   = info.detected_class || info.target_class || "";
+  banner.style.display = "block";
+  banner.style.cssText = `display:block; padding:6px 12px; background:${bg}; border-left:3px solid ${color}; font-size:12px; color:#e2e8f0; line-height:1.5;`;
+  banner.innerHTML =
+    `<span style="background:${color};color:#fff;border-radius:3px;padding:1px 6px;font-weight:700;margin-right:8px;">${badge}</span>` +
+    (cls ? `<strong>${cls}</strong> — ` : "") +
+    info.instruction;
 }
 
 function setMode(mode) {
@@ -600,7 +675,7 @@ function draw() {
   if (state.mode === "video") {
     if (!state.videoLoaded) return;
   } else if (state.mode === "dataset") {
-    if (!state.datasetLoaded) return;
+    if (!state.datasetLoaded && !state.rawLoaded) return;
   } else {
     if (!state.bgLoaded) return;
   }
@@ -640,6 +715,27 @@ function draw() {
   }
 
   ctx.restore();
+
+  // UV ghost bbox hint (visual only — never stored or exported)
+  if (state.hintData && Array.isArray(state.hintData.tlwh_norm) && state.hintData.at_second != null) {
+    const currentSec = state.frameIdx / (state.fps || 25);
+    const halfWindow = (state.hintData.window_seconds || 120) / 2;
+    if (Math.abs(currentSec - state.hintData.at_second) <= halfWindow) {
+      const [tx, ty, tw, th] = state.hintData.tlwh_norm;
+      const c1 = imageToCanvas(tx * state.imgW, ty * state.imgH);
+      const c2 = imageToCanvas((tx + tw) * state.imgW, (ty + th) * state.imgH);
+      ctx.save();
+      ctx.setLineDash([8, 4]);
+      ctx.strokeStyle = "rgba(255,165,0,0.85)";
+      ctx.lineWidth = 2 * (window.devicePixelRatio || 1);
+      ctx.strokeRect(c1.x, c1.y, c2.x - c1.x, c2.y - c1.y);
+      ctx.setLineDash([]);
+      ctx.font = `${Math.floor(11 * (window.devicePixelRatio || 1))}px ui-sans-serif`;
+      ctx.fillStyle = "rgba(255,165,0,0.9)";
+      ctx.fillText(`HINT: ${state.hintData.detected_class}`, c1.x + 4, c1.y > 14 ? c1.y - 4 : c1.y + 14);
+      ctx.restore();
+    }
+  }
 }
 
 function renderFrameTagsPanel(frameIdx, frameTagsData) {
@@ -693,8 +789,10 @@ function renderFrameTagsPanel(frameIdx, frameTagsData) {
 
 async function refreshLists() {
   if (state.mode === "dataset") {
-    if (!state.datasetLoaded) return;
-    const data = await api.getDatasetAnnotations(state.datasetImageIdx);
+    if (!state.datasetLoaded && !state.rawLoaded) return;
+    const data = state.rawLoaded
+      ? await api.getRawAnnotations(state.datasetImageIdx)
+      : await api.getDatasetAnnotations(state.datasetImageIdx);
     state.frameAnnotations = data.annotations || [];
     state.allAnnotations = [];
     let tagsData = {frame_tags: [], bbox_tags: {}, bbox_variations: {}};
@@ -1218,6 +1316,37 @@ async function renderDatasetImage(idx) {
   setStatus(`Dataset ${state.datasetName} | ${state.datasetImageIdx + 1}/${state.datasetImageCount} | ${state.datasetImageName}`);
 }
 
+async function renderRawImage(idx) {
+  if (!state.rawLoaded) return;
+  const mySeq = ++state.navSeq;
+  const clamped = clamp(idx, 0, Math.max(0, state.datasetImageCount - 1));
+
+  const {blob, imageIdx, imageName} = await api.getRawImage(clamped);
+  if (mySeq !== state.navSeq) return;
+
+  state.datasetImageIdx = imageIdx;
+  state.datasetImageName = imageName;
+
+  const url = URL.createObjectURL(blob);
+  await new Promise((resolve, reject) => {
+    state.img.onload = () => resolve();
+    state.img.onerror = reject;
+    state.img.src = url;
+  });
+  URL.revokeObjectURL(url);
+  if (mySeq !== state.navSeq) return;
+
+  state.imgW = state.img.naturalWidth || state.imgW;
+  state.imgH = state.img.naturalHeight || state.imgH;
+
+  await refreshLists();
+  if (mySeq !== state.navSeq) return;
+  draw();
+
+  setStatus(`Raw ${state.datasetName} | ${state.datasetImageIdx + 1}/${state.datasetImageCount} | ${state.datasetImageName}`);
+}
+
+
 async function gotoFrame(idx) {
   if (!state.videoLoaded) return;
   if (!Number.isFinite(state.totalFrames) || state.totalFrames <= 0) {
@@ -1596,6 +1725,14 @@ async function init() {
       setStatus(`Video loaded. Now add model *.yaml in: ${state.config?.models_dir || ""}`);
       window.alert(`Video loaded.\n\nNo models found yet.\n\nPut YOLO *.yaml into:\n${state.config?.models_dir || ""}\n\n(You can still play/jump frames, but labeling needs models.)`);
     }
+    // Load hint/info sidecars (UV ghost bbox + instruction banner)
+    const [hintsRes, infoRes] = await Promise.all([
+      api.getVideoHints(videoName),
+      api.getVideoCaseInfo(videoName),
+    ]);
+    state.hintData = (hintsRes && hintsRes.detected_class) ? hintsRes : null;
+    state.caseInfo = (infoRes && infoRes.instruction) ? infoRes : null;
+    renderCaseInfoBanner();
   }
 
   // populate selects
@@ -1672,6 +1809,84 @@ async function init() {
       }
     } catch (e) {
       setStatus(`Dataset list failed: ${e.message || e}`);
+    }
+    // Populate raw controls — disable entirely if raw_base_path not configured
+    const rawConfigured = state.config?.raw_configured === true;
+    const rawSection = [$("rawModelSelect"), $("rawClassSelect"), $("rawCameraSelect"), $("loadRawBtn")];
+    rawSection.forEach(el => { if (el) el.disabled = !rawConfigured; });
+    if (rawConfigured) {
+      try {
+        // Camera options from config
+        const cameraSel = $("rawCameraSelect");
+        cameraSel.innerHTML = "";
+        const allOpt = document.createElement("option");
+        allOpt.value = "ALL"; allOpt.textContent = "All cameras";
+        cameraSel.appendChild(allOpt);
+        for (const cam of (state.config.bar_counter_options || [])) {
+          const opt = document.createElement("option");
+          opt.value = cam; opt.textContent = cam;
+          cameraSel.appendChild(opt);
+        }
+        // Model options
+        const raw = await api.rawListModels();
+        const modelSel = $("rawModelSelect");
+        modelSel.innerHTML = "";
+        for (const m of (raw.models || [])) {
+          const opt = document.createElement("option");
+          opt.value = m; opt.textContent = m;
+          modelSel.appendChild(opt);
+        }
+        if ((raw.models || []).length > 0) {
+          await _rawPopulateClasses(modelSel.value);
+        }
+      } catch (e) {
+        rawSection.forEach(el => { if (el) el.disabled = true; });
+      }
+    }
+  };
+
+  async function _rawPopulateClasses(model) {
+    const classSel = $("rawClassSelect");
+    classSel.innerHTML = "";
+    try {
+      const res = await api.rawListClasses(model);
+      for (const c of (res.classes || [])) {
+        const opt = document.createElement("option");
+        opt.value = c;
+        opt.textContent = c;
+        classSel.appendChild(opt);
+      }
+    } catch (e) {
+      setStatus(`Raw classes failed: ${e.message || e}`);
+    }
+  }
+
+  $("rawModelSelect").onchange = () => _rawPopulateClasses($("rawModelSelect").value);
+
+  $("loadRawBtn").onclick = async () => {
+    const model = $("rawModelSelect").value;
+    const className = $("rawClassSelect").value;
+    const camera = $("rawCameraSelect").value || "ALL";
+    if (!model || !className) {
+      window.alert("Select a model and class first.");
+      return;
+    }
+    try {
+      resetWorkspaceUI(`Loading raw: ${model} / ${className}…`);
+      setMode("dataset");
+      const res = await api.rawLoad(model, className, camera);
+      state.rawLoaded = true;
+      state.datasetLoaded = false;
+      state.datasetName = `${model}/${className}`;
+      state.datasetModel = model;
+      state.datasetImageCount = res.image_count || 0;
+      state.datasetImageIdx = 0;
+      const camLabel = (camera && camera !== "ALL") ? ` [${camera}]` : "";
+      setStatus(`Raw loaded: ${model} / ${className}${camLabel} — ${state.datasetImageCount} images`);
+      await renderRawImage(0);
+    } catch (e) {
+      setStatus(`Load raw failed: ${e.message || e}`);
+      window.alert(`Load raw failed: ${e.message || e}`);
     }
   };
 
@@ -1894,10 +2109,12 @@ async function init() {
   };
 
   $("prevImgBtn").onclick = async () => {
+    if (state.rawLoaded) { await renderRawImage(state.datasetImageIdx - 1); return; }
     if (!state.datasetLoaded) return;
     await renderDatasetImage(state.datasetImageIdx - 1);
   };
   $("nextImgBtn").onclick = async () => {
+    if (state.rawLoaded) { await renderRawImage(state.datasetImageIdx + 1); return; }
     if (!state.datasetLoaded) return;
     await renderDatasetImage(state.datasetImageIdx + 1);
   };

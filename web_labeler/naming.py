@@ -81,12 +81,16 @@ def parse_video_name(filename: str, bar_counter_options: List[str]) -> ParsedVid
 def export_base_name(parsed: ParsedVideoName, frame_idx: int) -> str:
     """
     Base export name (no extension).
+    Format: {camera}_{timestamp14}_{frame6}
     Example:
-      20251205090046_BLAZNAVAC_NVR_01_G_SANK_LEVO_f001036
+      sank_levo_20251205090046_f001036
     Uses 1-based frame numbering with 6-digit zero padding.
+    Camera is bar_counter if detected, otherwise falls back to full prefix (lowercased).
+    Class name is intentionally excluded — it is always derivable from the label file.
     """
     ts = parsed.timestamp_14 or "UNKNOWN_TS"
-    return f"{ts}_{parsed.prefix}_f{(int(frame_idx) + 1):06d}"
+    cam = (parsed.bar_counter or parsed.prefix).lower()
+    return f"{cam}_{ts}_f{(int(frame_idx) + 1):06d}"
 
 
 def batch_dirname(video_filename: str, model_name: str, max_len: int = 140) -> str:
