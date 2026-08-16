@@ -978,8 +978,8 @@ def create_app() -> FastAPI:
             if not yaml_dst.exists():
                 try:
                     shutil.copy2(yaml_src, yaml_dst)
-                except Exception:
-                    pass  # ignore copy errors
+                except Exception as e:
+                    logger.warning("Could not copy data.yaml for model %s to %s: %s", model, yaml_dst, e)
 
         # Write image_tags.json if any tags are set
         if dataset_session.image_tags:
