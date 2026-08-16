@@ -1749,7 +1749,7 @@ def create_app() -> FastAPI:
                     for a in anns:
                         fp.write(yolo_line(a.class_id, a.x1, a.y1, a.x2, a.y2, state.img_w, state.img_h) + "\n")
                 written_label_files += 1
-                
+
                 # Copy data.yaml file to model output directory (once per model)
                 if model not in copied_yaml_models:
                     yaml_src = state.model_to_yaml_path.get(model)
@@ -1759,8 +1759,8 @@ def create_app() -> FastAPI:
                             try:
                                 shutil.copy2(yaml_src, yaml_dst)
                                 copied_yaml_models.add(model)
-                            except Exception:
-                                pass  # ignore copy errors
+                            except Exception as e:
+                                logger.warning("Could not copy data.yaml for model %s to %s: %s", model, yaml_dst, e)
 
             # Background exports (empty label file). Image/label names must match.
             for model in sorted(bg_models):
@@ -1781,7 +1781,7 @@ def create_app() -> FastAPI:
                 with open(txt_out, "w", encoding="utf-8") as fp:
                     fp.write("")
                 written_label_files += 1
-                
+
                 # Copy data.yaml file to model output directory (once per model)
                 if model not in copied_yaml_models:
                     yaml_src = state.model_to_yaml_path.get(model)
@@ -1791,8 +1791,8 @@ def create_app() -> FastAPI:
                             try:
                                 shutil.copy2(yaml_src, yaml_dst)
                                 copied_yaml_models.add(model)
-                            except Exception:
-                                pass  # ignore copy errors
+                            except Exception as e:
+                                logger.warning("Could not copy data.yaml for model %s to %s: %s", model, yaml_dst, e)
 
         # Write image_tags.json per model batch (before zipping)
         if state.frame_tags_by_frame:
