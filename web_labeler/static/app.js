@@ -392,6 +392,32 @@ const api = {
       if (!r.ok) throw new Error(data.detail || "Failed to get raw annotations");
       return data;
     });
+  },
+  // MDQ-3 flags: write a sidecar entry only, never touch the image/label.
+  async _flagFetch(url, method, body) {
+    const r = await fetch(url, {
+      method,
+      headers: body ? {"Content-Type": "application/json"} : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || `Flag request failed (${r.status})`);
+    return data;
+  },
+  async rawFlagSet(imageKey, pool, category, comment) {
+    return this._flagFetch("/api/raw/flag", "POST", {image_key: imageKey, pool, category, comment});
+  },
+  async rawFlagRemove(imageKey, pool) {
+    return this._flagFetch(`/api/raw/flag?image_key=${encodeURIComponent(imageKey)}&pool=${encodeURIComponent(pool)}`, "DELETE");
+  },
+  async frameFlagGet(model, frameIdx) {
+    return this._flagFetch(`/api/frame/flag?model=${encodeURIComponent(model)}&frame_idx=${frameIdx}`, "GET");
+  },
+  async frameFlagSet(model, frameIdx, category, comment) {
+    return this._flagFetch("/api/frame/flag", "POST", {model, frame_idx: frameIdx, category, comment});
+  },
+  async frameFlagRemove(model, frameIdx) {
+    return this._flagFetch(`/api/frame/flag?model=${encodeURIComponent(model)}&frame_idx=${frameIdx}`, "DELETE");
   }
 };
 
@@ -479,6 +505,15 @@ const state = {
   modalModel: null,
   modalClasses: [],
   modalSelectedClass: null,
+
+  // flag panel (MDQ-3)
+  flagPanelOpen: false,
+  flagTarget: null,      // {kind: "raw"|"frame", pool, imageKey?, frameIdx?, label}
+  flagCategory: null,
+  flagExisting: null,
+  lastFlagPool: null,
+  rawImageKey: null,     // "<class>/<filename>" of the RAW image on screen
+  rawFlag: null,         // existing flag entry of that image, if any
 };
 
 function $(id) { return document.getElementById(id); }
@@ -544,6 +579,10 @@ function resetWorkspaceUI(message) {
   state.hintData = null;
   state.caseInfo = null;
   renderCaseInfoBanner();
+  state.rawImageKey = null;
+  state.rawFlag = null;
+  closeFlagPanel();
+  updateFlagBadge();
 
   if (message) setStatus(message);
 }
@@ -795,6 +834,11 @@ async function refreshLists() {
       : await api.getDatasetAnnotations(state.datasetImageIdx);
     state.frameAnnotations = data.annotations || [];
     state.allAnnotations = [];
+    if (state.rawLoaded) {
+      state.rawImageKey = data.image_key || null;
+      state.rawFlag = data.flag || null;
+      updateFlagBadge();
+    }
     let tagsData = {frame_tags: [], bbox_tags: {}, bbox_variations: {}};
     if (state.testMode) {
       tagsData = await api.getDatasetTags(state.datasetImageIdx);
@@ -1603,6 +1647,228 @@ function installCanvasHandlers() {
   window.addEventListener("resize", () => draw());
 }
 
+// ── Flag panel (MDQ-3) ─────────────────────────────────────────────────────
+const FLAG_POOLS = ["glasses", "bottles", "cups", "pitchers", "shots"];
+const FLAG_CATEGORIES = [
+  {key: "gibberish", label: "Gibberish",
+   hint: "Blur / out of focus so strong that even a person cannot tell the class."},
+  {key: "wrong_frame_wrong_class", label: "Wrong frame, wrong class",
+   hint: "The image is clearly NOT the declared class, regardless of image quality."},
+  {key: "near_duplicate", label: "Near-duplicate",
+   hint: "Visually almost identical to another example of this class — adds no new information."},
+  {key: "mislabeled_background", label: "Mislabeled background",
+   hint: "A background image that actually contains a visible example of some class."},
+];
+
+function isTypingTarget(t) {
+  if (!t || !t.tagName) return false;
+  const tag = t.tagName.toUpperCase();
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || !!t.isContentEditable;
+}
+
+function updateFlagBadge() {
+  const el = document.getElementById("flagBadge");
+  if (!el) return;
+  const f = (state.mode === "dataset" && state.rawLoaded) ? state.rawFlag : null;
+  if (!f) {
+    el.style.display = "none";
+    el.textContent = "";
+    return;
+  }
+  const cat = FLAG_CATEGORIES.find(c => c.key === f.category);
+  const what = f.category ? (cat ? cat.label : f.category)
+    : (f.signal ? `${f.signal.metric}: ${f.signal.value}` : "flagged");
+  const dec = f.owner_decision ? ` · owner: ${f.owner_decision}` : "";
+  el.textContent = `⚑ FLAGGED — ${what}${dec}${f.comment ? " — " + f.comment : ""}`;
+  el.style.display = "block";
+}
+
+function flagIsMutable(entry) {
+  return !entry || (entry.source === "manual_goca" && !entry.owner_decision);
+}
+
+function showFlagError(msg) {
+  $("flagError").textContent = msg || "";
+}
+
+function renderFlagPanel() {
+  const t = state.flagTarget;
+  if (!t) return;
+  $("flagTarget").textContent = `${t.pool} · ${t.label}`;
+  $("flagPoolRow").style.display = t.kind === "frame" ? "" : "none";
+  const ex = state.flagExisting;
+  const box = $("flagExisting");
+  if (ex) {
+    const what = ex.category ? ex.category : (ex.signal ? `${ex.signal.metric}: ${ex.signal.value}` : "flagged");
+    if (flagIsMutable(ex)) {
+      box.textContent = `Already flagged by you (${what}${ex.comment ? " — " + ex.comment : ""}). Pick a reason and save to change it, or Unflag.`;
+    } else {
+      const dec = ex.owner_decision ? `, owner decided: ${ex.owner_decision}` : "";
+      box.textContent = `Already flagged by ${ex.source}${dec} (${what}). It can no longer be changed here.`;
+    }
+    box.style.display = "";
+  } else {
+    box.style.display = "none";
+  }
+  const editable = flagIsMutable(ex);
+  $("flagSaveBtn").disabled = !editable;
+  $("flagRemoveBtn").style.display = (ex && editable) ? "" : "none";
+  for (const b of $("flagCats").children) {
+    b.classList.toggle("selected", b.dataset.cat === state.flagCategory);
+    b.disabled = !editable;
+  }
+}
+
+async function loadFlagExisting() {
+  const t = state.flagTarget;
+  state.flagExisting = null;
+  showFlagError("");
+  try {
+    if (t.kind === "frame") {
+      const res = await api.frameFlagGet(t.pool, t.frameIdx);
+      state.flagExisting = res.entry || null;
+    } else {
+      state.flagExisting = state.rawFlag || null;
+    }
+  } catch (e) {
+    showFlagError(e.message || String(e));
+  }
+  if (state.flagExisting && state.flagExisting.category) {
+    state.flagCategory = state.flagExisting.category;
+    $("flagComment").value = state.flagExisting.comment || "";
+  }
+  renderFlagPanel();
+}
+
+async function openFlagPanel() {
+  if (state.flagPanelOpen || state.modalOpen) return;
+  if (!state.config || !state.config.flagging_available) {
+    setStatus("Flagging is not available on this machine (it needs the server's raw_review folder).");
+    return;
+  }
+  let target = null;
+  if (state.mode === "dataset" && state.rawLoaded) {
+    if (!state.rawImageKey) { setStatus("Nothing to flag: no RAW image is loaded."); return; }
+    target = {kind: "raw", pool: String(state.datasetModel || "").toLowerCase(),
+              imageKey: state.rawImageKey, label: state.rawImageKey};
+  } else if (state.mode === "video" && state.videoLoaded) {
+    stopPlayback();
+    const fa = state.frameAnnotations || [];
+    const fromAnn = fa.length ? String(fa[fa.length - 1].model || "").toLowerCase() : "";
+    const fromSel = String($("modelSelect").value || "").toLowerCase();
+    const pool = [fromAnn, state.lastFlagPool, fromSel].find(p => FLAG_POOLS.includes(p)) || FLAG_POOLS[0];
+    target = {kind: "frame", pool, frameIdx: state.frameIdx,
+              label: `${state.videoName} · frame ${state.frameIdx + 1}`};
+  } else {
+    setStatus("Flagging works on RAW images (Dataset Fixer → Load raw) and on a loaded video frame.");
+    return;
+  }
+  state.flagTarget = target;
+  state.flagCategory = null;
+  state.flagExisting = null;
+  $("flagComment").value = "";
+  $("flagPoolSelect").value = target.pool;
+  showFlagError("");
+  state.flagPanelOpen = true;
+  $("flagPanel").classList.remove("hidden");
+  renderFlagPanel();
+  await loadFlagExisting();
+}
+
+function closeFlagPanel() {
+  state.flagPanelOpen = false;
+  state.flagTarget = null;
+  state.flagExisting = null;
+  state.flagCategory = null;
+  const panel = document.getElementById("flagPanel");
+  if (panel) panel.classList.add("hidden");
+}
+
+function selectFlagCategory(key) {
+  if (!flagIsMutable(state.flagExisting)) return;
+  state.flagCategory = key;
+  renderFlagPanel();
+}
+
+async function saveFlag() {
+  const t = state.flagTarget;
+  if (!t || !flagIsMutable(state.flagExisting)) return;
+  if (!state.flagCategory) { showFlagError("Pick a reason first (keys 1–4)."); return; }
+  const comment = $("flagComment").value;
+  try {
+    let res;
+    if (t.kind === "raw") {
+      res = await api.rawFlagSet(t.imageKey, t.pool, state.flagCategory, comment);
+      state.rawFlag = res.entry;
+      updateFlagBadge();
+    } else {
+      res = await api.frameFlagSet(t.pool, t.frameIdx, state.flagCategory, comment);
+    }
+    state.lastFlagPool = t.pool;
+    closeFlagPanel();
+    setStatus(`Flagged (${res.entry.category}): ${t.label}`);
+  } catch (e) {
+    showFlagError(e.message || String(e));
+  }
+}
+
+async function removeFlag() {
+  const t = state.flagTarget;
+  if (!t || !state.flagExisting || !flagIsMutable(state.flagExisting)) return;
+  try {
+    if (t.kind === "raw") {
+      await api.rawFlagRemove(t.imageKey, t.pool);
+      state.rawFlag = null;
+      updateFlagBadge();
+    } else {
+      await api.frameFlagRemove(t.pool, t.frameIdx);
+    }
+    closeFlagPanel();
+    setStatus(`Unflagged: ${t.label}`);
+  } catch (e) {
+    showFlagError(e.message || String(e));
+  }
+}
+
+function installFlagPanel() {
+  const cats = $("flagCats");
+  cats.innerHTML = "";
+  FLAG_CATEGORIES.forEach((c, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "flagCat";
+    b.dataset.cat = c.key;
+    const name = document.createElement("div");
+    name.className = "flagCatName";
+    name.textContent = `${i + 1} · ${c.label}`;
+    const hint = document.createElement("div");
+    hint.className = "flagCatHint";
+    hint.textContent = c.hint;
+    b.appendChild(name);
+    b.appendChild(hint);
+    b.onclick = () => selectFlagCategory(c.key);
+    cats.appendChild(b);
+  });
+  const ps = $("flagPoolSelect");
+  ps.innerHTML = "";
+  for (const p of FLAG_POOLS) {
+    const o = document.createElement("option");
+    o.value = p;
+    o.textContent = p;
+    ps.appendChild(o);
+  }
+  ps.onchange = async () => {
+    if (!state.flagTarget || state.flagTarget.kind !== "frame") return;
+    state.flagTarget.pool = ps.value;
+    state.flagCategory = null;
+    $("flagComment").value = "";
+    await loadFlagExisting();
+  };
+  $("flagSaveBtn").onclick = saveFlag;
+  $("flagRemoveBtn").onclick = removeFlag;
+  $("flagCancelBtn").onclick = closeFlagPanel;
+}
+
 function installHotkeys() {
   window.addEventListener("keydown", async (e) => {
     if (state.modalOpen) {
@@ -1625,9 +1891,30 @@ function installHotkeys() {
       return;
     }
 
+    if (state.flagPanelOpen) {
+      const typing = isTypingTarget(e.target);
+      if (e.key === "Escape") { e.preventDefault(); closeFlagPanel(); }
+      else if (e.key === "Enter" && (e.ctrlKey || e.metaKey || !typing)) { e.preventDefault(); await saveFlag(); }
+      else if (!typing && FLAG_CATEGORIES.some((_c, i) => e.key === String(i + 1))) {
+        e.preventDefault();
+        selectFlagCategory(FLAG_CATEGORIES[parseInt(e.key, 10) - 1].key);
+      }
+      return;
+    }
+
+    // X = flag the current RAW image / video frame for review (Dataset Fixer raw-browse + Video Labeler).
+    if ((e.key === "x" || e.key === "X") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat
+        && !isTypingTarget(e.target) && (state.mode === "video" || state.mode === "dataset")) {
+      e.preventDefault();
+      await openFlagPanel();
+      return;
+    }
+
     if (state.mode === "dataset") {
-      if (e.key === "ArrowLeft") { e.preventDefault(); await renderDatasetImage(state.datasetImageIdx - 1); }
-      if (e.key === "ArrowRight") { e.preventDefault(); await renderDatasetImage(state.datasetImageIdx + 1); }
+      // RAW browsing has its own renderer (renderDatasetImage is a no-op for a RAW session) — same routing as Prev/Next.
+      const render = state.rawLoaded ? renderRawImage : renderDatasetImage;
+      if (e.key === "ArrowLeft") { e.preventDefault(); await render(state.datasetImageIdx - 1); }
+      if (e.key === "ArrowRight") { e.preventDefault(); await render(state.datasetImageIdx + 1); }
       return;
     }
 
@@ -2308,6 +2595,7 @@ async function init() {
 
   installCanvasHandlers();
   installHotkeys();
+  installFlagPanel();
 
   if (cfg.videos.length === 0) {
     setStatus(`Put videos into: ${cfg.videos_dir}`);

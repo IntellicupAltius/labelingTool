@@ -169,13 +169,14 @@
         </div>
 
         <div id="caseInfoBanner" style="display:none;"></div>
+        <div id="flagBadge" class="flagBadge" style="display:none;"></div>
 
         <div class="canvasWrap">
           <canvas id="canvas" class="canvas"></canvas>
         </div>
 
         <div class="hint">
-          Drag to draw a box. Then pick class (type to filter) and press Enter to save.
+          Drag to draw a box. Then pick class (type to filter) and press Enter to save. Press X to flag a doubtful image for the owner's review.
         </div>
       </section>
 
@@ -287,6 +288,46 @@
       </div>
 
       <div id="modalError" class="modalError"></div>
+    </div>
+  </div>
+
+  <!-- Flag panel (MDQ-3): X flags the current RAW image / video frame for the owner's review.
+       Flagging only writes a sidecar entry — it never deletes or edits anything. -->
+  <div id="flagPanel" class="modal hidden">
+    <div class="modalCard flagCard">
+      <div class="modalTitle">Flag for review</div>
+      <div id="flagTarget" class="flagTarget"></div>
+
+      <div id="flagPoolRow" class="modalRow" style="display:none;">
+        <label class="field full">
+          <div class="label">Pool this frame is flagged for</div>
+          <select id="flagPoolSelect"></select>
+        </label>
+      </div>
+
+      <div id="flagExisting" class="flagExisting" style="display:none;"></div>
+
+      <div class="modalRow">
+        <div class="label">Reason (keys 1–4)</div>
+        <div id="flagCats" class="flagCats"></div>
+      </div>
+
+      <div class="modalRow">
+        <label class="field full">
+          <div class="label">Comment (optional)</div>
+          <textarea id="flagComment" rows="3" maxlength="2000" placeholder="Why is this image doubtful?"></textarea>
+        </label>
+      </div>
+
+      <div class="label">Do NOT flag: low-but-readable confidence, or an unusual angle/lighting that is still labeled correctly.</div>
+
+      <div class="modalActions">
+        <button id="flagRemoveBtn" class="btn" style="margin-right:auto; display:none;">Unflag</button>
+        <button id="flagSaveBtn"   class="btn primary">Flag (Enter)</button>
+        <button id="flagCancelBtn" class="btn">Cancel (Esc)</button>
+      </div>
+
+      <div id="flagError" class="modalError"></div>
     </div>
   </div>
 

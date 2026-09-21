@@ -571,3 +571,43 @@ input[type="range"] {
   width: 0%;
   transition: width 0.3s;
 }
+
+/* ── Flag panel (MDQ-3) ──────────────────────────────────────────────────── */
+.flagBadge {
+  flex-shrink: 0;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: 10px;
+  word-break: break-word;
+}
+.flagCard  { width: min(560px, 95vw); }
+.flagTarget { font-size: 12px; color: var(--muted); word-break: break-all; }
+.flagExisting {
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+.flagCats  { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.flagCat {
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
+  text-align: left; padding: 8px 12px; border-radius: 10px; cursor: pointer;
+  color: var(--text); background: rgba(8, 12, 22, 0.6); border: 1px solid var(--border);
+}
+.flagCat:hover    { background: rgba(45, 212, 191, 0.08); }
+.flagCat.selected { background: rgba(45, 212, 191, 0.16); border-color: rgba(45, 212, 191, 0.6); }
+.flagCat .flagCatName { font-weight: 800; font-size: 12px; }
+.flagCat .flagCatHint { font-size: 11px; color: var(--muted); }
+.flagCard textarea {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  background: rgba(8, 12, 22, 0.6); color: var(--text);
+  border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
+  font: inherit; font-size: 12px; outline: none;
+}
+.flagCard textarea:focus { border-color: rgba(45, 212, 191, 0.5); }
