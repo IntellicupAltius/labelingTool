@@ -56,6 +56,8 @@ from web_labeler.background_labeler import (
     sanitize_part,
 )
 from web_labeler import analyzer as _analyzer
+from web_labeler import flag_store as _flags
+from web_labeler.flag_store import FlagConflict, FlagError, FlagStore, FlagUnavailable, normalize_pool, validate_image_key
 
 
 def ensure_dir(p: Path):
@@ -236,6 +238,20 @@ class AnalyzerOverlapRequest(BaseModel):
     samples: int = 20
 
 
+class RawFlagRequest(BaseModel):
+    image_key: str  # "<class>/<filename>", relative to <pool>/images/
+    category: str
+    comment: str = ""
+    pool: Optional[str] = None  # defaults to the loaded raw session's model
+
+
+class FrameFlagRequest(BaseModel):
+    model: str  # the pool the frame is flagged for
+    frame_idx: int
+    category: str
+    comment: str = ""
+
+
 def create_app() -> FastAPI:
     # Directories (configurable via env vars)
     base_dir = Path(__file__).resolve().parents[1]
@@ -275,7 +291,7 @@ def create_app() -> FastAPI:
 
             # allow overriding only some keys
             merged = dict(default_cfg)
-            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir", "existing_datasets_dir", "raw_base_path"):
+            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir", "existing_datasets_dir", "raw_base_path", "raw_review_dir"):
                 if isinstance(cfg.get(k), str) and cfg.get(k).strip():
                     merged[k] = cfg[k].strip()
             if isinstance(cfg.get("bar_counter_options"), list) and cfg.get("bar_counter_options"):
@@ -333,6 +349,23 @@ def create_app() -> FastAPI:
     raw_base_path_cfg = cfg.get("raw_base_path", "").strip()
     raw_base_path: Optional[Path] = Path(raw_base_path_cfg).expanduser().resolve() if raw_base_path_cfg else None
 
+    # MDQ-3: flag sidecars live OUTSIDE the RAW tree. Enabled when raw_review_dir is configured
+    # (config key or LABELER_RAW_REVIEW_DIR), or on the server where /opt/intellicup/datasets
+    # exists; unavailable (503 on the flag routes) on labeler PCs that have neither.
+    _review_cfg = (os.getenv("LABELER_RAW_REVIEW_DIR") or cfg.get("raw_review_dir") or "").strip()
+    if _review_cfg:
+        _review_root: Optional[Path] = Path(_review_cfg).expanduser()
+    elif Path("/opt/intellicup/datasets").is_dir():
+        _review_root = Path("/opt/intellicup/datasets/raw_review")
+    else:
+        _review_root = None
+    try:
+        flag_store = FlagStore(_review_root, forbidden_roots=[raw_base_path] if raw_base_path else None)
+    except ValueError as e:
+        logger.error("Flagging disabled: %s", e)
+        flag_store = FlagStore(None)
+    logger.info("Flagging available: %s (%s)", flag_store.available, flag_store.root)
+
     debug = os.getenv("LABELER_DEBUG", "").strip() not in ("", "0", "false", "False")
     logging.basicConfig(level=(logging.DEBUG if debug else logging.INFO))
     if debug:
@@ -388,6 +421,15 @@ def create_app() -> FastAPI:
         # calls (it sees "Internal Server Error" instead of JSON).
         logger.exception("Unhandled error on %s %s", request.method, request.url.path)
         return JSONResponse(status_code=500, content={"detail": str(exc) or "Internal server error"})
+
+    @app.exception_handler(FlagError)
+    async def _flag_error_handler(request: Request, exc: FlagError):
+        body = {"detail": str(exc)}
+        if isinstance(exc, FlagConflict) and exc.entry is not None:
+            body["entry"] = exc.entry
+        if exc.status >= 500 and not isinstance(exc, FlagUnavailable):
+            logger.error("Flag store error on %s %s: %s", request.method, request.url.path, exc)
+        return JSONResponse(status_code=exc.status, content=body)
 
     @app.middleware("http")
     async def no_cache_for_static_and_root(request: Request, call_next):
@@ -455,6 +497,7 @@ def create_app() -> FastAPI:
             "bar_counter_options": bar_counter_options,
             "bar_counter_detected": detected,
             "raw_configured": raw_base_path is not None and raw_base_path.is_dir(),
+            "flagging_available": flag_store.available,
         }
 
     @app.get("/api/class_variations")
@@ -568,12 +611,98 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="No raw session loaded")
         idx = int(index)
         anns = raw_session.ann_by_image.get(idx, [])
+        image_key = f"{raw_session.images_dir.name}/{raw_session.img_files[idx].name}" if idx < len(raw_session.img_files) else None
+        flag = None
+        flag_error = None
+        if image_key and flag_store.available:
+            try:
+                flag = flag_store.get(raw_session.model, image_key)
+            except FlagError as e:  # a bad sidecar must not break browsing
+                flag_error = str(e)
         return {
             "image_idx": idx,
             "annotations": [ann_to_dict(a) for a in anns],
             "is_background": False,
             "is_deleted": False,
+            "image_key": image_key,
+            "flag": flag,
+            "flag_error": flag_error,
         }
+
+    # ---------------- Flag API (MDQ-3) ----------------
+    # Flags only ever write the per-pool sidecar (flag_store.py) — never anything under RAW.
+
+    def _need_flags() -> None:
+        if not flag_store.available:
+            raise FlagUnavailable("flagging is not available on this machine (no raw_review_dir)")
+
+    def _raw_pool(pool: Optional[str]) -> str:
+        return normalize_pool(pool or (raw_session.model if raw_session is not None else None))
+
+    def _require_raw_image(pool: str, image_key: str) -> None:
+        if raw_base_path is None or not raw_base_path.is_dir():
+            raise HTTPException(status_code=404, detail="raw_base_path not configured or missing")
+        cls, fname = image_key.split("/")
+        if not (raw_base_path / pool / "images" / cls / fname).is_file():
+            raise HTTPException(status_code=404, detail=f"No such RAW image: {pool}/images/{image_key}")
+
+    @app.get("/api/raw/flag")
+    def raw_flag_get(image_key: str = Query(...), pool: Optional[str] = Query(None)):
+        _need_flags()
+        p = _raw_pool(pool)
+        validate_image_key(image_key)
+        return {"pool": p, "image_key": image_key, "entry": flag_store.get(p, image_key)}
+
+    @app.post("/api/raw/flag")
+    def raw_flag_add(req: RawFlagRequest):
+        _need_flags()
+        p = _raw_pool(req.pool)
+        validate_image_key(req.image_key)
+        _require_raw_image(p, req.image_key)
+        entry = flag_store.add_manual_flag(p, req.image_key, req.category, req.comment, _flags.CONTEXT_RETROACTIVE)
+        return {"pool": p, "image_key": req.image_key, "entry": entry}
+
+    @app.delete("/api/raw/flag")
+    def raw_flag_remove(image_key: str = Query(...), pool: Optional[str] = Query(None)):
+        _need_flags()
+        p = _raw_pool(pool)
+        validate_image_key(image_key)
+        return {"pool": p, "image_key": image_key, "removed": flag_store.remove_manual_flag(p, image_key)}
+
+    def _frame_flag_key(frame_idx: int) -> str:
+        if state.video_path is None:
+            raise HTTPException(status_code=400, detail="No video loaded")
+        if frame_idx < 0 or frame_idx >= max(state.total_frames, 1):
+            raise HTTPException(status_code=400, detail="frame_idx out of range")
+        parsed = parse_video_name(state.video_path.name, bar_counter_options=cfg.get("bar_counter_options") or ["SANK_LEVO", "SANK_DESNO"])
+        return f"{_flags.FORWARD_DIR}/{export_base_name(parsed, frame_idx)}.jpg"
+
+    @app.get("/api/frame/flag")
+    def frame_flag_get(model: str = Query(...), frame_idx: int = Query(..., ge=0)):
+        _need_flags()
+        p = normalize_pool(model)
+        key = _frame_flag_key(int(frame_idx))
+        return {"pool": p, "image_key": key, "entry": flag_store.get(p, key)}
+
+    @app.post("/api/frame/flag")
+    def frame_flag_add(req: FrameFlagRequest):
+        _need_flags()
+        p = normalize_pool(req.model)
+        idx = int(req.frame_idx)
+        key = _frame_flag_key(idx)
+        classes = sorted({a.class_name for a in state.ann_by_frame.get(idx, []) if (a.model or "").lower() == p})
+        entry = flag_store.add_manual_flag(
+            p, key, req.category, req.comment, _flags.CONTEXT_FORWARD,
+            extra={"video": state.video_path.name, "frame_idx": idx, "annotation_classes": classes},
+        )
+        return {"pool": p, "image_key": key, "entry": entry}
+
+    @app.delete("/api/frame/flag")
+    def frame_flag_remove(model: str = Query(...), frame_idx: int = Query(..., ge=0)):
+        _need_flags()
+        p = normalize_pool(model)
+        key = _frame_flag_key(int(frame_idx))
+        return {"pool": p, "image_key": key, "removed": flag_store.remove_manual_flag(p, key)}
 
     # ---------------- Background Labeler API ----------------
     @app.get("/api/background_labeler/config")
