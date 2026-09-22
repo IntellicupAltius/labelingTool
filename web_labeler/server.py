@@ -12,7 +12,7 @@ import zipfile
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # --- Stability knobs ---
 # We've seen FFmpeg/OpenCV crash with pthread_frame assertions on some Linux builds
@@ -131,8 +131,9 @@ def video_stem_without_uuid(stem: str) -> str:
 
 
 class LoadVideoRequest(BaseModel):
-    video_name: str = Field(..., description="Filename under videos directory")
+    video_name: str = Field(..., description="Filename under videos directory (or under the batch subfolder, if batch is set)")
     load_existing_exports: bool = Field(False, description="If true, load annotations from existing exported labels on disk")
+    batch: Optional[str] = Field(None, description="MDQ-4b: handoff_<session_id> subfolder to load video_name from, instead of the flat videos directory")
 
 
 class AddAnnotationRequest(BaseModel):
@@ -462,17 +463,73 @@ def create_app() -> FastAPI:
         state.model_to_yaml_path = model_to_yaml
         return model_to_names
 
-    def list_videos() -> List[str]:
-        exts = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm", ".mpg", ".mpeg"}
-        if not state.videos_dir.exists():
+    VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm", ".mpg", ".mpeg"}
+    HANDOFF_BATCH_PREFIX = "handoff_"   # must match intellicup_deep_sort/api/serve.py's own prefix
+
+    def _is_safe_batch_name(batch: Optional[str]) -> bool:
+        """A batch is a single path segment we join onto videos_dir — reject
+        anything that isn't exactly a `handoff_<...>` folder name we ourselves
+        would have listed, so a crafted `batch` can never escape videos_dir
+        (no slashes, no `..`, no absolute path)."""
+        if not batch:
+            return True   # no batch = flat mode, always fine
+        if not batch.startswith(HANDOFF_BATCH_PREFIX):
+            return False
+        if "/" in batch or "\\" in batch or ".." in batch:
+            return False
+        return True
+
+    def _videos_root_for(batch: Optional[str]) -> Optional[Path]:
+        """The directory list_videos()/load_video() actually read from — either
+        videos_dir itself (flat, batch=None) or one of its handoff_* subfolders.
+        Returns None for an invalid/unsafe batch name (caller decides how to fail)."""
+        if not batch:
+            return state.videos_dir
+        if not _is_safe_batch_name(batch):
+            return None
+        return state.videos_dir / batch
+
+    def list_videos(batch: Optional[str] = None) -> List[str]:
+        root = _videos_root_for(batch)
+        if root is None or not root.exists():
             return []
-        vids = [p.name for p in state.videos_dir.iterdir() if p.is_file() and p.suffix.lower() in exts]
+        vids = [p.name for p in root.iterdir() if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
         vids.sort()
         return vids
 
+    def list_video_batches() -> List[Dict[str, Any]]:
+        """MDQ-4b: the handoff_* session subfolders written by intellicup_deep_sort's
+        send_to_labeling — each is one batch a labeler can load instead of the flat
+        video list. Reads that same repo's own `_session.json` shape directly (no
+        import across repos — this is just a JSON file on shared disk, same
+        cross-repo pattern as blaznavac_article_map.yaml elsewhere in this file),
+        tolerant of it being missing/unreadable (an old or hand-made folder still
+        shows up, just without session metadata)."""
+        if not state.videos_dir.exists():
+            return []
+        out: List[Dict[str, Any]] = []
+        for p in sorted(state.videos_dir.iterdir()):
+            if not p.is_dir() or not p.name.startswith(HANDOFF_BATCH_PREFIX):
+                continue
+            clip_count = sum(1 for f in p.iterdir() if f.is_file() and f.suffix.lower() in VIDEO_EXTS)
+            meta: Dict[str, Any] = {}
+            meta_path = p / "_session.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except Exception:
+                    meta = {}
+            out.append({
+                "name":         p.name,
+                "session_id":   meta.get("session_id", p.name[len(HANDOFF_BATCH_PREFIX):]),
+                "opened_at":    meta.get("opened_at"),
+                "closed_at":    meta.get("closed_at"),
+                "clip_count":   clip_count,
+            })
+        return out
+
     def is_supported_video_name(name: str) -> bool:
-        exts = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm", ".mpg", ".mpeg"}
-        return Path(name).suffix.lower() in exts
+        return Path(name).suffix.lower() in VIDEO_EXTS
 
     # NOTE: We intentionally do NOT persist/restore annotations to disk.
     # Requirement: switching videos and restarting the server should start clean.
@@ -494,11 +551,21 @@ def create_app() -> FastAPI:
             "datasets_dir": str(datasets_dir),
             "models": [{"name": k, "class_count": len(v)} for k, v in sorted(models.items())],
             "videos": videos,
+            "video_batches": list_video_batches(),   # MDQ-4b: handoff_* subfolders, flat "videos" list is unaffected
             "bar_counter_options": bar_counter_options,
             "bar_counter_detected": detected,
             "raw_configured": raw_base_path is not None and raw_base_path.is_dir(),
             "flagging_available": flag_store.available,
         }
+
+    @app.get("/api/video/list")
+    def api_list_videos(batch: Optional[str] = Query(None)):
+        """MDQ-4b: video names inside one handoff_* batch (or the flat videos_dir
+        list, same as /api/config's own `videos`, when batch is omitted) — used
+        when the labeler switches the batch selector without a full page reload."""
+        if batch and not _is_safe_batch_name(batch):
+            raise HTTPException(status_code=400, detail="Invalid batch name")
+        return {"videos": list_videos(batch)}
 
     @app.get("/api/class_variations")
     def get_class_variations():
@@ -1539,10 +1606,13 @@ def create_app() -> FastAPI:
     def load_video(req: LoadVideoRequest):
         refresh_models()
 
-        p = (state.videos_dir / req.video_name).resolve()
+        if req.batch and not _is_safe_batch_name(req.batch):
+            raise HTTPException(status_code=400, detail="Invalid batch name")
+        root = _videos_root_for(req.batch)   # videos_dir itself, or videos_dir/handoff_<id> (MDQ-4b)
+        p = (root / req.video_name).resolve()
         if not p.exists() or not p.is_file():
             raise HTTPException(status_code=404, detail="Video not found in videos directory")
-        if p.parent != state.videos_dir:
+        if p.parent != root.resolve():
             raise HTTPException(status_code=400, detail="Invalid video name")
 
         with video_lock:
@@ -1589,9 +1659,12 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/video/hints")
-    def get_video_hints(video_name: str = Query(...)):
+    def get_video_hints(video_name: str = Query(...), batch: Optional[str] = Query(None)):
+        if batch and not _is_safe_batch_name(batch):
+            return {"hints": None}
+        root = _videos_root_for(batch) or videos_dir
         stem = Path(video_name).stem
-        hints_path = videos_dir / f"{stem}_hints.json"
+        hints_path = root / f"{stem}_hints.json"
         if not hints_path.exists():
             return {"hints": None}
         try:
@@ -1600,9 +1673,12 @@ def create_app() -> FastAPI:
             return {"hints": None}
 
     @app.get("/api/video/case_info")
-    def get_video_case_info(video_name: str = Query(...)):
+    def get_video_case_info(video_name: str = Query(...), batch: Optional[str] = Query(None)):
+        if batch and not _is_safe_batch_name(batch):
+            return {"instruction": None}
+        root = _videos_root_for(batch) or videos_dir
         stem = Path(video_name).stem
-        info_path = videos_dir / f"{stem}_info.json"
+        info_path = root / f"{stem}_info.json"
         if not info_path.exists():
             return {"instruction": None}
         try:

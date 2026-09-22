@@ -4,14 +4,24 @@ const api = {
   async getConfig() {
     return fetch("/api/config").then(r => r.json());
   },
-  async loadVideo(videoName, loadExistingExports=false) {
+  async loadVideo(videoName, loadExistingExports=false, batch=null) {
     return fetch("/api/video/load", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({video_name: videoName, load_existing_exports: !!loadExistingExports}),
+      body: JSON.stringify({video_name: videoName, load_existing_exports: !!loadExistingExports, batch: batch || null}),
     }).then(async r => {
       if (!r.ok) throw new Error((await r.json()).detail || "Failed to load video");
       return r.json();
+    });
+  },
+  // MDQ-4b: videos inside one handoff_<session> batch, or the flat list (same
+  // as config.videos) when batch is falsy — used when the batch selector
+  // changes without a full page reload.
+  async listVideos(batch=null) {
+    const q = batch ? `?batch=${encodeURIComponent(batch)}` : "";
+    return fetch(`/api/video/list${q}`).then(async r => {
+      if (!r.ok) throw new Error((await r.json()).detail || "Failed to list videos");
+      return (await r.json()).videos || [];
     });
   },
   async getVideoInfo(videoName) {
@@ -20,11 +30,13 @@ const api = {
       return r.json();
     });
   },
-  async getVideoHints(videoName) {
-    return fetch(`/api/video/hints?video_name=${encodeURIComponent(videoName)}`).then(r => r.ok ? r.json() : {hints: null});
+  async getVideoHints(videoName, batch=null) {
+    const b = batch ? `&batch=${encodeURIComponent(batch)}` : "";
+    return fetch(`/api/video/hints?video_name=${encodeURIComponent(videoName)}${b}`).then(r => r.ok ? r.json() : {hints: null});
   },
-  async getVideoCaseInfo(videoName) {
-    return fetch(`/api/video/case_info?video_name=${encodeURIComponent(videoName)}`).then(r => r.ok ? r.json() : {instruction: null});
+  async getVideoCaseInfo(videoName, batch=null) {
+    const b = batch ? `&batch=${encodeURIComponent(batch)}` : "";
+    return fetch(`/api/video/case_info?video_name=${encodeURIComponent(videoName)}${b}`).then(r => r.ok ? r.json() : {instruction: null});
   },
   async getBgConfig() {
     return fetch(`/api/background_labeler/config`).then(async r => {
@@ -437,6 +449,7 @@ const state = {
   config: null,
   videoLoaded: false,
   videoName: null,
+  currentBatch: null,   // MDQ-4b: handoff_<session_id> the selected/loaded video lives in, or "" for flat
   totalFrames: 0,
   fps: 0,
   imgW: 0,
@@ -1977,18 +1990,57 @@ async function init() {
     if (prev && videos.includes(prev)) vs.value = prev;
   }
 
+  // MDQ-4b: batches are handoff_<session_id> subfolders (send_to_labeling in
+  // intellicup_deep_sort's api/serve.py). "" (the default option) means flat
+  // mode — the pre-MDQ-4b behavior, videos directly in the videos folder.
+  function populateBatches(batches) {
+    const bs = $("batchSelect");
+    const prev = bs.value;
+    bs.innerHTML = "";
+    const flatOpt = document.createElement("option");
+    flatOpt.value = "";
+    flatOpt.textContent = "— Flat / all videos —";
+    bs.appendChild(flatOpt);
+    for (const b of (batches || [])) {
+      const opt = document.createElement("option");
+      opt.value = b.name;
+      const status = b.closed_at ? "closed" : "open";
+      opt.textContent = `${b.session_id}  (${b.clip_count} clip${b.clip_count === 1 ? "" : "s"}, ${status})`;
+      bs.appendChild(opt);
+    }
+    const names = (batches || []).map((b) => b.name);
+    if (prev && (prev === "" || names.includes(prev))) bs.value = prev;
+    state.currentBatch = bs.value || null;
+  }
+
+  async function refreshVideosForCurrentBatch() {
+    const videos = await api.listVideos(state.currentBatch);
+    populateVideos(videos);
+  }
+
   async function refreshConfigAndVideos() {
     const cfg2 = await api.getConfig();
     state.config = cfg2;
-    populateVideos(cfg2.videos);
+    populateBatches(cfg2.video_batches);
+    await refreshVideosForCurrentBatch();
     return cfg2;
   }
+
+  $("batchSelect").onchange = async () => {
+    state.currentBatch = $("batchSelect").value || null;
+    try {
+      await refreshVideosForCurrentBatch();
+    } catch (e) {
+      setStatus(`Error listing batch videos: ${e.message || e}`);
+    }
+  };
 
   async function doLoadVideo(videoName, loadExistingExports=false) {
     // Clear any previous UI state before loading a new video.
     resetWorkspaceUI("Loading video…");
     setStatus("Loading video…");
-    const res = await api.loadVideo(videoName, !!loadExistingExports);
+    const batch = state.currentBatch || null;
+    const res = await api.loadVideo(videoName, !!loadExistingExports, batch);
     state.videoLoaded = true;
     state.videoName = res.video_name;
     state.totalFrames = res.total_frames;
@@ -2014,8 +2066,8 @@ async function init() {
     }
     // Load hint/info sidecars (UV ghost bbox + instruction banner)
     const [hintsRes, infoRes] = await Promise.all([
-      api.getVideoHints(videoName),
-      api.getVideoCaseInfo(videoName),
+      api.getVideoHints(videoName, batch),
+      api.getVideoCaseInfo(videoName, batch),
     ]);
     state.hintData = (hintsRes && hintsRes.detected_class) ? hintsRes : null;
     state.caseInfo = (infoRes && infoRes.instruction) ? infoRes : null;
@@ -2023,7 +2075,8 @@ async function init() {
   }
 
   // populate selects
-  populateVideos(cfg.videos);
+  populateBatches(cfg.video_batches);
+  populateVideos(cfg.videos);   // initial paint uses the flat list already in `cfg`; batchSelect defaults to "" (flat) so this matches
 
   const ms = $("modelSelect");
   const mms = $("modalModelSelect");
