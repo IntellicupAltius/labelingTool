@@ -246,6 +246,12 @@ class RawFlagRequest(BaseModel):
     pool: Optional[str] = None  # defaults to the loaded raw session's model
 
 
+class ReviewDecisionRequest(BaseModel):
+    pool: str
+    image_key: str
+    decision: Optional[str] = None  # "approve_delete" | "keep" | null (back to pending)
+
+
 class FrameFlagRequest(BaseModel):
     model: str  # the pool the frame is flagged for
     frame_idx: int
@@ -770,6 +776,110 @@ def create_app() -> FastAPI:
         p = normalize_pool(model)
         key = _frame_flag_key(int(frame_idx))
         return {"pool": p, "image_key": key, "removed": flag_store.remove_manual_flag(p, key)}
+
+    # ---------------- Owner review queue (MDQ-6) ----------------
+    # One list over every pool's sidecar, whatever the source (manual_goca / analyzer_auto /
+    # data4_audit). The owner's approve-delete / keep verdict goes back into the same sidecar
+    # entry (owner_decision). RAW is only ever READ here (thumbnail + label boxes); moving an
+    # approved image out of RAW is MDQ-8's archive script.
+
+    def _raw_image_path(pool: str, image_key: str) -> Optional[Path]:
+        """RAW image for a non-forward key, or None if there is none (forward frame, missing file)."""
+        if raw_base_path is None or image_key.startswith(_flags.FORWARD_DIR + "/"):
+            return None
+        try:
+            validate_image_key(image_key)
+        except FlagError:
+            return None
+        cls, fname = image_key.split("/")
+        p = raw_base_path / pool / "images" / cls / fname
+        return p if p.is_file() else None
+
+    def _raw_label_boxes(pool: str, image_key: str, img_path: Path) -> List[dict]:
+        """Normalized YOLO boxes from the image's label file (read-only), with class names."""
+        cls = image_key.split("/")[0]
+        txt = raw_base_path / pool / "labels" / cls / f"{img_path.stem}.txt"
+        if not txt.is_file():
+            return []
+        _key = next((k for k in state.model_to_names if k.lower() == pool), None)
+        names = state.model_to_names.get(_key) if _key else None
+        boxes: List[dict] = []
+        try:
+            lines = txt.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            try:
+                cid = int(float(parts[0]))
+                xc, yc, w, h = (float(v) for v in parts[1:5])
+            except ValueError:
+                continue
+            cname = names[cid] if names and 0 <= cid < len(names) else f"class_{cid}"
+            boxes.append({"class_id": cid, "class_name": cname, "xc": xc, "yc": yc, "w": w, "h": h})
+        return boxes
+
+    @app.get("/api/review/queue")
+    def review_queue():
+        _need_flags()
+        if not state.model_to_names:
+            refresh_models()
+        pools = {}
+        items = []
+        for pool, res in flag_store.list_all().items():
+            if "error" in res:
+                pools[pool] = {"count": 0, "error": res["error"]}
+                continue
+            pools[pool] = {"count": len(res["entries"]), "error": None}
+            for key, entry in res["entries"].items():
+                forward = key.startswith(_flags.FORWARD_DIR + "/")
+                img_path = _raw_image_path(pool, key)
+                reason = _flags.describe_reason(entry)
+                items.append({
+                    "pool": pool,
+                    "image_key": key,
+                    "class_name": None if forward else key.split("/")[0],
+                    "filename": key.split("/")[-1],
+                    "is_forward": forward,
+                    "raw_exists": img_path is not None,
+                    "reason": reason,
+                    "reason_missing": reason is None,
+                    "boxes": _raw_label_boxes(pool, key, img_path) if img_path else [],
+                    "entry": entry,
+                })
+        items.sort(key=lambda it: it["entry"].get("flagged_at") or "", reverse=True)
+        return {"pools": pools, "items": items, "sources": sorted({it["entry"].get("source") or "" for it in items})}
+
+    @app.get("/api/review/image")
+    def review_image(pool: str = Query(...), image_key: str = Query(...), thumb: int = Query(1)):
+        _need_flags()
+        p = normalize_pool(pool)
+        validate_image_key(image_key)
+        img_path = _raw_image_path(p, image_key)
+        if img_path is None:
+            raise HTTPException(status_code=404, detail=f"No such RAW image: {p}/images/{image_key}")
+        if thumb:
+            img = cv2.imread(str(img_path))
+            if img is not None:
+                h, w = img.shape[:2]
+                scale = min(1.0, 480.0 / max(w, 1))
+                if scale < 1.0:
+                    img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ok:
+                    return Response(content=buf.tobytes(), media_type="image/jpeg",
+                                    headers={"Cache-Control": "private, max-age=300"})
+        media = "image/jpeg" if img_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+        return FileResponse(str(img_path), media_type=media, headers={"Cache-Control": "private, max-age=300"})
+
+    @app.post("/api/review/decision")
+    def review_decision(req: ReviewDecisionRequest):
+        _need_flags()
+        p = normalize_pool(req.pool)
+        entry = flag_store.set_owner_decision(p, req.image_key, req.decision)
+        return {"pool": p, "image_key": req.image_key, "entry": entry}
 
     # ---------------- Background Labeler API ----------------
     @app.get("/api/background_labeler/config")

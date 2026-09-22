@@ -51,6 +51,13 @@ except ImportError:  # pragma: no cover
 SCHEMA_VERSION = 1
 POOLS = ("glasses", "bottles", "cups", "pitchers", "shots")
 CATEGORIES = ("gibberish", "wrong_frame_wrong_class", "near_duplicate", "mislabeled_background")
+CATEGORY_LABELS = {
+    "gibberish": "Gibberish",
+    "wrong_frame_wrong_class": "Wrong frame, wrong class",
+    "near_duplicate": "Near-duplicate",
+    "mislabeled_background": "Mislabeled background",
+}
+OWNER_DECISIONS = ("approve_delete", "keep")
 SOURCE_MANUAL = "manual_goca"
 CONTEXT_RETROACTIVE = "retroactive_review"
 CONTEXT_FORWARD = "forward_labeling"
@@ -76,6 +83,10 @@ class FlagUnavailable(FlagError):
 class FlagStoreError(FlagError):
     """The sidecar on disk is unreadable / has an unknown schema. Never auto-repaired."""
     status = 500
+
+
+class FlagNotFound(FlagError):
+    status = 404
 
 
 class FlagConflict(FlagError):
@@ -260,6 +271,76 @@ class FlagStore:
             del doc["entries"][image_key]
             self._write(pool, doc)
         return True
+
+
+    # -- owner review queue (MDQ-6) ---------------------------------------------
+
+    def list_all(self) -> Dict[str, dict]:
+        """``{pool: {"entries": {...}} | {"error": "..."}}`` for every pool.
+
+        One unreadable sidecar must not hide the other four pools from the review queue, so a
+        per-pool read failure is reported next to the others instead of raised.
+        """
+        self._require()
+        out: Dict[str, dict] = {}
+        for pool in POOLS:
+            try:
+                out[pool] = {"entries": dict(self._read(pool)["entries"])}
+            except FlagStoreError as e:
+                out[pool] = {"error": str(e)}
+        return out
+
+    def set_owner_decision(self, pool: str, image_key: str, decision: Optional[str]) -> dict:
+        """Record the owner's verdict on an existing flag, in place.
+
+        ``decision`` is one of OWNER_DECISIONS, or None to put the item back to pending (a
+        mis-click must be undoable). Only ``owner_decision`` / ``owner_decision_at`` change:
+        the flag record itself (source, reason, signal, timestamps) is never removed or
+        rewritten, and nothing outside the sidecar is touched — moving an approved image out
+        of RAW is MDQ-8's archive script, not this.
+        """
+        pool = normalize_pool(pool)
+        if decision is not None and decision not in OWNER_DECISIONS:
+            raise FlagValidationError(f"decision must be one of {', '.join(OWNER_DECISIONS)} or null")
+        if not isinstance(image_key, str) or not image_key:
+            raise FlagValidationError("image_key is required")
+        with self._locked(pool):
+            doc = self._read(pool)
+            entry = doc["entries"].get(image_key)
+            if entry is None:
+                raise FlagNotFound(f"no flag for {pool}/{image_key}")
+            entry["owner_decision"] = decision
+            entry["owner_decision_at"] = _now() if decision is not None else None
+            self._write(pool, doc)
+        return dict(entry)
+
+
+def describe_reason(entry: dict) -> Optional[str]:
+    """Human-readable reason for a flag, or None if the entry carries none (invalid entry).
+
+    A category is shown by its label, a signal by its concrete metric/value; the comment is
+    appended when present. Never returns a generic placeholder: an entry without a category
+    or signal is reported as missing, not papered over.
+    """
+    parts: List[str] = []
+    cat = entry.get("category")
+    if cat:
+        parts.append(CATEGORY_LABELS.get(cat, cat))
+    sig = entry.get("signal")
+    if isinstance(sig, dict) and sig:
+        metric = sig.get("metric")
+        value = sig.get("value")
+        detail = ", ".join(f"{k}={v}" for k, v in sig.items() if k not in ("metric", "value"))
+        text = f"{metric}: {value}" if metric is not None else ", ".join(f"{k}={v}" for k, v in sig.items())
+        if metric is not None and detail:
+            text += f" ({detail})"
+        parts.append(text)
+    if not parts:
+        return None
+    comment = (entry.get("comment") or "").strip()
+    if comment:
+        parts.append(f"“{comment}”")
+    return " — ".join(parts)
 
 
 def _conflict_message(existing: dict) -> str:
