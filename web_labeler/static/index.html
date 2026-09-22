@@ -74,6 +74,8 @@
         <button id="saveFixedBtn"     class="btn">Save as _fixed</button>
         <div class="modestrip-sep"></div>
         <button id="testModeBtn" class="btn" title="Toggle test mode to add per-image tags">🧪 Test Mode: OFF</button>
+        <div class="modestrip-sep"></div>
+        <button id="reviewQueueBtn" class="btn" title="Owner review queue: every flagged image (manual + automatic), approve-delete or keep.">Review queue</button>
       </div>
 
       <!-- Background Labeler controls -->
@@ -333,6 +335,38 @@
 
       <div id="flagError" class="modalError"></div>
     </div>
+  </div>
+
+  <!-- Owner review queue (MDQ-6): every flagged image from every pool's sidecar, whatever the
+       source. A verdict only writes owner_decision into the same sidecar entry — nothing under
+       RAW is touched here (moving approved images out of RAW is the separate archive script). -->
+  <div id="reviewPanel" class="reviewPanel hidden">
+    <div class="reviewHeader">
+      <div class="reviewTitle">Review queue</div>
+      <div id="reviewCounts" class="reviewCounts"></div>
+      <label class="field"><div class="label">Source</div><select id="reviewSourceFilter"></select></label>
+      <label class="field"><div class="label">Pool</div><select id="reviewPoolFilter"></select></label>
+      <label class="field"><div class="label">Decision</div>
+        <select id="reviewDecisionFilter">
+          <option value="pending">Pending</option>
+          <option value="approve_delete">Approved delete</option>
+          <option value="keep">Keep</option>
+          <option value="all">All</option>
+        </select>
+      </label>
+      <label class="field"><div class="label">Sort</div>
+        <select id="reviewSort">
+          <option value="newest">Newest flag first</option>
+          <option value="oldest">Oldest flag first</option>
+          <option value="source">By source</option>
+          <option value="class">By pool / class</option>
+        </select>
+      </label>
+      <button id="reviewRefreshBtn" class="btn">Refresh</button>
+      <button id="reviewCloseBtn" class="btn" style="margin-left:auto;">Close (Esc)</button>
+    </div>
+    <div id="reviewErrors" class="reviewErrors"></div>
+    <div id="reviewGrid" class="reviewGrid"></div>
   </div>
 
   <script src="/static/app.js"></script>

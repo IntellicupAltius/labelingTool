@@ -611,3 +611,60 @@ input[type="range"] {
   font: inherit; font-size: 12px; outline: none;
 }
 .flagCard textarea:focus { border-color: rgba(45, 212, 191, 0.5); }
+
+/* ── Owner review queue (MDQ-6) ────────────────────────────────────────── */
+.reviewPanel {
+  position: fixed; inset: 0; z-index: 900;
+  display: flex; flex-direction: column;
+  background: rgba(8, 11, 16, 0.98);
+}
+.reviewPanel.hidden { display: none; }
+.reviewHeader {
+  display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap;
+  padding: 14px 18px; border-bottom: 1px solid var(--border2); background: var(--panel);
+}
+.reviewTitle  { font-size: 16px; font-weight: 700; margin-right: 6px; align-self: center; }
+.reviewCounts { color: var(--muted); font-size: 12px; align-self: center; min-width: 160px; }
+.reviewErrors { color: var(--danger); font-size: 12px; padding: 0 18px; }
+.reviewErrors:not(:empty) { padding: 8px 18px; }
+.reviewGrid {
+  flex: 1; overflow-y: auto; padding: 16px 18px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; align-content: start;
+}
+.reviewEmpty { color: var(--muted); grid-column: 1 / -1; text-align: center; margin-top: 60px; }
+.reviewCard {
+  background: var(--surface); border: 1px solid var(--border2); border-radius: 12px;
+  overflow: hidden; display: flex; flex-direction: column;
+}
+.reviewCard.decided-approve_delete { border-color: rgba(248, 113, 113, 0.6); }
+.reviewCard.decided-keep           { border-color: rgba(45, 212, 191, 0.6); }
+.reviewThumb {
+  position: relative; background: #000; aspect-ratio: 16 / 9;
+  display: flex; align-items: center; justify-content: center;
+}
+.reviewThumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.reviewThumbNote { color: var(--muted); font-size: 12px; padding: 12px; text-align: center; white-space: pre-line; }
+.reviewBox {
+  position: absolute; border: 2px solid var(--accent2); pointer-events: none;
+}
+.reviewBox span {
+  position: absolute; top: -16px; left: -2px; font-size: 10px; padding: 0 3px;
+  background: var(--accent2); color: #000; white-space: nowrap;
+}
+.reviewBody { padding: 10px 12px; display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+.reviewWhere { font-weight: 700; word-break: break-all; }
+.reviewFile  { color: var(--muted); word-break: break-all; }
+.reviewReason { color: #fde68a; }
+.reviewReason.missing { color: var(--danger); font-weight: 700; }
+.reviewMeta { color: var(--muted); }
+.reviewSource {
+  display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 6px;
+  background: rgba(96, 165, 250, 0.18); color: var(--accent2); margin-right: 6px;
+}
+.reviewSource.src-manual_goca   { background: rgba(167, 139, 250, 0.18); color: var(--purple); }
+.reviewSource.src-data4_audit   { background: rgba(45, 212, 191, 0.18); color: var(--accent); }
+.reviewDecision { font-weight: 700; }
+.reviewActions { display: flex; gap: 8px; padding: 0 12px 12px; }
+.reviewActions .btn { flex: 1; }
+.reviewActions .btn.active-delete { background: rgba(248, 113, 113, 0.25); border-color: var(--danger); }
+.reviewActions .btn.active-keep   { background: rgba(45, 212, 191, 0.2);  border-color: var(--accent); }

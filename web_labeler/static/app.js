@@ -1882,8 +1882,223 @@ function installFlagPanel() {
   $("flagCancelBtn").onclick = closeFlagPanel;
 }
 
+// ---------------- Owner review queue (MDQ-6) ----------------
+// Every flagged image from every pool's sidecar (manual_goca / analyzer_auto / data4_audit) in
+// one list. A verdict only writes owner_decision into the same sidecar entry; nothing under RAW
+// is touched here (moving approved images out of RAW is the separate archive script).
+
+const review = {open: false, items: [], pools: {}, busy: new Set()};
+const REVIEW_DECISION_LABELS = {approve_delete: "Approved delete", keep: "Keep"};
+
+function reviewKey(it) { return `${it.pool}::${it.image_key}`; }
+
+async function openReviewPanel() {
+  if (!state.config || !state.config.flagging_available) {
+    setStatus("The review queue is not available on this machine (it needs the server's raw_review folder).");
+    return;
+  }
+  if (state.flagPanelOpen || state.modalOpen) return;
+  review.open = true;
+  $("reviewPanel").classList.remove("hidden");
+  await loadReviewQueue();
+}
+
+function closeReviewPanel() {
+  review.open = false;
+  $("reviewPanel").classList.add("hidden");
+  // A decision can change what the raw-browse badge should say for the image on screen.
+  if (state.mode === "dataset" && state.rawLoaded) renderRawImage(state.datasetImageIdx);
+}
+
+async function loadReviewQueue() {
+  $("reviewErrors").textContent = "";
+  $("reviewGrid").innerHTML = '<div class="reviewEmpty">Loading…</div>';
+  let data;
+  try {
+    const r = await fetch("/api/review/queue");
+    data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+  } catch (e) {
+    $("reviewGrid").innerHTML = "";
+    $("reviewErrors").textContent = `Could not load the review queue: ${e.message}`;
+    return;
+  }
+  review.items = data.items || [];
+  review.pools = data.pools || {};
+  const errs = Object.entries(review.pools).filter(([, v]) => v.error).map(([p, v]) => `${p}: ${v.error}`);
+  $("reviewErrors").textContent = errs.length ? `Unreadable sidecar (not shown, not modified) — ${errs.join(" | ")}` : "";
+  fillReviewFilter("reviewSourceFilter", data.sources || [], "All sources");
+  fillReviewFilter("reviewPoolFilter", Object.keys(review.pools).filter(p => review.pools[p].count > 0), "All pools");
+  renderReviewGrid();
+}
+
+function fillReviewFilter(id, values, allLabel) {
+  const sel = $(id);
+  const prev = sel.value;
+  sel.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = ""; all.textContent = allLabel;
+  sel.appendChild(all);
+  for (const v of values) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = v || "(no source)";
+    sel.appendChild(o);
+  }
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+function filteredReviewItems() {
+  const src = $("reviewSourceFilter").value;
+  const pool = $("reviewPoolFilter").value;
+  const dec = $("reviewDecisionFilter").value;
+  const sort = $("reviewSort").value;
+  const items = review.items.filter(it => {
+    const d = it.entry.owner_decision || null;
+    if (src && (it.entry.source || "") !== src) return false;
+    if (pool && it.pool !== pool) return false;
+    if (dec === "pending" && d !== null) return false;
+    if ((dec === "approve_delete" || dec === "keep") && d !== dec) return false;
+    return true;
+  });
+  const at = it => it.entry.flagged_at || "";
+  const cmp = {
+    newest: (a, b) => at(b).localeCompare(at(a)),
+    oldest: (a, b) => at(a).localeCompare(at(b)),
+    source: (a, b) => (a.entry.source || "").localeCompare(b.entry.source || "") || at(b).localeCompare(at(a)),
+    class:  (a, b) => a.pool.localeCompare(b.pool) || a.image_key.localeCompare(b.image_key),
+  }[sort] || (() => 0);
+  return items.sort(cmp);
+}
+
+function renderReviewGrid() {
+  const grid = $("reviewGrid");
+  const items = filteredReviewItems();
+  const pending = review.items.filter(it => !it.entry.owner_decision).length;
+  $("reviewCounts").textContent = `${items.length} shown · ${pending} pending · ${review.items.length} flagged total`;
+  grid.innerHTML = "";
+  if (!items.length) {
+    const e = document.createElement("div");
+    e.className = "reviewEmpty";
+    e.textContent = review.items.length ? "Nothing matches these filters." : "No flagged images yet.";
+    grid.appendChild(e);
+    return;
+  }
+  for (const it of items) grid.appendChild(renderReviewCard(it));
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = text;
+  return e;
+}
+
+function renderReviewCard(it) {
+  const entry = it.entry;
+  const decision = entry.owner_decision || null;
+  const card = el("div", "reviewCard" + (decision ? ` decided-${decision}` : ""));
+
+  const thumb = el("div", "reviewThumb");
+  if (it.raw_exists) {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.alt = it.image_key;
+    img.src = `/api/review/image?pool=${encodeURIComponent(it.pool)}&image_key=${encodeURIComponent(it.image_key)}`;
+    thumb.appendChild(img);
+    img.onload = () => {
+      // Boxes are normalized to the image; place them over the letterboxed <img> area.
+      const W = thumb.clientWidth, H = thumb.clientHeight;
+      const s = Math.min(W / img.naturalWidth, H / img.naturalHeight);
+      const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
+      const ox = (W - dw) / 2, oy = (H - dh) / 2;
+      for (const b of it.boxes || []) {
+        const bx = el("div", "reviewBox");
+        bx.style.left = `${ox + (b.xc - b.w / 2) * dw}px`;
+        bx.style.top = `${oy + (b.yc - b.h / 2) * dh}px`;
+        bx.style.width = `${b.w * dw}px`;
+        bx.style.height = `${b.h * dh}px`;
+        bx.appendChild(el("span", null, b.class_name));
+        thumb.appendChild(bx);
+      }
+    };
+  } else {
+    thumb.appendChild(el("div", "reviewThumbNote", it.is_forward
+      ? `Video frame flagged while labeling — not in RAW yet.\n${entry.video || "?"} · frame ${entry.frame_idx != null ? entry.frame_idx + 1 : "?"}`
+      : "RAW image not found (moved or already archived)."));
+  }
+  card.appendChild(thumb);
+
+  const body = el("div", "reviewBody");
+  const where = el("div", "reviewWhere");
+  where.appendChild(el("span", `reviewSource src-${entry.source || "none"}`, entry.source || "no source"));
+  where.appendChild(document.createTextNode(`${it.pool} · ${it.class_name || "(forward frame)"}`));
+  body.appendChild(where);
+  body.appendChild(el("div", "reviewFile", it.filename));
+  body.appendChild(it.reason_missing
+    ? el("div", "reviewReason missing", "No reason recorded — invalid flag entry (neither category nor signal)")
+    : el("div", "reviewReason", it.reason));
+  if (it.is_forward && (entry.annotation_classes || []).length) {
+    body.appendChild(el("div", "reviewMeta", `Labeled as: ${entry.annotation_classes.join(", ")}`));
+  }
+  body.appendChild(el("div", "reviewMeta", `Flagged ${entry.flagged_at || "?"} by ${entry.flagged_by || "?"}`));
+  body.appendChild(el("div", "reviewDecision",
+    decision ? `Decision: ${REVIEW_DECISION_LABELS[decision] || decision} (${entry.owner_decision_at || ""})` : "Decision: pending"));
+  card.appendChild(body);
+
+  const actions = el("div", "reviewActions");
+  const busy = review.busy.has(reviewKey(it));
+  const mk = (label, value, activeCls) => {
+    const b = el("button", "btn" + (decision === value && activeCls ? ` ${activeCls}` : ""), label);
+    b.disabled = busy || decision === value;
+    b.onclick = () => setReviewDecision(it, value);
+    return b;
+  };
+  actions.appendChild(mk("Approve delete", "approve_delete", "active-delete"));
+  actions.appendChild(mk("Keep", "keep", "active-keep"));
+  if (decision) actions.appendChild(mk("Undo", null, null));
+  card.appendChild(actions);
+  return card;
+}
+
+async function setReviewDecision(it, decision) {
+  const k = reviewKey(it);
+  if (review.busy.has(k)) return;
+  review.busy.add(k);
+  renderReviewGrid();
+  try {
+    const r = await fetch("/api/review/decision", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({pool: it.pool, image_key: it.image_key, decision}),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+    it.entry = data.entry;
+    $("reviewErrors").textContent = "";
+  } catch (e) {
+    $("reviewErrors").textContent = `Could not save the decision for ${it.pool}/${it.image_key}: ${e.message}`;
+  } finally {
+    review.busy.delete(k);
+    renderReviewGrid();
+  }
+}
+
+function installReviewPanel() {
+  $("reviewQueueBtn").onclick = openReviewPanel;
+  $("reviewCloseBtn").onclick = closeReviewPanel;
+  $("reviewRefreshBtn").onclick = loadReviewQueue;
+  for (const id of ["reviewSourceFilter", "reviewPoolFilter", "reviewDecisionFilter", "reviewSort"]) {
+    $(id).onchange = renderReviewGrid;
+  }
+}
+
 function installHotkeys() {
   window.addEventListener("keydown", async (e) => {
+    // The review queue covers the whole screen: no labeling/browsing hotkey may act behind it.
+    if (review.open) {
+      if (e.key === "Escape") { e.preventDefault(); closeReviewPanel(); }
+      return;
+    }
     if (state.modalOpen) {
       if (e.key === "Escape") { e.preventDefault(); closeModal(); }
       if (e.key === "Enter") { e.preventDefault(); onModalSave(); }
@@ -2649,6 +2864,7 @@ async function init() {
   installCanvasHandlers();
   installHotkeys();
   installFlagPanel();
+  installReviewPanel();
 
   if (cfg.videos.length === 0) {
     setStatus(`Put videos into: ${cfg.videos_dir}`);
