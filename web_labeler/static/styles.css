@@ -668,3 +668,18 @@ input[type="range"] {
 .reviewActions .btn { flex: 1; }
 .reviewActions .btn.active-delete { background: rgba(248, 113, 113, 0.25); border-color: var(--danger); }
 .reviewActions .btn.active-keep   { background: rgba(45, 212, 191, 0.2);  border-color: var(--accent); }
+
+/* MDQ-7: per-image comparison metrics, fetched on request */
+.reviewMetrics { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
+.reviewMetricsBtn { font-size: 11px; padding: 4px 8px; align-self: flex-start; }
+.reviewMetricsNote { color: var(--muted); font-size: 11px; }
+.reviewMetricRow { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 11px; }
+.reviewMetricLabel { color: var(--muted); }
+.reviewMetricValue { font-variant-numeric: tabular-nums; }
+.metricBadge {
+  display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 6px;
+  white-space: nowrap;
+}
+.metricBadge.normal   { background: rgba(45, 212, 191, 0.15); color: var(--accent); }
+.metricBadge.moderate { background: rgba(251, 191, 36, 0.18); color: #fde68a; }
+.metricBadge.large    { background: rgba(248, 113, 113, 0.2); color: var(--danger); }

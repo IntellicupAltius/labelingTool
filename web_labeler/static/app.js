@@ -1887,8 +1887,11 @@ function installFlagPanel() {
 // one list. A verdict only writes owner_decision into the same sidecar entry; nothing under RAW
 // is touched here (moving approved images out of RAW is the separate archive script).
 
-const review = {open: false, items: [], pools: {}, busy: new Set()};
+const review = {open: false, items: [], pools: {}, busy: new Set(), metrics: new Map()};
 const REVIEW_DECISION_LABELS = {approve_delete: "Approved delete", keep: "Keep"};
+// MDQ-7: per-image comparison metrics. Fetched on request (button click), one image at a
+// time, cached per card for the life of the panel — never fetched for the whole grid at once.
+const METRIC_BADGE_LABEL = {normal: "normal", moderate: "moderate", large: "large deviation"};
 
 function reviewKey(it) { return `${it.pool}::${it.image_key}`; }
 
@@ -2043,6 +2046,7 @@ function renderReviewCard(it) {
   body.appendChild(el("div", "reviewMeta", `Flagged ${entry.flagged_at || "?"} by ${entry.flagged_by || "?"}`));
   body.appendChild(el("div", "reviewDecision",
     decision ? `Decision: ${REVIEW_DECISION_LABELS[decision] || decision} (${entry.owner_decision_at || ""})` : "Decision: pending"));
+  body.appendChild(renderMetricsSection(it));
   card.appendChild(body);
 
   const actions = el("div", "reviewActions");
@@ -2080,6 +2084,79 @@ async function setReviewDecision(it, decision) {
   } finally {
     review.busy.delete(k);
     renderReviewGrid();
+  }
+}
+
+// MDQ-7: review queue per-image comparison metrics — bbox area/aspect ratio, hue/saturation,
+// embedding distance from the class centroid, each as a badge (normal/moderate/large deviation)
+// PLUS the raw number next to it (never a bare badge). Fetched on click, one image at a time,
+// never for the whole grid — mutates just this card's own metrics container, no grid re-render
+// (a full re-render would also re-fetch every thumbnail image on screen).
+
+function renderMetricsSection(it) {
+  const wrap = el("div", "reviewMetrics");
+  const cached = review.metrics.get(reviewKey(it));
+  if (cached === undefined) {
+    const btn = el("button", "btn reviewMetricsBtn", "Show metrics");
+    btn.onclick = () => loadMetricsForCard(it, wrap);
+    wrap.appendChild(btn);
+  } else if (cached === "loading") {
+    wrap.appendChild(el("div", "reviewMetricsNote", "Loading metrics…"));
+  } else {
+    fillMetricsGrid(wrap, cached);
+  }
+  return wrap;
+}
+
+async function loadMetricsForCard(it, wrap) {
+  const k = reviewKey(it);
+  review.metrics.set(k, "loading");
+  wrap.innerHTML = "";
+  wrap.appendChild(el("div", "reviewMetricsNote", "Loading metrics…"));
+  let data;
+  try {
+    const r = await fetch(`/api/review/metrics?pool=${encodeURIComponent(it.pool)}&image_key=${encodeURIComponent(it.image_key)}`);
+    data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+  } catch (e) {
+    review.metrics.delete(k);
+    wrap.innerHTML = "";
+    wrap.appendChild(el("div", "reviewMetricsNote", `Could not load metrics: ${e.message}`));
+    return;
+  }
+  review.metrics.set(k, data);
+  wrap.innerHTML = "";
+  fillMetricsGrid(wrap, data);
+}
+
+function metricRow(label, m, fmt) {
+  const row = el("div", "reviewMetricRow");
+  row.appendChild(el("span", "reviewMetricLabel", label));
+  if (!m) {
+    row.appendChild(el("span", "reviewMetricValue", "n/a"));
+    return row;
+  }
+  row.appendChild(el("span", "reviewMetricValue", fmt(m.value)));
+  row.appendChild(el("span", `metricBadge ${m.badge}`, METRIC_BADGE_LABEL[m.badge] || m.badge));
+  return row;
+}
+
+function fillMetricsGrid(wrap, data) {
+  if (!data.available) {
+    wrap.appendChild(el("div", "reviewMetricsNote", data.reason || "Metrics not available for this image."));
+    return;
+  }
+  wrap.appendChild(metricRow("Box area ratio", data.bbox_area_ratio, v => v.toFixed(4)));
+  wrap.appendChild(metricRow("Box aspect ratio", data.bbox_aspect_ratio, v => v.toFixed(3)));
+  wrap.appendChild(metricRow("Hue", data.hue, v => `${v.toFixed(1)}°`));
+  wrap.appendChild(metricRow("Saturation", data.saturation, v => v.toFixed(1)));
+  if (data.embedding_distance) {
+    wrap.appendChild(metricRow("Embedding distance", data.embedding_distance, v => v.toFixed(4)));
+  } else {
+    const row = el("div", "reviewMetricRow");
+    row.appendChild(el("span", "reviewMetricLabel", "Embedding distance"));
+    row.appendChild(el("span", "reviewMetricValue", data.embedding_error || "n/a"));
+    wrap.appendChild(row);
   }
 }
 

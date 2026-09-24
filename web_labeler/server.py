@@ -57,6 +57,7 @@ from web_labeler.background_labeler import (
 )
 from web_labeler import analyzer as _analyzer
 from web_labeler import flag_store as _flags
+from web_labeler import image_metrics as _metrics
 from web_labeler.flag_store import FlagConflict, FlagError, FlagStore, FlagUnavailable, normalize_pool, validate_image_key
 
 
@@ -411,6 +412,13 @@ def create_app() -> FastAPI:
                      or os.getenv("ANALYZER_MODELS_PYTHON", "/opt/interpreters/INTELLICUP_MODELS/bin/python"),
     )
     logger.info("Analyzer available: %s", _analyzer.is_available())
+
+    # MDQ-7: review-queue per-image metrics. The embedding badge needs the real
+    # AppearanceEncoder (torch + torchvision), which this server's own interpreter doesn't
+    # have — reuses the same default interpreter/env-var pattern as the analyzer above.
+    metrics_python = cfg.get("metrics_python", "").strip() \
+        or os.getenv("LABELER_METRICS_PYTHON", "/opt/interpreters/INTELLICUP_MODELS/bin/python")
+    deep_sort_root = Path(os.getenv("INTELLICUP_DEEP_SORT_ROOT", str(Path.home() / "Projects" / "intellicup_deep_sort")))
 
     try:
         # Avoid OpenCV internal thread pools competing with FFmpeg (stability/perf).
@@ -880,6 +888,76 @@ def create_app() -> FastAPI:
         p = normalize_pool(req.pool)
         entry = flag_store.set_owner_decision(p, req.image_key, req.decision)
         return {"pool": p, "image_key": req.image_key, "entry": entry}
+
+    # ---------------- Review queue metrics (MDQ-7) ----------------
+    # On request, for ONE image at a time — never a pool-wide pass. Purely informational: the
+    # response never sets or influences owner_decision. Every field is either a badge dict
+    # ({value, ..., badge}) or None when it genuinely can't be computed — never a bare badge.
+
+    @app.get("/api/review/metrics")
+    def review_metrics(pool: str = Query(...), image_key: str = Query(...)):
+        p = normalize_pool(pool)
+        if not state.model_to_names:
+            refresh_models()
+        if image_key.startswith(_flags.FORWARD_DIR + "/"):
+            # A forward-flagged frame (video-labeling, not yet ingested into RAW) has no RAW
+            # image to measure — this is a normal "not available", not a bad request.
+            return {"available": False, "reason": "video frame not yet in RAW — nothing to measure"}
+        validate_image_key(image_key)
+        img_path = _raw_image_path(p, image_key)
+        if img_path is None:
+            return {"available": False,
+                    "reason": "RAW image not found (a video frame not yet in RAW, or already moved/archived)"}
+        stats = _metrics.load_baseline_stats(p)
+        if stats is None:
+            return {"available": False,
+                    "reason": "no class baseline stats found (run IntelliCup/tests/check_data_quality.py, MDQ-1)"}
+        raw_class = image_key.split("/")[0]
+        found = _metrics.find_class_entry(stats, raw_class)
+        if found is None:
+            return {"available": False,
+                    "reason": f"class '{raw_class}' has no baseline stats entry (excluded from training, or not measured yet)"}
+        canonical, entry = found
+        members = entry.get("members") or []
+        boxes = [b for b in _raw_label_boxes(p, image_key, img_path) if b["class_name"] in members]
+        if not boxes:
+            return {"available": False,
+                    "reason": f"no '{raw_class}' box found in this image's own label file"}
+        img = cv2.imread(str(img_path))
+        if img is None:
+            return {"available": False, "reason": "could not read the RAW image"}
+
+        visuals = _metrics.compute_box_visuals(img, boxes)
+        area_ref = entry.get("bbox_area_ratio") or {}
+        aspect_ref = entry.get("bbox_aspect_ratio") or {}
+        hsv_ref = entry.get("hsv") or {}
+        hsv_val = visuals.get("hsv") or {}
+
+        result: Dict[str, Any] = {
+            "available": True,
+            "canonical_class": canonical,
+            "n_boxes": visuals["n_boxes"],
+            "bbox_area_ratio": _metrics.zscore_badge(visuals["bbox_area_ratio"], area_ref.get("mean"), area_ref.get("std")),
+            "bbox_aspect_ratio": _metrics.zscore_badge(visuals["bbox_aspect_ratio"], aspect_ref.get("mean"), aspect_ref.get("std")),
+            "hue": _metrics.zscore_badge(hsv_val.get("mean_hue"), hsv_ref.get("mean_hue"), hsv_ref.get("std_hue"), circular_period=180.0),
+            "saturation": _metrics.zscore_badge(hsv_val.get("mean_sat"), hsv_ref.get("mean_sat"), hsv_ref.get("std_sat")),
+            "embedding_distance": None,
+            "embedding_error": None,
+        }
+
+        centroid = entry.get("embedding_centroid")
+        pct = entry.get("embedding_distance_percentiles") or {}
+        if centroid and pct.get("p75") is not None and pct.get("p90") is not None:
+            dist, err = _metrics.compute_embedding_distance(
+                metrics_python, deep_sort_root, img_path, visuals["boxes_tlwh_px"], centroid,
+            )
+            if dist is not None:
+                result["embedding_distance"] = _metrics.percentile_badge(dist, pct.get("p50"), pct.get("p75"), pct.get("p90"))
+            else:
+                result["embedding_error"] = err
+        else:
+            result["embedding_error"] = "no embedding centroid in the class baseline"
+        return result
 
     # ---------------- Background Labeler API ----------------
     @app.get("/api/background_labeler/config")
