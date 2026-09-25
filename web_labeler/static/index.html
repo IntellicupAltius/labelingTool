@@ -369,6 +369,21 @@
     <div id="reviewGrid" class="reviewGrid"></div>
   </div>
 
+  <!-- MDQ-14: full-resolution lightbox for a review-queue thumbnail, with the same bboxes drawn
+       over it. Opens on thumbnail click, closes on Esc or a click outside the image (same pattern
+       as #modal / #flagPanel). -->
+  <div id="reviewLightbox" class="reviewLightbox hidden">
+    <div class="reviewLightboxCard">
+      <div class="reviewLightboxHeader">
+        <div id="reviewLightboxTitle" class="reviewLightboxTitle"></div>
+        <button id="reviewLightboxClose" class="btn" style="margin-left:auto;">Close (Esc)</button>
+      </div>
+      <div class="reviewLightboxImgWrap">
+        <img id="reviewLightboxImg" alt="">
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -1887,7 +1887,7 @@ function installFlagPanel() {
 // one list. A verdict only writes owner_decision into the same sidecar entry; nothing under RAW
 // is touched here (moving approved images out of RAW is the separate archive script).
 
-const review = {open: false, items: [], pools: {}, busy: new Set(), metrics: new Map()};
+const review = {open: false, items: [], pools: {}, busy: new Set(), metrics: new Map(), lightbox: null};
 const REVIEW_DECISION_LABELS = {approve_delete: "Approved delete", keep: "Keep"};
 // MDQ-7: per-image comparison metrics. Fetched on request (button click), one image at a
 // time, cached per card for the life of the panel — never fetched for the whole grid at once.
@@ -1909,8 +1909,50 @@ async function openReviewPanel() {
 function closeReviewPanel() {
   review.open = false;
   $("reviewPanel").classList.add("hidden");
+  closeReviewLightbox();
   // A decision can change what the raw-browse badge should say for the image on screen.
   if (state.mode === "dataset" && state.rawLoaded) renderRawImage(state.datasetImageIdx);
+}
+
+// MDQ-14: place boxes (normalized xc/yc/w/h) over a letterboxed <img> inside `container`.
+// Shared by the review-queue thumbnail and its full-resolution lightbox.
+function renderBoxesOverImage(container, img, boxes) {
+  container.querySelectorAll(".reviewBox").forEach(n => n.remove());
+  const W = container.clientWidth, H = container.clientHeight;
+  const s = Math.min(W / img.naturalWidth, H / img.naturalHeight);
+  const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
+  const ox = (W - dw) / 2, oy = (H - dh) / 2;
+  for (const b of boxes || []) {
+    const bx = el("div", "reviewBox");
+    bx.style.left = `${ox + (b.xc - b.w / 2) * dw}px`;
+    bx.style.top = `${oy + (b.yc - b.h / 2) * dh}px`;
+    bx.style.width = `${b.w * dw}px`;
+    bx.style.height = `${b.h * dh}px`;
+    bx.appendChild(el("span", null, b.class_name));
+    container.appendChild(bx);
+  }
+}
+
+// MDQ-14: full-resolution lightbox for a review-queue thumbnail (thumb=0 on the same endpoint
+// MDQ-6 already serves at reduced size), boxes drawn on top with the same helper as the thumb.
+function openReviewLightbox(it) {
+  if (!it.raw_exists) return;
+  review.lightbox = it;
+  $("reviewLightboxTitle").textContent = `${it.pool} · ${it.class_name || "(forward frame)"} · ${it.filename}`;
+  $("reviewLightbox").classList.remove("hidden");
+  const img = $("reviewLightboxImg");
+  const wrap = img.parentElement;
+  wrap.querySelectorAll(".reviewBox").forEach(n => n.remove());
+  img.onload = () => renderBoxesOverImage(wrap, img, it.boxes);
+  img.src = `/api/review/image?pool=${encodeURIComponent(it.pool)}&image_key=${encodeURIComponent(it.image_key)}&thumb=0`;
+}
+
+function closeReviewLightbox() {
+  if (!review.lightbox) return;
+  review.lightbox = null;
+  $("reviewLightbox").classList.add("hidden");
+  $("reviewLightboxImg").onload = null;
+  $("reviewLightboxImg").src = "";
 }
 
 async function loadReviewQueue() {
@@ -2008,22 +2050,10 @@ function renderReviewCard(it) {
     img.alt = it.image_key;
     img.src = `/api/review/image?pool=${encodeURIComponent(it.pool)}&image_key=${encodeURIComponent(it.image_key)}`;
     thumb.appendChild(img);
-    img.onload = () => {
-      // Boxes are normalized to the image; place them over the letterboxed <img> area.
-      const W = thumb.clientWidth, H = thumb.clientHeight;
-      const s = Math.min(W / img.naturalWidth, H / img.naturalHeight);
-      const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
-      const ox = (W - dw) / 2, oy = (H - dh) / 2;
-      for (const b of it.boxes || []) {
-        const bx = el("div", "reviewBox");
-        bx.style.left = `${ox + (b.xc - b.w / 2) * dw}px`;
-        bx.style.top = `${oy + (b.yc - b.h / 2) * dh}px`;
-        bx.style.width = `${b.w * dw}px`;
-        bx.style.height = `${b.h * dh}px`;
-        bx.appendChild(el("span", null, b.class_name));
-        thumb.appendChild(bx);
-      }
-    };
+    img.onload = () => renderBoxesOverImage(thumb, img, it.boxes);
+    thumb.classList.add("reviewThumbClickable");
+    thumb.title = "Click to view full resolution";
+    thumb.onclick = () => openReviewLightbox(it);
   } else {
     thumb.appendChild(el("div", "reviewThumbNote", it.is_forward
       ? `Video frame flagged while labeling — not in RAW yet.\n${entry.video || "?"} · frame ${entry.frame_idx != null ? entry.frame_idx + 1 : "?"}`
@@ -2167,10 +2197,19 @@ function installReviewPanel() {
   for (const id of ["reviewSourceFilter", "reviewPoolFilter", "reviewDecisionFilter", "reviewSort"]) {
     $(id).onchange = renderReviewGrid;
   }
+  $("reviewLightboxClose").onclick = closeReviewLightbox;
+  $("reviewLightbox").addEventListener("mousedown", (e) => {
+    if (e.target === $("reviewLightbox")) closeReviewLightbox();
+  });
 }
 
 function installHotkeys() {
   window.addEventListener("keydown", async (e) => {
+    // The lightbox sits on top of the review queue; its own Esc must win over the queue's.
+    if (review.lightbox) {
+      if (e.key === "Escape") { e.preventDefault(); closeReviewLightbox(); }
+      return;
+    }
     // The review queue covers the whole screen: no labeling/browsing hotkey may act behind it.
     if (review.open) {
       if (e.key === "Escape") { e.preventDefault(); closeReviewPanel(); }

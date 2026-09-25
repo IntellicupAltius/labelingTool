@@ -642,6 +642,7 @@ input[type="range"] {
   position: relative; background: #000; aspect-ratio: 16 / 9;
   display: flex; align-items: center; justify-content: center;
 }
+.reviewThumb.reviewThumbClickable { cursor: zoom-in; }
 .reviewThumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .reviewThumbNote { color: var(--muted); font-size: 12px; padding: 12px; text-align: center; white-space: pre-line; }
 .reviewBox {
@@ -683,3 +684,28 @@ input[type="range"] {
 .metricBadge.normal   { background: rgba(45, 212, 191, 0.15); color: var(--accent); }
 .metricBadge.moderate { background: rgba(251, 191, 36, 0.18); color: #fde68a; }
 .metricBadge.large    { background: rgba(248, 113, 113, 0.2); color: var(--danger); }
+
+/* MDQ-14: full-resolution review-thumbnail lightbox */
+.reviewLightbox {
+  position: fixed; inset: 0; z-index: 950;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  padding: 24px;
+}
+.reviewLightbox.hidden { display: none; }
+.reviewLightboxCard {
+  max-width: 95vw; max-height: 95vh;
+  display: flex; flex-direction: column; gap: 10px;
+  background: rgba(10, 16, 28, 0.97);
+  border: 1px solid var(--border2); border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255,255,255,0.04) inset;
+}
+.reviewLightboxHeader { display: flex; align-items: center; gap: 12px; }
+.reviewLightboxTitle { font-size: 13px; font-weight: 700; color: var(--muted); word-break: break-all; }
+.reviewLightboxImgWrap {
+  position: relative; display: flex; align-items: center; justify-content: center;
+  max-width: 90vw; max-height: calc(95vh - 60px);
+}
+.reviewLightboxImgWrap img { max-width: 90vw; max-height: calc(95vh - 60px); object-fit: contain; display: block; }
