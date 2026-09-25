@@ -410,6 +410,9 @@ def create_app() -> FastAPI:
                 or os.getenv("ANALYZER_RAW_ROOT", "/opt/intellicup/datasets/raw/blaznavac"),
         models_python=cfg.get("analyzer_models_python", "").strip()
                      or os.getenv("ANALYZER_MODELS_PYTHON", "/opt/interpreters/INTELLICUP_MODELS/bin/python"),
+        # MDQ-9: overlap_report writes its own findings into the same per-pool flag sidecar
+        # MDQ-3/MDQ-6 use (source=analyzer_auto) — same FlagStore instance, no second store.
+        flag_store=flag_store,
     )
     logger.info("Analyzer available: %s", _analyzer.is_available())
 

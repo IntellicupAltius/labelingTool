@@ -19,6 +19,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from web_labeler import flag_store as _flags
+
 logger = logging.getLogger("labeler.analyzer")
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -30,12 +32,28 @@ _models_root: Optional[Path] = None   # /opt/intellicup/models
 _raw_root: Optional[Path] = None      # /opt/intellicup/datasets/raw/blaznavac
 _models_python: Optional[str] = None  # /opt/interpreters/INTELLICUP_MODELS/bin/python
 
+# MDQ-9: the same per-pool flag sidecar MDQ-3/MDQ-6 write, so overlap_report's own findings
+# land in the owner's one review queue instead of a report only the labeler-tool UI can show.
+# This is a write OUTSIDE the RAW/models tree (raw_review/), not a violation of this module's
+# read-only guarantee toward /opt/intellicup/models and /opt/intellicup/datasets/raw — see
+# .claude/rules/analyzer.md.
+_flag_store: Optional[_flags.FlagStore] = None
 
-def configure(models_root: str, raw_root: str, models_python: str):
-    global _models_root, _raw_root, _models_python
+# Caps from the MDQ-9 ticket text: at most 5 new image-flag entries per class per run (the
+# class's own strongest confusion pair first), at most 30 total per pool per run across every
+# class (pool-wide priority = confusion rate, descending). The existing overlap_report
+# threshold (>=15%) and per-class sample size (20) are untouched — this only decides which of
+# the already-computed misclassifications get written to the shared sidecar.
+MAX_FLAGS_PER_CLASS = 5
+MAX_FLAGS_PER_POOL = 30
+
+
+def configure(models_root: str, raw_root: str, models_python: str, flag_store: Optional[_flags.FlagStore] = None):
+    global _models_root, _raw_root, _models_python, _flag_store
     _models_root = Path(models_root).expanduser().resolve() if models_root else None
     _raw_root = Path(raw_root).expanduser().resolve() if raw_root else None
     _models_python = models_python or None
+    _flag_store = flag_store
 
 
 def is_available() -> bool:
@@ -227,12 +245,76 @@ def start_overlap_report(model_name: str, samples: int = 20) -> str:
             "error": None,
         }
 
-    thread = threading.Thread(target=_run_overlap_job, args=(job_id, pt, raw, yaml, samples), daemon=True)
+    thread = threading.Thread(
+        target=_run_overlap_job, args=(job_id, model_name, pt, raw, yaml, samples), daemon=True
+    )
     thread.start()
     return job_id
 
 
-def _run_overlap_job(job_id: str, pt: Path, raw: Path, data_yaml: Path, samples: int):
+def _select_and_flag(pool: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Write up to MAX_FLAGS_PER_CLASS/MAX_FLAGS_PER_POOL new sidecar entries from one
+    overlap_report result. Never raises — a flagging problem must not lose the report itself.
+    """
+    summary = {"available": False, "flagged": 0, "skipped_existing": 0, "classes_flagged": 0}
+    if _flag_store is None or not _flag_store.available:
+        return summary
+    summary["available"] = True
+
+    misclassified: Dict[str, List[Dict]] = result.get("misclassified") or {}
+    flagged_pairs: List[Dict] = result.get("flagged_pairs") or []  # already sorted by rate desc
+    per_class_flagged: Dict[str, int] = {}
+    total_flagged = 0
+    skipped_existing = 0
+
+    for pair in flagged_pairs:
+        if total_flagged >= MAX_FLAGS_PER_POOL:
+            break
+        cls_a = pair.get("class_a")
+        cls_b = pair.get("class_b")
+        rate = pair.get("rate")
+        if not cls_a or not cls_b:
+            continue
+        # Images of cls_a that were specifically confused as THIS pair's cls_b, strongest
+        # (most confident) misclassification first.
+        candidates = [
+            m for m in misclassified.get(cls_a, []) if m.get("confused_as") == cls_b
+        ]
+        candidates.sort(key=lambda m: m.get("confidence", 0.0), reverse=True)
+
+        for m in candidates:
+            if per_class_flagged.get(cls_a, 0) >= MAX_FLAGS_PER_CLASS:
+                break
+            if total_flagged >= MAX_FLAGS_PER_POOL:
+                break
+            image_key = f"{cls_a}/{m.get('image')}"
+            signal = {
+                "metric": "confused_as",
+                "value": cls_b,
+                "rate": rate,
+                "confidence": m.get("confidence"),
+            }
+            try:
+                entry = _flag_store.add_auto_flag(
+                    pool, image_key, _flags.SOURCE_ANALYZER_AUTO, signal,
+                    flagged_by="analyzer_overlap_report",
+                )
+            except _flags.FlagError as e:
+                logger.warning("MDQ-9: could not auto-flag %s/%s: %s", pool, image_key, e)
+                continue
+            if entry is None:
+                skipped_existing += 1
+                continue
+            total_flagged += 1
+            per_class_flagged[cls_a] = per_class_flagged.get(cls_a, 0) + 1
+
+    summary["flagged"] = total_flagged
+    summary["skipped_existing"] = skipped_existing
+    summary["classes_flagged"] = len(per_class_flagged)
+    return summary
+
+
+def _run_overlap_job(job_id: str, model_name: str, pt: Path, raw: Path, data_yaml: Path, samples: int):
     try:
         cmd = [
             _models_python,
@@ -278,9 +360,18 @@ def _run_overlap_job(job_id: str, pt: Path, raw: Path, data_yaml: Path, samples:
                 _jobs[job_id]["status"] = "error"
                 _jobs[job_id]["error"] = "No result received from worker"
         else:
+            try:
+                auto_flag_summary = _select_and_flag(model_name, result)
+            except Exception:
+                # MDQ-9 flagging is a best-effort side effect of the report — never let it
+                # cost the labeler the report itself.
+                logger.exception("MDQ-9: auto-flagging failed for overlap job %s", job_id)
+                auto_flag_summary = {"available": False, "flagged": 0, "skipped_existing": 0,
+                                      "classes_flagged": 0, "error": "auto-flagging failed, see server log"}
             with _jobs_lock:
                 _jobs[job_id]["status"] = "done"
                 _jobs[job_id]["result"] = result
+                _jobs[job_id]["auto_flag_summary"] = auto_flag_summary
 
     except Exception as e:
         logger.exception("Overlap job %s failed", job_id)

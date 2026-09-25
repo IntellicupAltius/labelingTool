@@ -135,6 +135,9 @@ def _run_overlap(args):
     print(json.dumps({"type": "total", "total": total}), flush=True)
 
     per_class: dict[str, dict] = {}
+    # MDQ-9: which specific images were misclassified as what, with what confidence — the
+    # aggregate confused_as counts above can't tell a caller which raw image to flag.
+    misclassified: dict[str, list[dict]] = {}
     done = 0
 
     for class_dir in class_dirs:
@@ -170,6 +173,11 @@ def _run_overlap(args):
                 correct += 1
             else:
                 confused_as[best_cls] = confused_as.get(best_cls, 0) + 1
+                misclassified.setdefault(cls_name, []).append({
+                    "image": img_path.name,
+                    "confused_as": best_cls,
+                    "confidence": round(best_conf, 4),
+                })
 
             done += 1
             print(json.dumps({"type": "progress", "done": done, "total": total, "class": cls_name}), flush=True)
@@ -204,6 +212,7 @@ def _run_overlap(args):
         "total_images": done,
         "per_class": per_class,
         "flagged_pairs": flagged,
+        "misclassified": misclassified,
     }), flush=True)
 
 
