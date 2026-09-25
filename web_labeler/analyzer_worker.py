@@ -120,9 +120,22 @@ def _run_overlap(args):
         print(json.dumps({"error": f"images dir not found: {raw_images}"}), flush=True)
         sys.exit(1)
 
-    class_dirs = sorted([d for d in raw_images.iterdir() if d.is_dir()])
-    if not class_dirs:
+    all_class_dirs = sorted([d for d in raw_images.iterdir() if d.is_dir()])
+    if not all_class_dirs:
         print(json.dumps({"error": "no class directories found"}), flush=True)
+        sys.exit(1)
+
+    # `data.yaml` (loaded above as `names`) is the RAW master list — a superset that still
+    # includes classes excluded from training (e.g. shots/B53), so it can't be used to filter
+    # them out. `model.names` is the actual deployed model's own class list (ground truth of
+    # what it was trained on) — a raw folder for a class outside it would only ever get
+    # "confused_as" noise, since the model never learned a representation for it at all.
+    trained_classes = set(model.names.values())
+    class_dirs = [d for d in all_class_dirs if d.name in trained_classes]
+    skipped_untrained_classes = sorted(d.name for d in all_class_dirs if d.name not in trained_classes)
+    if not class_dirs:
+        print(json.dumps({"error": "no trained-class directories found (all raw classes are "
+                                    "excluded from the deployed model)"}), flush=True)
         sys.exit(1)
 
     samples_per_class = args.samples
@@ -213,6 +226,7 @@ def _run_overlap(args):
         "per_class": per_class,
         "flagged_pairs": flagged,
         "misclassified": misclassified,
+        "skipped_untrained_classes": skipped_untrained_classes,
     }), flush=True)
 
 
