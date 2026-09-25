@@ -59,6 +59,9 @@ CATEGORY_LABELS = {
 }
 OWNER_DECISIONS = ("approve_delete", "keep")
 SOURCE_MANUAL = "manual_goca"
+SOURCE_ANALYZER_AUTO = "analyzer_auto"
+SOURCE_DATA4_AUDIT = "data4_audit"
+AUTO_SOURCES = (SOURCE_ANALYZER_AUTO, SOURCE_DATA4_AUDIT)
 CONTEXT_RETROACTIVE = "retroactive_review"
 CONTEXT_FORWARD = "forward_labeling"
 FORWARD_DIR = "_forward"
@@ -289,6 +292,55 @@ class FlagStore:
             except FlagStoreError as e:
                 out[pool] = {"error": str(e)}
         return out
+
+    # -- automated writes (MDQ-9 analyzer_auto / MDQ-10 data4_audit) -------------
+
+    def add_auto_flag(
+        self,
+        pool: str,
+        image_key: str,
+        source: str,
+        signal: dict,
+        flagged_by: str,
+        comment: str = "",
+    ) -> Optional[dict]:
+        """Add one automated flag, conservatively.
+
+        Returns the new entry, or ``None`` if the key already carries ANY entry — a manual
+        flag, a prior automated flag, or one the owner has already decided on. An automated
+        source never overwrites an existing flag regardless of who wrote it or what state it
+        is in; a re-run that would pick the same image again is a silent no-op, not a refresh.
+        ``signal`` must be a non-empty dict describing the concrete evidence (never a bare
+        "suspicious"), and this method never sets ``owner_decision`` — an automated source can
+        flag for review, it can never approve its own deletion.
+        """
+        pool = normalize_pool(pool)
+        if source not in AUTO_SOURCES:
+            raise FlagValidationError(f"source must be one of {', '.join(AUTO_SOURCES)}")
+        validate_image_key(image_key, forward=False)
+        if not isinstance(signal, dict) or not signal:
+            raise FlagValidationError("signal must be a non-empty dict")
+        comment = (comment or "").strip()
+        if len(comment) > MAX_COMMENT_LEN:
+            raise FlagValidationError(f"comment is longer than {MAX_COMMENT_LEN} characters")
+        with self._locked(pool):
+            doc = self._read(pool)
+            if image_key in doc["entries"]:
+                return None
+            entry = {
+                "source": source,
+                "category": None,
+                "comment": comment,
+                "signal": signal,
+                "flagged_at": _now(),
+                "flagged_by": flagged_by,
+                "owner_decision": None,
+                "owner_decision_at": None,
+                "flag_context": CONTEXT_RETROACTIVE,
+            }
+            doc["entries"][image_key] = entry
+            self._write(pool, doc)
+        return entry
 
     def set_owner_decision(self, pool: str, image_key: str, decision: Optional[str]) -> dict:
         """Record the owner's verdict on an existing flag, in place.
