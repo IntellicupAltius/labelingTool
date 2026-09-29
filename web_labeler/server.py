@@ -60,6 +60,7 @@ from web_labeler.background_labeler import (
 from web_labeler import analyzer as _analyzer
 from web_labeler import flag_store as _flags
 from web_labeler import image_metrics as _metrics
+from web_labeler import camera_roi as _camroi
 from web_labeler.flag_store import FlagConflict, FlagError, FlagStore, FlagUnavailable, FlagValidationError, normalize_pool, validate_image_key
 
 
@@ -1014,6 +1015,15 @@ def create_app() -> FastAPI:
         else:
             result["embedding_error"] = "no embedding centroid in the class baseline"
         return result
+
+    # Per-camera crop rectangle + bar/pickup polygons for the review viewer overlay. Read-only:
+    # only cameras.yaml is read, the camera is derived from the file name in image_key (same rule
+    # as IntelliCup training, see camera_roi.py). Unknown camera / missing config -> status "unknown", never 500.
+    _cameras_yaml = (os.getenv("LABELER_CAMERAS_YAML") or "").strip() or _camroi.DEFAULT_CAMERAS_YAML
+
+    @app.get("/api/cameras/roi")
+    def cameras_roi(image_key: str = Query(..., min_length=1)):
+        return _camroi.camera_roi(image_key, _cameras_yaml)
 
     # ---------------- Background Labeler API ----------------
     @app.get("/api/background_labeler/config")

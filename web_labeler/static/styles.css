@@ -675,6 +675,23 @@ input[type="range"] {
 .reviewStage.loading img { opacity: 0.35; }
 .reviewNote { position: relative; color: var(--muted); font-size: 13px; padding: 12px; text-align: center; white-space: pre-line; }
 .reviewBox { position: absolute; border: 2px solid var(--accent2); pointer-events: none; }
+/* camera crop zone overlay (drawn in the image's letterbox, under the bboxes) */
+.reviewRoiSvg { position: absolute; left: 0; top: 0; width: 0; height: 0; pointer-events: none; overflow: visible; display: none; }
+.reviewRoiBadge {
+  position: absolute; top: 8px; left: 8px; max-width: 70%; padding: 4px 8px; border-radius: 6px; pointer-events: none;
+  background: rgba(120, 53, 15, 0.9); color: #fde68a; font-size: 12px; font-weight: 700;
+}
+.reviewRoiBar { display: flex; align-items: center; gap: 12px; font-size: 12px; min-height: 26px; }
+.reviewRoiBar .btn { padding: 3px 10px; font-size: 12px; }
+.reviewRoiLegend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; color: var(--muted); }
+.reviewRoiLegend .cam { color: var(--text); font-weight: 700; }
+.reviewRoiLegend .warn { color: #fbbf24; font-weight: 700; }
+.reviewRoiLegend .note { color: #fde68a; }
+.roiSwatch { display: inline-block; width: 22px; height: 0; vertical-align: middle; margin-right: 5px; border-top: 2px solid; }
+.roiSwatch.crop   { border-top: 2px dashed #f8fafc; }
+.roiSwatch.bar    { border-color: #4ade80; }
+.roiSwatch.pickup { border-color: #fb923c; }
+.roiSwatch.dim    { height: 10px; border: 1px solid #475569; background: rgba(0, 0, 0, 0.5); }
 .reviewBox span {
   position: absolute; top: 0; left: 0; transform: translateY(-100%); font-size: 11px; padding: 0 4px;
   background: var(--accent2); color: #000; white-space: nowrap;

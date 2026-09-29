@@ -346,7 +346,7 @@
     <div class="reviewHeader">
       <div class="reviewTitle">Review queue</div>
       <div id="reviewCounts" class="reviewCounts"></div>
-      <div class="reviewKeys">← → browse · K keep · D approve delete · R relabel · Esc close</div>
+      <div class="reviewKeys">← → browse · K keep · D approve delete · R relabel · O zones · Esc close</div>
       <button id="reviewRefreshBtn" class="btn">Refresh</button>
       <button id="reviewCloseBtn" class="btn" style="margin-left:auto;">Close (Esc)</button>
     </div>
@@ -382,8 +382,16 @@
           <div id="reviewCounter" class="reviewCounter"></div>
           <button id="reviewNextBtn" class="btn" title="Next (→)">→</button>
         </div>
+        <!-- Camera crop zone overlay: the rectangle training crops every image to (and production
+             crops every frame to, +20 px); bar_roi / pickup_roi polygons from cameras.yaml. -->
+        <div id="reviewRoiBar" class="reviewRoiBar">
+          <button id="reviewRoiBtn" class="btn" title="Show/hide the camera crop zone (O)">Zones: on (O)</button>
+          <div id="reviewRoiLegend" class="reviewRoiLegend"></div>
+        </div>
         <div id="reviewStage" class="reviewStage">
           <img id="reviewMainImg" alt="">
+          <svg id="reviewRoiSvg" class="reviewRoiSvg" xmlns="http://www.w3.org/2000/svg"></svg>
+          <div id="reviewRoiBadge" class="reviewRoiBadge hidden"></div>
           <div id="reviewNote" class="reviewNote"></div>
         </div>
         <div id="reviewInfo" class="reviewInfo"></div>

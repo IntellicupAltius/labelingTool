@@ -1913,6 +1913,9 @@ const review = {
   busy: new Set(), metrics: new Map(), fullRes: false,
   rows: new Map(),   // view index -> row element (only the virtualized window)
   ro: null,
+  showRoi: true,             // camera crop zone overlay (O)
+  roiReq: new Map(),         // image_key -> in-flight/finished /api/cameras/roi promise
+  roiData: new Map(),        // image_key -> resolved /api/cameras/roi response
 };
 const REVIEW_DECISION_LABELS = {approve_delete: "Approved delete", keep: "Keep", relabel: "Relabel"};
 const REVIEW_ROW_H = 64;          // px, fixed so the list can be windowed by arithmetic
@@ -1952,12 +1955,15 @@ function closeReviewPanel() {
   $("reviewPanel").classList.add("hidden");
   review.token++;                       // orphan any in-flight image load
   clearReviewBoxes();
+  clearReviewRoi();
   const img = $("reviewMainImg");
   img.onload = img.onerror = null;
   img.removeAttribute("src");
 }
 
 async function loadReviewQueue() {
+  review.roiReq.clear();                // Refresh also re-reads cameras.yaml
+  review.roiData.clear();
   $("reviewErrors").textContent = "";
   $("reviewList").innerHTML = "";
   review.rows.clear();
@@ -2121,14 +2127,22 @@ function clearReviewBoxes() {
 
 // Successor of renderBoxesOverImage for the viewer: scales by the image's own naturalWidth /
 // naturalHeight inside the object-fit:contain letterbox of the stage. Always clears first.
-function drawReviewBoxes(it) {
+// Where the image actually sits inside the stage (object-fit: contain letterbox), or null.
+function reviewLetterbox() {
   const stage = $("reviewStage"), img = $("reviewMainImg");
-  clearReviewBoxes();
-  if (!img.naturalWidth || !img.naturalHeight) return;
+  if (!img.naturalWidth || !img.naturalHeight) return null;
   const W = stage.clientWidth, H = stage.clientHeight;
   const s = Math.min(W / img.naturalWidth, H / img.naturalHeight);
   const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
-  const ox = (W - dw) / 2, oy = (H - dh) / 2;
+  return {ox: (W - dw) / 2, oy: (H - dh) / 2, dw, dh};
+}
+
+function drawReviewBoxes(it) {
+  const stage = $("reviewStage");
+  clearReviewBoxes();
+  const lb = reviewLetterbox();
+  if (!lb) return;
+  const {ox, oy, dw, dh} = lb;
   for (const b of it.boxes || []) {
     const bx = el("div", "reviewBox");
     bx.style.left = `${ox + (b.xc - b.w / 2) * dw}px`;
@@ -2138,6 +2152,119 @@ function drawReviewBoxes(it) {
     bx.appendChild(el("span", null, b.class_name));
     stage.appendChild(bx);
   }
+}
+
+// ---- camera crop zone overlay ----
+// GET /api/cameras/roi gives, for the camera in the file name, the normalized crop rectangle that
+// training crops every image to (production: same +20 px) and the bar/pickup polygons. Drawn like
+// the bboxes: cleared the instant the item changes, drawn only once the NEW image has loaded AND
+// the zone for that same item has arrived (review.token guards both), redrawn on stage resize.
+function fetchReviewRoi(it) {
+  const k = it.image_key;
+  let p = review.roiReq.get(k);
+  if (!p) {
+    p = fetch(`/api/cameras/roi?image_key=${encodeURIComponent(k)}`)
+      .then(async r => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+        return d;
+      })
+      .catch(e => {
+        review.roiReq.delete(k);        // a failed request is retried next time, not cached
+        return {status: "unknown", camera: "unknown", reason: `could not load the zone: ${e.message}`, failed: true};
+      })
+      .then(d => { review.roiData.set(k, d); return d; });   // a failure is shown now and refetched next time
+    review.roiReq.set(k, p);
+  }
+  return p;
+}
+
+function clearReviewRoi() {
+  const svg = $("reviewRoiSvg");
+  svg.innerHTML = "";
+  svg.style.display = "none";
+  $("reviewRoiBadge").classList.add("hidden");
+}
+
+function reviewImageReady() {
+  const img = $("reviewMainImg");
+  return img.complete && img.naturalWidth > 0 && !$("reviewStage").classList.contains("loading");
+}
+
+function svgEl(tag, attrs) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+function drawReviewRoi(it) {
+  clearReviewRoi();
+  if (!review.showRoi || !it || !it.raw_exists) return;
+  const d = review.roiData.get(it.image_key);
+  if (!d) return;                       // zone not here yet: its fetch callback draws it
+  if (d.status !== "ok") {
+    const b = $("reviewRoiBadge");
+    b.textContent = `Camera unknown — crop zone not shown (${d.reason || "no data"})`;
+    b.classList.remove("hidden");
+    return;
+  }
+  const lb = reviewLetterbox();
+  if (!lb) return;
+  const {ox, oy, dw, dh} = lb;
+  const svg = $("reviewRoiSvg");
+  Object.assign(svg.style, {display: "block", left: `${ox}px`, top: `${oy}px`, width: `${dw}px`, height: `${dh}px`});
+  svg.setAttribute("viewBox", `0 0 ${dw} ${dh}`);
+  const c = d.crop_rect;
+  const x0 = c.x0 * dw, y0 = c.y0 * dh, x1 = c.x1 * dw, y1 = c.y1 * dh;
+  // everything outside the crop rectangle, dimmed (even-odd: outer frame minus the rectangle)
+  svg.appendChild(svgEl("path", {
+    d: `M0 0H${dw}V${dh}H0Z M${x0} ${y0}H${x1}V${y1}H${x0}Z`,
+    "fill-rule": "evenodd", fill: "rgba(0,0,0,0.45)",
+  }));
+  const poly = (pts, color) => {
+    if (!pts || !pts.length) return;
+    svg.appendChild(svgEl("polygon", {
+      points: pts.map(p => `${p[0] * dw},${p[1] * dh}`).join(" "),
+      fill: "none", stroke: color, "stroke-width": 1.5, "stroke-opacity": 0.9,
+    }));
+  };
+  poly(d.bar_roi, "#4ade80");
+  poly(d.pickup_roi, "#fb923c");
+  svg.appendChild(svgEl("rect", {
+    x: x0, y: y0, width: x1 - x0, height: y1 - y0,
+    fill: "none", stroke: "#f8fafc", "stroke-width": 2, "stroke-dasharray": "10 6",
+  }));
+}
+
+function renderReviewRoiLegend(it) {
+  const lg = $("reviewRoiLegend");
+  lg.innerHTML = "";
+  $("reviewRoiBtn").textContent = review.showRoi ? "Zones: on (O)" : "Zones: off (O)";
+  if (!it || !it.raw_exists) return;
+  if (!review.showRoi) { lg.appendChild(el("span", null, "Crop zone hidden")); return; }
+  const d = review.roiData.get(it.image_key);
+  if (!d) { lg.appendChild(el("span", null, "Camera: …")); return; }
+  if (d.status !== "ok") {
+    const w = el("span", "warn", `Camera unknown — crop zone cannot be shown`);
+    w.title = d.reason || "";
+    lg.appendChild(w);
+    if (d.reason) lg.appendChild(el("span", null, d.reason));
+    return;
+  }
+  lg.appendChild(el("span", "cam", `Camera: ${d.camera}`));
+  const item = (cls, text) => { const s = el("span"); s.appendChild(el("span", `roiSwatch ${cls}`)); s.appendChild(document.createTextNode(text)); return s; };
+  lg.appendChild(item("crop", "crop rectangle (training; production +20 px)"));
+  lg.appendChild(item("dim", "outside"));
+  lg.appendChild(item("bar", "bar_roi"));
+  lg.appendChild(item("pickup", "pickup_roi"));
+  lg.appendChild(el("span", "note", "Van isečenog pravougaonika objekti ne ulaze u trening ni u produkciju"));
+}
+
+function toggleReviewRoi() {
+  review.showRoi = !review.showRoi;
+  const it = review.view[review.idx];
+  renderReviewRoiLegend(it);
+  if (it && reviewImageReady()) drawReviewRoi(it); else clearReviewRoi();
 }
 
 function preloadReviewImage(i) {
@@ -2153,6 +2280,7 @@ function showReviewItem(i, opts) {
   const token = ++review.token;         // any onload from an earlier item is now stale
   const stage = $("reviewStage"), img = $("reviewMainImg");
   clearReviewBoxes();                   // no ghost, even for the frames before the new image is ready
+  clearReviewRoi();
   img.onload = img.onerror = null;
 
   // side-list highlight (only the two touched rows) + keep the current row on screen
@@ -2171,9 +2299,11 @@ function showReviewItem(i, opts) {
     img.removeAttribute("src");
     stage.classList.remove("loading");
     renderReviewInfo(null);
+    renderReviewRoiLegend(null);
     return;
   }
   renderReviewInfo(it);
+  renderReviewRoiLegend(it);
   if (!it.raw_exists) {
     img.removeAttribute("src");
     stage.classList.remove("loading");
@@ -2188,12 +2318,18 @@ function showReviewItem(i, opts) {
     if (token !== review.token || key !== reviewKey(review.view[review.idx] || {pool: "", image_key: ""})) return;
     stage.classList.remove("loading");
     drawReviewBoxes(it);
+    drawReviewRoi(it);
   };
   img.onerror = () => {
     if (token !== review.token) return;
     stage.classList.remove("loading");
     $("reviewNote").textContent = "Could not load this image.";
   };
+  fetchReviewRoi(it).then(() => {
+    if (token !== review.token) return;   // item changed meanwhile: the new item draws its own zone
+    renderReviewRoiLegend(it);
+    if (reviewImageReady()) drawReviewRoi(it);
+  });
   img.src = reviewImgUrl(it, REVIEW_MAIN_W, review.fullRes);
   if (img.complete && img.naturalWidth) img.onload();   // already-cached image: don't depend on a load event that may not fire
   preloadReviewImage(review.idx + 1);
@@ -2405,11 +2541,12 @@ function installReviewPanel() {
   $("reviewList").addEventListener("scroll", renderReviewWindow, {passive: true});
   $("reviewPrevBtn").onclick = () => stepReview(-1);
   $("reviewNextBtn").onclick = () => stepReview(1);
+  $("reviewRoiBtn").onclick = () => { $("reviewRoiBtn").blur(); toggleReviewRoi(); };
   // Recompute bbox placement whenever the stage changes size (window resize, layout shifts).
   review.ro = new ResizeObserver(() => {
     const it = review.view[review.idx];
     const img = $("reviewMainImg");
-    if (review.open && it && img.complete && img.naturalWidth) drawReviewBoxes(it);
+    if (review.open && it && img.complete && img.naturalWidth) { drawReviewBoxes(it); drawReviewRoi(it); }
   });
   review.ro.observe($("reviewStage"));
 }
@@ -2417,7 +2554,7 @@ function installReviewPanel() {
 function installHotkeys() {
   window.addEventListener("keydown", async (e) => {
     // The review queue covers the whole screen: no labeling/browsing hotkey may act behind it.
-    // Its own keys: Left/Right = prev/next, K = keep, D = approve delete, R = relabel, Esc = close (writes nothing).
+    // Its own keys: Left/Right = prev/next, K = keep, D = approve delete, R = relabel, O = crop zone on/off, Esc = close (writes nothing).
     // Ignored while typing/in a <select>, with modifiers held, and (for K/D) on key auto-repeat so a
     // held key can't stamp a decision on a run of images.
     if (review.open) {
@@ -2425,6 +2562,7 @@ function installHotkeys() {
       if (isTypingTarget(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === "ArrowLeft") { e.preventDefault(); stepReview(-1); }
       else if (e.key === "ArrowRight") { e.preventDefault(); stepReview(1); }
+      else if ((e.key === "o" || e.key === "O") && !e.repeat) { e.preventDefault(); toggleReviewRoi(); }
       else if ((e.key === "k" || e.key === "K" || e.key === "d" || e.key === "D" || e.key === "r" || e.key === "R") && !e.repeat) {
         e.preventDefault();
         const it = review.view[review.idx];
