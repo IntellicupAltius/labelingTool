@@ -622,6 +622,7 @@ function renderCaseInfoBanner() {
 }
 
 function setMode(mode) {
+  setPeek(false);
   state.mode = mode;
   const isVideo    = (mode === "video");
   const isDataset  = (mode === "dataset");
@@ -723,7 +724,13 @@ function imageToCanvas(ix, iy) {
   return {x, y};
 }
 
+// draw() = the shared canvas renderer (drawCanvas) + the separate crop-zone layer (syncFixerZone).
 function draw() {
+  drawCanvas();
+  syncFixerZone();
+}
+
+function drawCanvas() {
   if (state.mode === "video") {
     if (!state.videoLoaded) return;
   } else if (state.mode === "dataset") {
@@ -755,7 +762,7 @@ function draw() {
     ctx.strokeRect(c1.x, c1.y, c2.x - c1.x, c2.y - c1.y);
     ctx.fillText(`${a.model}:${a.class_name}`, c1.x + 6, c1.y + 16);
   };
-  for (const a of state.frameAnnotations) drawAnn(a);
+  if (!state.peek) for (const a of state.frameAnnotations) drawAnn(a);   // B held: boxes hidden
 
   // temporary drag rect
   if (state.dragging && state.dragRect) {
@@ -769,7 +776,7 @@ function draw() {
   ctx.restore();
 
   // UV ghost bbox hint (visual only — never stored or exported)
-  if (state.hintData && Array.isArray(state.hintData.tlwh_norm) && state.hintData.at_second != null) {
+  if (!state.peek && state.hintData && Array.isArray(state.hintData.tlwh_norm) && state.hintData.at_second != null) {
     const currentSec = state.frameIdx / (state.fps || 25);
     const halfWindow = (state.hintData.window_seconds || 120) / 2;
     if (Math.abs(currentSec - state.hintData.at_second) <= halfWindow) {
@@ -1353,6 +1360,7 @@ async function renderDatasetImage(idx) {
 
   state.datasetImageIdx = imageIdx;
   state.datasetImageName = imageName;
+  state.zoneName = "";                  // crop zone hidden until the new image is drawn
 
   const url = URL.createObjectURL(blob);
   await new Promise((resolve, reject) => {
@@ -1368,6 +1376,7 @@ async function renderDatasetImage(idx) {
 
   await refreshLists();
   if (mySeq !== state.navSeq) return;
+  state.zoneName = imageName;
   draw();
 
   setStatus(`Dataset ${state.datasetName} | ${state.datasetImageIdx + 1}/${state.datasetImageCount} | ${state.datasetImageName}`);
@@ -1383,6 +1392,7 @@ async function renderRawImage(idx) {
 
   state.datasetImageIdx = imageIdx;
   state.datasetImageName = imageName;
+  state.zoneName = "";                  // crop zone hidden until the new image is drawn
 
   const url = URL.createObjectURL(blob);
   await new Promise((resolve, reject) => {
@@ -1398,6 +1408,7 @@ async function renderRawImage(idx) {
 
   await refreshLists();
   if (mySeq !== state.navSeq) return;
+  state.zoneName = imageName;
   draw();
 
   setStatus(`Raw ${state.datasetName} | ${state.datasetImageIdx + 1}/${state.datasetImageCount} | ${state.datasetImageName}`);
@@ -1952,6 +1963,7 @@ async function openReviewPanel() {
 
 function closeReviewPanel() {
   review.open = false;
+  setPeek(false);
   $("reviewPanel").classList.add("hidden");
   review.token++;                       // orphan any in-flight image load
   clearReviewBoxes();
@@ -1959,6 +1971,7 @@ function closeReviewPanel() {
   const img = $("reviewMainImg");
   img.onload = img.onerror = null;
   img.removeAttribute("src");
+  syncFixerZone();                      // the Fixer zone bar follows the shared preference
 }
 
 async function loadReviewQueue() {
@@ -2213,6 +2226,12 @@ function drawReviewRoi(it) {
   const {ox, oy, dw, dh} = lb;
   const svg = $("reviewRoiSvg");
   Object.assign(svg.style, {display: "block", left: `${ox}px`, top: `${oy}px`, width: `${dw}px`, height: `${dh}px`});
+  roiShapes(svg, d, dw, dh);
+}
+
+// The zone shapes (dimmed outside, bar/pickup polygons, dashed crop rectangle) in a dw x dh box.
+// Shared by the review viewer and the Dataset Fixer zone layer.
+function roiShapes(svg, d, dw, dh) {
   svg.setAttribute("viewBox", `0 0 ${dw} ${dh}`);
   const c = d.crop_rect;
   const x0 = c.x0 * dw, y0 = c.y0 * dh, x1 = c.x1 * dw, y1 = c.y1 * dh;
@@ -2241,8 +2260,12 @@ function renderReviewRoiLegend(it) {
   lg.innerHTML = "";
   $("reviewRoiBtn").textContent = review.showRoi ? "Zones: on (O)" : "Zones: off (O)";
   if (!it || !it.raw_exists) return;
+  fillRoiLegend(lg, review.roiData.get(it.image_key));
+}
+
+// Legend body for a zone datum (also used by the Dataset Fixer zone bar).
+function fillRoiLegend(lg, d) {
   if (!review.showRoi) { lg.appendChild(el("span", null, "Crop zone hidden")); return; }
-  const d = review.roiData.get(it.image_key);
   if (!d) { lg.appendChild(el("span", null, "Camera: …")); return; }
   if (d.status !== "ok") {
     const w = el("span", "warn", `Camera unknown — crop zone cannot be shown`);
@@ -2551,6 +2574,96 @@ function installReviewPanel() {
   review.ro.observe($("reviewStage"));
 }
 
+// ---------------- B = peek (hold to hide the bbox overlays) ----------------
+// While B is held the boxes are hidden (review viewer: CSS on the stage, the boxes stay in the DOM so
+// image changes need no extra bookkeeping; canvas: draw() skips the annotations and the hint box) and
+// nothing is editable with the mouse (capture-phase guard, see installPeek): no draw/click/delete/class change on the canvas or in the box
+// lists, so a hidden box can't be moved or removed by accident. The zone layers are not touched.
+// Released on keyup, on window blur / tab hidden, and on mode change. Not active in Background mode,
+// where B already means "background".
+const PEEK_LOCKED = "#canvas, #currentList, #globalList";
+
+function setPeek(on) {
+  on = !!on;
+  if (on === !!state.peek) return;
+  state.peek = on;
+  document.body.classList.toggle("peeking", on);
+  $("reviewStage").classList.toggle("peek", on);
+  $("reviewPeekBadge").classList.toggle("hidden", !(on && review.open));
+  $("peekBadge").classList.toggle("hidden", !(on && !review.open));
+  if (on && state.dragging) { state.dragging = false; state.dragRect = null; }   // a half-drawn box is dropped, not saved
+  if (!review.open) draw();
+}
+
+function installPeek() {
+  window.addEventListener("keyup", (e) => { if (e.key === "b" || e.key === "B") setPeek(false); });
+  window.addEventListener("blur", () => setPeek(false));
+  document.addEventListener("visibilitychange", () => { if (document.hidden) setPeek(false); });
+  for (const t of ["pointerdown", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "change", "input"]) {
+    document.addEventListener(t, (ev) => {
+      if (!state.peek || review.open) return;
+      if (ev.target && ev.target.closest && ev.target.closest(PEEK_LOCKED)) { ev.preventDefault(); ev.stopImmediatePropagation(); }
+    }, true);
+  }
+}
+
+// ---------------- Dataset Fixer: camera crop zone layer (O) ----------------
+// A separate SVG (pointer-events: none) over the shared canvas, positioned from the canvas' own image
+// transform; draw() is untouched apart from being wrapped (draw = drawCanvas + syncFixerZone). Same data as
+// the review viewer (GET /api/cameras/roi, same preference flag review.showRoi). It follows state.zoneName,
+// which is only set once the new image is on the canvas, so a navigation can't leave the previous zone
+// (or the wrong camera's) on screen. Not shown in Video mode.
+let _fixerZoneSig = null;
+
+function syncFixerZone() {
+  const bar = $("fixerZoneBar"), svg = $("fixerZoneSvg"), badge = $("fixerZoneBadge");
+  const active = state.mode === "dataset" && (state.datasetLoaded || state.rawLoaded) && state.imgW > 0;
+  bar.classList.toggle("hidden", !active);
+  const name = active ? (state.zoneName || "") : "";
+  const d = name ? review.roiData.get(name) : null;
+  const dpr = window.devicePixelRatio || 1;
+  const sig = [active, name, !!d, d && d.status, review.showRoi, state.canvas.width, state.canvas.height,
+               state.offsetX, state.offsetY, state.scale, state.imgW, state.imgH, dpr].join("|");
+  if (sig === _fixerZoneSig) return;
+  _fixerZoneSig = sig;
+  svg.innerHTML = "";
+  svg.style.display = "none";
+  badge.classList.add("hidden");
+  if (!active) return;
+  $("fixerZoneBtn").textContent = review.showRoi ? "Zones: on (O)" : "Zones: off (O)";
+  const lg = $("fixerZoneLegend");
+  lg.innerHTML = "";
+  if (!name) { lg.appendChild(el("span", null, "Zone not available: no image loaded yet")); return; }
+  if (!d) {
+    fetchReviewRoi({image_key: name}).then(() => { if (state.zoneName === name) { _fixerZoneSig = null; syncFixerZone(); } });
+    lg.appendChild(review.showRoi ? el("span", null, "Camera: …") : el("span", null, "Crop zone hidden"));
+    return;
+  }
+  fillRoiLegend(lg, d);
+  if (!review.showRoi) return;
+  if (d.status !== "ok") {
+    badge.textContent = `Camera unknown — crop zone not shown (${d.reason || "no data"})`;
+    badge.classList.remove("hidden");
+    return;
+  }
+  const dw = Math.floor(state.imgW * state.scale) / dpr, dh = Math.floor(state.imgH * state.scale) / dpr;
+  Object.assign(svg.style, {display: "block", left: `${state.offsetX / dpr}px`, top: `${state.offsetY / dpr}px`,
+                            width: `${dw}px`, height: `${dh}px`});
+  roiShapes(svg, d, dw, dh);
+}
+
+function toggleFixerZone() {
+  review.showRoi = !review.showRoi;
+  syncFixerZone();
+}
+
+function installFixerZone() {
+  $("fixerZoneBtn").onclick = () => { $("fixerZoneBtn").blur(); toggleFixerZone(); };
+  // The zone follows the canvas box, not only window resizes (the zone bar appearing shifts the canvas).
+  let raf = 0;   // deferred: the zone bar toggling inside the callback would resize the observed box again (RO loop warning)
+  new ResizeObserver(() => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; draw(); }); }).observe($("canvas").parentElement);
+}
+
 function installHotkeys() {
   window.addEventListener("keydown", async (e) => {
     // The review queue covers the whole screen: no labeling/browsing hotkey may act behind it.
@@ -2563,6 +2676,7 @@ function installHotkeys() {
       if (e.key === "ArrowLeft") { e.preventDefault(); stepReview(-1); }
       else if (e.key === "ArrowRight") { e.preventDefault(); stepReview(1); }
       else if ((e.key === "o" || e.key === "O") && !e.repeat) { e.preventDefault(); toggleReviewRoi(); }
+      else if (e.key === "b" || e.key === "B") { e.preventDefault(); if (!e.repeat) setPeek(true); }
       else if ((e.key === "k" || e.key === "K" || e.key === "d" || e.key === "D" || e.key === "r" || e.key === "R") && !e.repeat) {
         e.preventDefault();
         const it = review.view[review.idx];
@@ -2610,7 +2724,19 @@ function installHotkeys() {
       return;
     }
 
+    // B (hold) = hide the bboxes, Dataset Fixer + Video Labeler (Background mode keeps B = background).
+    if ((e.key === "b" || e.key === "B") && !e.ctrlKey && !e.metaKey && !e.altKey
+        && !isTypingTarget(e.target) && (state.mode === "video" || state.mode === "dataset")) {
+      e.preventDefault();
+      if (!e.repeat) setPeek(true);
+      return;
+    }
+
     if (state.mode === "dataset") {
+      // O = camera crop zone on/off (Dataset Fixer only)
+      if ((e.key === "o" || e.key === "O") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat && !isTypingTarget(e.target)) {
+        e.preventDefault(); toggleFixerZone(); return;
+      }
       // RAW browsing has its own renderer (renderDatasetImage is a no-op for a RAW session) — same routing as Prev/Next.
       const render = state.rawLoaded ? renderRawImage : renderDatasetImage;
       if (e.key === "ArrowLeft") { e.preventDefault(); await render(state.datasetImageIdx - 1); }
@@ -3337,6 +3463,8 @@ async function init() {
   installHotkeys();
   installFlagPanel();
   installReviewPanel();
+  installPeek();
+  installFixerZone();
 
   if (cfg.videos.length === 0) {
     setStatus(`Put videos into: ${cfg.videos_dir}`);

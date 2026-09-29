@@ -177,12 +177,21 @@
         <div id="caseInfoBanner" style="display:none;"></div>
         <div id="flagBadge" class="flagBadge" style="display:none;"></div>
 
+        <!-- Dataset Fixer: camera crop zone (O), a separate layer over the canvas (same data as the review queue). -->
+        <div id="fixerZoneBar" class="reviewRoiBar hidden">
+          <button id="fixerZoneBtn" class="btn" title="Show/hide the camera crop zone (O)">Zones: on (O)</button>
+          <div id="fixerZoneLegend" class="reviewRoiLegend"></div>
+        </div>
+
         <div class="canvasWrap">
           <canvas id="canvas" class="canvas"></canvas>
+          <svg id="fixerZoneSvg" class="reviewRoiSvg" xmlns="http://www.w3.org/2000/svg"></svg>
+          <div id="fixerZoneBadge" class="reviewRoiBadge hidden"></div>
+          <div id="peekBadge" class="peekBadge hidden">Boxes hidden — hold B · editing locked</div>
         </div>
 
         <div class="hint">
-          Drag to draw a box. Then pick class (type to filter) and press Enter to save. Press X to flag a doubtful image for the owner's review.
+          Drag to draw a box. Then pick class (type to filter) and press Enter to save. Press X to flag a doubtful image for the owner's review. Hold B to hide the boxes (editing is locked meanwhile); O toggles the camera crop zone in the Dataset Fixer.
         </div>
       </section>
 
@@ -346,7 +355,7 @@
     <div class="reviewHeader">
       <div class="reviewTitle">Review queue</div>
       <div id="reviewCounts" class="reviewCounts"></div>
-      <div class="reviewKeys">← → browse · K keep · D approve delete · R relabel · O zones · Esc close</div>
+      <div class="reviewKeys">← → browse · K keep · D approve delete · R relabel · O zones · hold B hide boxes · Esc close</div>
       <button id="reviewRefreshBtn" class="btn">Refresh</button>
       <button id="reviewCloseBtn" class="btn" style="margin-left:auto;">Close (Esc)</button>
     </div>
@@ -393,6 +402,7 @@
           <svg id="reviewRoiSvg" class="reviewRoiSvg" xmlns="http://www.w3.org/2000/svg"></svg>
           <div id="reviewRoiBadge" class="reviewRoiBadge hidden"></div>
           <div id="reviewNote" class="reviewNote"></div>
+          <div id="reviewPeekBadge" class="peekBadge hidden">Boxes hidden — hold B</div>
         </div>
         <div id="reviewInfo" class="reviewInfo"></div>
       </main>

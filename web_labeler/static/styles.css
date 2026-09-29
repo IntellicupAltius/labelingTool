@@ -675,6 +675,17 @@ input[type="range"] {
 .reviewStage.loading img { opacity: 0.35; }
 .reviewNote { position: relative; color: var(--muted); font-size: 13px; padding: 12px; text-align: center; white-space: pre-line; }
 .reviewBox { position: absolute; border: 2px solid var(--accent2); pointer-events: none; }
+/* B held: bboxes hidden (they stay in the DOM), zones untouched */
+.reviewStage.peek .reviewBox { visibility: hidden; }
+.peekBadge {
+  position: absolute; top: 8px; right: 8px; padding: 4px 8px; border-radius: 6px; pointer-events: none; z-index: 5;
+  background: rgba(30, 58, 138, 0.92); color: #bfdbfe; font-size: 12px; font-weight: 700;
+}
+.peekBadge.hidden { display: none; }
+/* B held in the Dataset Fixer / Video Labeler: the canvas and the box lists ignore the mouse (JS capture guard,
+   installPeek); no pointer-events:none here, that lets a drag start a text selection on the parent instead. */
+body.peeking #canvas { cursor: not-allowed; }
+body.peeking #currentList, body.peeking #globalList { opacity: 0.55; cursor: not-allowed; user-select: none; }
 /* camera crop zone overlay (drawn in the image's letterbox, under the bboxes) */
 .reviewRoiSvg { position: absolute; left: 0; top: 0; width: 0; height: 0; pointer-events: none; overflow: visible; display: none; }
 .reviewRoiBadge {
