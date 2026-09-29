@@ -1899,7 +1899,7 @@ function installFlagPanel() {
 //
 // Layout (Dataset-Fixer style): narrow virtualized list on the left (orientation only), ONE big
 // image with its bboxes in the middle, comment / reason / decision buttons under it. Decisions are
-// made on the big image: arrows = prev/next, K = keep, D = approve delete.
+// made on the big image: arrows = prev/next, K = keep, D = approve delete, R = relabel.
 //
 // Invariants worth not breaking:
 //  * `review.view` (the filtered+sorted array) is rebuilt ONLY on open / Refresh / filter change,
@@ -1914,7 +1914,7 @@ const review = {
   rows: new Map(),   // view index -> row element (only the virtualized window)
   ro: null,
 };
-const REVIEW_DECISION_LABELS = {approve_delete: "Approved delete", keep: "Keep"};
+const REVIEW_DECISION_LABELS = {approve_delete: "Approved delete", keep: "Keep", relabel: "Relabel"};
 const REVIEW_ROW_H = 64;          // px, fixed so the list can be windowed by arithmetic
 const REVIEW_WINDOW_PAD = 40;     // extra rows rendered above/below the visible ones
 const REVIEW_MAIN_W = 1600;       // px, big-image width requested from /api/review/image
@@ -2006,7 +2006,7 @@ function filteredReviewItems() {
     if (src && (it.entry.source || "") !== src) return false;
     if (pool && it.pool !== pool) return false;
     if (dec === "pending" && d !== null) return false;
-    if ((dec === "approve_delete" || dec === "keep") && d !== dec) return false;
+    if ((dec === "approve_delete" || dec === "keep" || dec === "relabel") && d !== dec) return false;
     return true;
   });
   const at = it => it.entry.flagged_at || "";
@@ -2254,6 +2254,12 @@ function renderReviewInfo(it) {
   left.appendChild(el("div", "reviewMeta", `Flagged ${entry.flagged_at || "?"} by ${entry.flagged_by || "?"}`));
   left.appendChild(el("div", "reviewDecision",
     decision ? `Decision: ${REVIEW_DECISION_LABELS[decision] || decision} (${entry.owner_decision_at || ""})` : "Decision: pending"));
+  if (decision === "relabel" && entry.relabel_snapshot) {
+    const rs = entry.relabel_snapshot;
+    const m = el("div", "reviewMeta", `Original recorded: image ${String(rs.image_sha256 || "").slice(0, 10)}…, label ${rs.label_sha256 ? rs.label_sha256.slice(0, 10) + "…" : "(none)"}`);
+    m.title = JSON.stringify(rs);
+    left.appendChild(m);
+  }
   info.appendChild(left);
 
   const right = el("div", "reviewInfoRight");
@@ -2268,6 +2274,7 @@ function renderReviewInfo(it) {
   };
   actions.appendChild(mk("Approve delete (D)", "approve_delete", "active-delete", "Approve deleting this image from RAW (D)"));
   actions.appendChild(mk("Keep (K)", "keep", "active-keep", "Keep this image (K)"));
+  actions.appendChild(mk("Relabel (R)", "relabel", "active-relabel", "Keep the image, but its RAW label must be corrected (R). Goca's flag comment says what to fix."));
   if (decision) actions.appendChild(mk("Undo", null, null, "Clear the decision"));
   right.appendChild(actions);
   const fr = el("button", "btn reviewFullResBtn", review.fullRes ? "Full res: on" : "Full res: off");
@@ -2410,7 +2417,7 @@ function installReviewPanel() {
 function installHotkeys() {
   window.addEventListener("keydown", async (e) => {
     // The review queue covers the whole screen: no labeling/browsing hotkey may act behind it.
-    // Its own keys: Left/Right = prev/next, K = keep, D = approve delete, Esc = close (writes nothing).
+    // Its own keys: Left/Right = prev/next, K = keep, D = approve delete, R = relabel, Esc = close (writes nothing).
     // Ignored while typing/in a <select>, with modifiers held, and (for K/D) on key auto-repeat so a
     // held key can't stamp a decision on a run of images.
     if (review.open) {
@@ -2418,10 +2425,11 @@ function installHotkeys() {
       if (isTypingTarget(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === "ArrowLeft") { e.preventDefault(); stepReview(-1); }
       else if (e.key === "ArrowRight") { e.preventDefault(); stepReview(1); }
-      else if ((e.key === "k" || e.key === "K" || e.key === "d" || e.key === "D") && !e.repeat) {
+      else if ((e.key === "k" || e.key === "K" || e.key === "d" || e.key === "D" || e.key === "r" || e.key === "R") && !e.repeat) {
         e.preventDefault();
         const it = review.view[review.idx];
-        if (it) setReviewDecision(it, (e.key === "k" || e.key === "K") ? "keep" : "approve_delete");
+        const k = e.key.toLowerCase();
+        if (it) setReviewDecision(it, k === "k" ? "keep" : k === "r" ? "relabel" : "approve_delete");
       }
       return;
     }

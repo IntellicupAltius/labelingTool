@@ -652,6 +652,7 @@ input[type="range"] {
 .reviewRow.dec-pending        { border-left-color: #fbbf24; }
 .reviewRow.dec-keep           { border-left-color: var(--accent); }
 .reviewRow.dec-approve_delete { border-left-color: var(--danger); }
+.reviewRow.dec-relabel        { border-left-color: #a78bfa; }
 .reviewRowThumb {
   width: 96px; height: 54px; flex: 0 0 96px; background: #000; border-radius: 4px; overflow: hidden;
   display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 11px;
@@ -703,6 +704,7 @@ input[type="range"] {
 .reviewActions .btn { flex: 1; padding: 10px 8px; font-size: 13px; }
 .reviewActions .btn.active-delete { background: rgba(248, 113, 113, 0.25); border-color: var(--danger); }
 .reviewActions .btn.active-keep   { background: rgba(45, 212, 191, 0.2);  border-color: var(--accent); }
+.reviewActions .btn.active-relabel { background: rgba(167, 139, 250, 0.25); border-color: #a78bfa; }
 .reviewFullResBtn { align-self: flex-start; font-size: 11px; padding: 4px 8px; }
 
 /* MDQ-7: per-image comparison metrics, fetched on request */

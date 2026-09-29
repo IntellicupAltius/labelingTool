@@ -341,12 +341,12 @@
        source. Viewer layout: narrow virtualized list (left), one big image with bboxes (middle),
        comment / reason / decision buttons under it. A verdict only writes owner_decision into the
        same sidecar entry — nothing under RAW is touched here (moving approved images out of RAW is
-       the separate archive script). Keys: Left/Right = prev/next, K = keep, D = approve delete. -->
+       the separate archive script). Keys: Left/Right = prev/next, K = keep, D = approve delete, R = relabel. -->
   <div id="reviewPanel" class="reviewPanel hidden">
     <div class="reviewHeader">
       <div class="reviewTitle">Review queue</div>
       <div id="reviewCounts" class="reviewCounts"></div>
-      <div class="reviewKeys">← → browse · K keep · D approve delete · Esc close</div>
+      <div class="reviewKeys">← → browse · K keep · D approve delete · R relabel · Esc close</div>
       <button id="reviewRefreshBtn" class="btn">Refresh</button>
       <button id="reviewCloseBtn" class="btn" style="margin-left:auto;">Close (Esc)</button>
     </div>
@@ -361,6 +361,7 @@
               <option value="pending">Pending</option>
               <option value="approve_delete">Approved delete</option>
               <option value="keep">Keep</option>
+              <option value="relabel">Relabel</option>
               <option value="all">All</option>
             </select>
           </label>
