@@ -26,6 +26,14 @@ append-only and indices shift as it grows. A frame flagged while labeling a vide
 is ingested into RAW) has no RAW file yet, so it is keyed ``_forward/<export base name>.jpg``
 and additionally carries ``video`` / ``frame_idx`` / ``annotation_classes``.
 
+Manual flags win over automated ones: ``add_manual_flag`` may REPLACE an undecided
+``analyzer_auto`` / ``data4_audit`` entry (the entry is one per key). The replaced automated
+flag is kept verbatim in the entry's optional top-level ``replaced_auto`` object
+(``source/category/signal/comment/flagged_at/flagged_by/flag_context``); ``unflag_manual`` puts it
+back, so removing the manual flag never loses the automated evidence. ``replaced_auto`` is an extra
+key like ``video``/``frame_idx`` — ``schema_version`` stays 1 and old sidecars need no migration.
+Nothing here ever replaces or removes an entry the owner has decided on.
+
 Only ``source == "manual_goca"`` entries that the owner has not decided on can be changed or
 removed through this module's manual API. The analyzer / audit sources (MDQ-9 / MDQ-10) and
 the owner review queue (MDQ-6) will write the same files; concurrent writers are serialized
@@ -130,6 +138,14 @@ def _now() -> str:
 
 def _is_mutable_by_manual(entry: dict) -> bool:
     return entry.get("source") == SOURCE_MANUAL and entry.get("owner_decision") is None
+
+
+def _is_replaceable_by_manual(entry: dict) -> bool:
+    """A manual flag may be written over: own undecided manual flag, or an undecided automated one."""
+    return entry.get("owner_decision") is None and entry.get("source") in (SOURCE_MANUAL, *AUTO_SOURCES)
+
+
+_REPLACED_AUTO_KEYS = ("source", "category", "signal", "comment", "flagged_at", "flagged_by", "flag_context")
 
 
 class FlagStore:
@@ -241,8 +257,14 @@ class FlagStore:
         with self._locked(pool):
             doc = self._read(pool)
             existing = doc["entries"].get(image_key)
-            if existing is not None and not _is_mutable_by_manual(existing):
+            if existing is not None and not _is_replaceable_by_manual(existing):
                 raise FlagConflict(_conflict_message(existing), existing)
+            replaced = None
+            if existing is not None:
+                if existing.get("source") in AUTO_SOURCES:
+                    replaced = {k: existing.get(k) for k in _REPLACED_AUTO_KEYS}
+                elif isinstance(existing.get("replaced_auto"), dict):
+                    replaced = existing["replaced_auto"]      # re-saving own flag keeps the original automated one
             entry = {
                 "source": SOURCE_MANUAL,
                 "category": category,
@@ -257,23 +279,42 @@ class FlagStore:
             for k in _EXTRA_KEYS:
                 if extra and extra.get(k) is not None:
                     entry[k] = extra[k]
+            if replaced is not None:
+                entry["replaced_auto"] = replaced
             doc["entries"][image_key] = entry
             self._write(pool, doc)
         return entry
 
-    def remove_manual_flag(self, pool: str, image_key: str) -> bool:
-        """True if an entry was removed, False if there was none."""
+    def unflag_manual(self, pool: str, image_key: str) -> dict:
+        """Remove the manual flag. ``{"removed": bool, "restored": entry | None}``.
+
+        If the manual flag had replaced an automated one (``replaced_auto``), that automated flag
+        is written back (undecided, exactly as it was) and returned as ``restored``; otherwise the
+        entry is simply deleted.
+        """
         pool = normalize_pool(pool)
         with self._locked(pool):
             doc = self._read(pool)
             existing = doc["entries"].get(image_key)
             if existing is None:
-                return False
+                return {"removed": False, "restored": None}
             if not _is_mutable_by_manual(existing):
                 raise FlagConflict(_conflict_message(existing), existing)
-            del doc["entries"][image_key]
+            ra = existing.get("replaced_auto")
+            restored = None
+            if isinstance(ra, dict) and ra.get("source") in AUTO_SOURCES:
+                restored = {k: ra.get(k) for k in _REPLACED_AUTO_KEYS}
+                restored["owner_decision"] = None
+                restored["owner_decision_at"] = None
+                doc["entries"][image_key] = restored
+            else:
+                del doc["entries"][image_key]
             self._write(pool, doc)
-        return True
+        return {"removed": True, "restored": dict(restored) if restored else None}
+
+    def remove_manual_flag(self, pool: str, image_key: str) -> bool:
+        """True if the manual flag was removed, False if there was none (restores a replaced automated flag)."""
+        return self.unflag_manual(pool, image_key)["removed"]
 
 
     # -- owner review queue (MDQ-6) ---------------------------------------------
@@ -398,4 +439,4 @@ def describe_reason(entry: dict) -> Optional[str]:
 def _conflict_message(existing: dict) -> str:
     if existing.get("owner_decision") is not None:
         return f"already reviewed by the owner ({existing['owner_decision']}); it can no longer be changed here"
-    return f"already flagged by {existing.get('source')}; it is in the owner's review queue"
+    return f"already flagged by {existing.get('source')}; it is in the owner's review queue"  # only reached for decided / unknown-source entries

@@ -1696,6 +1696,13 @@ function updateFlagBadge() {
   el.style.display = "block";
 }
 
+// Goca may write a manual flag over her own undecided flag AND over an undecided automated one
+// (analyzer_auto / data4_audit) — the server keeps the automated flag in `replaced_auto` and
+// restores it on Unflag. Anything the owner already decided on stays locked.
+function flagCanSave(entry) {
+  return !entry || (!entry.owner_decision && ["manual_goca", "analyzer_auto", "data4_audit"].includes(entry.source));
+}
+
 function flagIsMutable(entry) {
   return !entry || (entry.source === "manual_goca" && !entry.owner_decision);
 }
@@ -1714,7 +1721,10 @@ function renderFlagPanel() {
   if (ex) {
     const what = ex.category ? ex.category : (ex.signal ? `${ex.signal.metric}: ${ex.signal.value}` : "flagged");
     if (flagIsMutable(ex)) {
-      box.textContent = `Already flagged by you (${what}${ex.comment ? " — " + ex.comment : ""}). Pick a reason and save to change it, or Unflag.`;
+      const ra = ex.replaced_auto ? ` It replaced an automatic ${ex.replaced_auto.source} flag; Unflag brings that one back.` : "";
+      box.textContent = `Already flagged by you (${what}${ex.comment ? " — " + ex.comment : ""}). Pick a reason and save to change it, or Unflag.${ra}`;
+    } else if (flagCanSave(ex)) {
+      box.textContent = `Automatically flagged by ${ex.source} (${what}). Pick a reason and save to replace it with your manual flag (the automatic one is kept and comes back if you Unflag).`;
     } else {
       const dec = ex.owner_decision ? `, owner decided: ${ex.owner_decision}` : "";
       box.textContent = `Already flagged by ${ex.source}${dec} (${what}). It can no longer be changed here.`;
@@ -1723,9 +1733,9 @@ function renderFlagPanel() {
   } else {
     box.style.display = "none";
   }
-  const editable = flagIsMutable(ex);
+  const editable = flagCanSave(ex);
   $("flagSaveBtn").disabled = !editable;
-  $("flagRemoveBtn").style.display = (ex && editable) ? "" : "none";
+  $("flagRemoveBtn").style.display = (ex && flagIsMutable(ex)) ? "" : "none";
   for (const b of $("flagCats").children) {
     b.classList.toggle("selected", b.dataset.cat === state.flagCategory);
     b.disabled = !editable;
@@ -1798,14 +1808,14 @@ function closeFlagPanel() {
 }
 
 function selectFlagCategory(key) {
-  if (!flagIsMutable(state.flagExisting)) return;
+  if (!flagCanSave(state.flagExisting)) return;
   state.flagCategory = key;
   renderFlagPanel();
 }
 
 async function saveFlag() {
   const t = state.flagTarget;
-  if (!t || !flagIsMutable(state.flagExisting)) return;
+  if (!t || !flagCanSave(state.flagExisting)) return;
   if (!state.flagCategory) { showFlagError("Pick a reason first (keys 1–4)."); return; }
   const comment = $("flagComment").value;
   try {
@@ -1830,14 +1840,14 @@ async function removeFlag() {
   if (!t || !state.flagExisting || !flagIsMutable(state.flagExisting)) return;
   try {
     if (t.kind === "raw") {
-      await api.rawFlagRemove(t.imageKey, t.pool);
-      state.rawFlag = null;
+      const rr = await api.rawFlagRemove(t.imageKey, t.pool);
+      state.rawFlag = rr.restored || null;   // a replaced automatic flag comes back
       updateFlagBadge();
     } else {
       await api.frameFlagRemove(t.pool, t.frameIdx);
     }
     closeFlagPanel();
-    setStatus(`Unflagged: ${t.label}`);
+    setStatus(state.rawFlag && t.kind === "raw" ? `Manual flag removed, automatic ${state.rawFlag.source} flag restored: ${t.label}` : `Unflagged: ${t.label}`);
   } catch (e) {
     showFlagError(e.message || String(e));
   }
@@ -2234,6 +2244,12 @@ function renderReviewInfo(it) {
   }
   if (it.is_forward && (entry.annotation_classes || []).length) {
     left.appendChild(el("div", "reviewMeta", `Labeled as: ${entry.annotation_classes.join(", ")}`));
+  }
+  if (entry.replaced_auto) {
+    const ra = entry.replaced_auto;
+    const m = el("div", "reviewMeta", `Replaced an automatic ${ra.source} flag${ra.signal ? ` (${ra.signal.metric}: ${ra.signal.value})` : ""}`);
+    m.title = JSON.stringify(ra);
+    left.appendChild(m);
   }
   left.appendChild(el("div", "reviewMeta", `Flagged ${entry.flagged_at || "?"} by ${entry.flagged_by || "?"}`));
   left.appendChild(el("div", "reviewDecision",

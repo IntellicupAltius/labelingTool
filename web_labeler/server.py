@@ -752,7 +752,8 @@ def create_app() -> FastAPI:
         _need_flags()
         p = _raw_pool(pool)
         validate_image_key(image_key)
-        return {"pool": p, "image_key": image_key, "removed": flag_store.remove_manual_flag(p, image_key)}
+        res = flag_store.unflag_manual(p, image_key)
+        return {"pool": p, "image_key": image_key, "removed": res["removed"], "restored": res["restored"]}
 
     def _frame_flag_key(frame_idx: int) -> str:
         if state.video_path is None:
