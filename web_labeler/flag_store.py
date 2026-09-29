@@ -16,9 +16,17 @@ Schema (``schema_version`` 1)::
          "signal": {"metric": ..., "value": ...} | null,
          "flagged_at": "<ISO timestamp>",
          "flagged_by": "goca" | "analyzer_overlap_report" | "data4_audit",
-         "owner_decision": "approve_delete" | "keep" | null,
+         "owner_decision": "approve_delete" | "keep" | "relabel" | null,
          "owner_decision_at": "<ISO timestamp>" | null,
          "flag_context": "retroactive_review" | "forward_labeling"}}}
+
+``relabel`` (MDQ-15c-1) means "keep the image but its RAW label must be corrected". It is the
+only decision that adds a field: the optional ``relabel_snapshot`` object
+(``image_sha256`` / ``label_sha256`` (null when the image has no label file) / ``recorded_at``) —
+the sha256 of the RAW image and label at the moment of the decision, so the later apply step
+(MDQ-15c-3) can refuse to act if the original changed in the meantime. Changing the decision to
+anything else, or undoing it, drops the snapshot. Old sidecars carry neither the decision nor the
+field and are read unchanged (``schema_version`` stays 1).
 
 Every entry must carry a ``category`` or a ``signal`` (never an empty reason).
 Entries are keyed by the stable ``<class>/<filename>`` id, never by an index: RAW is
@@ -65,7 +73,8 @@ CATEGORY_LABELS = {
     "near_duplicate": "Near-duplicate",
     "mislabeled_background": "Mislabeled background",
 }
-OWNER_DECISIONS = ("approve_delete", "keep")
+OWNER_DECISIONS = ("approve_delete", "keep", "relabel")
+DECISION_RELABEL = "relabel"
 SOURCE_MANUAL = "manual_goca"
 SOURCE_ANALYZER_AUTO = "analyzer_auto"
 SOURCE_DATA4_AUDIT = "data4_audit"
@@ -383,7 +392,8 @@ class FlagStore:
             self._write(pool, doc)
         return entry
 
-    def set_owner_decision(self, pool: str, image_key: str, decision: Optional[str]) -> dict:
+    def set_owner_decision(self, pool: str, image_key: str, decision: Optional[str],
+                           relabel_snapshot: Optional[dict] = None) -> dict:
         """Record the owner's verdict on an existing flag, in place.
 
         ``decision`` is one of OWNER_DECISIONS, or None to put the item back to pending (a
@@ -391,12 +401,21 @@ class FlagStore:
         the flag record itself (source, reason, signal, timestamps) is never removed or
         rewritten, and nothing outside the sidecar is touched — moving an approved image out
         of RAW is MDQ-8's archive script, not this.
+
+        ``relabel`` requires ``relabel_snapshot`` (``image_sha256`` + ``label_sha256``, computed by
+        the caller from RAW, read-only) and stores it in the entry; any other decision, or None,
+        removes a previous snapshot.
         """
         pool = normalize_pool(pool)
         if decision is not None and decision not in OWNER_DECISIONS:
             raise FlagValidationError(f"decision must be one of {', '.join(OWNER_DECISIONS)} or null")
         if not isinstance(image_key, str) or not image_key:
             raise FlagValidationError("image_key is required")
+        if decision == DECISION_RELABEL:
+            snap = relabel_snapshot
+            if not isinstance(snap, dict) or not isinstance(snap.get("image_sha256"), str) or not snap["image_sha256"] \
+                    or (snap.get("label_sha256") is not None and not isinstance(snap["label_sha256"], str)):
+                raise FlagValidationError("relabel needs a relabel_snapshot with image_sha256 (and label_sha256 or null)")
         with self._locked(pool):
             doc = self._read(pool)
             entry = doc["entries"].get(image_key)
@@ -404,6 +423,14 @@ class FlagStore:
                 raise FlagNotFound(f"no flag for {pool}/{image_key}")
             entry["owner_decision"] = decision
             entry["owner_decision_at"] = _now() if decision is not None else None
+            if decision == DECISION_RELABEL:
+                entry["relabel_snapshot"] = {
+                    "image_sha256": relabel_snapshot["image_sha256"],
+                    "label_sha256": relabel_snapshot.get("label_sha256"),
+                    "recorded_at": entry["owner_decision_at"],
+                }
+            else:
+                entry.pop("relabel_snapshot", None)
             self._write(pool, doc)
         return dict(entry)
 

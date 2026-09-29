@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -59,7 +60,7 @@ from web_labeler.background_labeler import (
 from web_labeler import analyzer as _analyzer
 from web_labeler import flag_store as _flags
 from web_labeler import image_metrics as _metrics
-from web_labeler.flag_store import FlagConflict, FlagError, FlagStore, FlagUnavailable, normalize_pool, validate_image_key
+from web_labeler.flag_store import FlagConflict, FlagError, FlagStore, FlagUnavailable, FlagValidationError, normalize_pool, validate_image_key
 
 
 def ensure_dir(p: Path):
@@ -251,7 +252,7 @@ class RawFlagRequest(BaseModel):
 class ReviewDecisionRequest(BaseModel):
     pool: str
     image_key: str
-    decision: Optional[str] = None  # "approve_delete" | "keep" | null (back to pending)
+    decision: Optional[str] = None  # "approve_delete" | "keep" | "relabel" | null (back to pending)
 
 
 class FrameFlagRequest(BaseModel):
@@ -834,6 +835,13 @@ def create_app() -> FastAPI:
             boxes.append({"class_id": cid, "class_name": cname, "xc": xc, "yc": yc, "w": w, "h": h})
         return boxes
 
+    def _sha256_file(path: Path) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as fp:
+            for chunk in iter(lambda: fp.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
     @app.get("/api/review/queue")
     def review_queue():
         _need_flags()
@@ -921,7 +929,20 @@ def create_app() -> FastAPI:
     def review_decision(req: ReviewDecisionRequest):
         _need_flags()
         p = normalize_pool(req.pool)
-        entry = flag_store.set_owner_decision(p, req.image_key, req.decision)
+        snapshot = None
+        if req.decision == _flags.DECISION_RELABEL:
+            # sha256 of the RAW image + label right now (read-only) so MDQ-15c-3 can detect a
+            # change before it acts. A forward frame / missing file has nothing to relabel.
+            img_path = _raw_image_path(p, req.image_key)
+            if img_path is None:
+                raise FlagValidationError("relabel needs an image that exists in RAW (not a forward frame or a missing file)")
+            txt = raw_base_path / p / "labels" / req.image_key.split("/")[0] / f"{img_path.stem}.txt"
+            try:
+                snapshot = {"image_sha256": _sha256_file(img_path),
+                            "label_sha256": _sha256_file(txt) if txt.is_file() else None}
+            except OSError as e:
+                raise FlagValidationError(f"could not read the RAW image/label to record its checksum: {e}")
+        entry = flag_store.set_owner_decision(p, req.image_key, req.decision, relabel_snapshot=snapshot)
         return {"pool": p, "image_key": req.image_key, "entry": entry}
 
     # ---------------- Review queue metrics (MDQ-7) ----------------
