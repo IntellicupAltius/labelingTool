@@ -338,49 +338,55 @@
   </div>
 
   <!-- Owner review queue (MDQ-6): every flagged image from every pool's sidecar, whatever the
-       source. A verdict only writes owner_decision into the same sidecar entry — nothing under
-       RAW is touched here (moving approved images out of RAW is the separate archive script). -->
+       source. Viewer layout: narrow virtualized list (left), one big image with bboxes (middle),
+       comment / reason / decision buttons under it. A verdict only writes owner_decision into the
+       same sidecar entry — nothing under RAW is touched here (moving approved images out of RAW is
+       the separate archive script). Keys: Left/Right = prev/next, K = keep, D = approve delete. -->
   <div id="reviewPanel" class="reviewPanel hidden">
     <div class="reviewHeader">
       <div class="reviewTitle">Review queue</div>
       <div id="reviewCounts" class="reviewCounts"></div>
-      <label class="field"><div class="label">Source</div><select id="reviewSourceFilter"></select></label>
-      <label class="field"><div class="label">Pool</div><select id="reviewPoolFilter"></select></label>
-      <label class="field"><div class="label">Decision</div>
-        <select id="reviewDecisionFilter">
-          <option value="pending">Pending</option>
-          <option value="approve_delete">Approved delete</option>
-          <option value="keep">Keep</option>
-          <option value="all">All</option>
-        </select>
-      </label>
-      <label class="field"><div class="label">Sort</div>
-        <select id="reviewSort">
-          <option value="newest">Newest flag first</option>
-          <option value="oldest">Oldest flag first</option>
-          <option value="source">By source</option>
-          <option value="class">By pool / class</option>
-        </select>
-      </label>
+      <div class="reviewKeys">← → browse · K keep · D approve delete · Esc close</div>
       <button id="reviewRefreshBtn" class="btn">Refresh</button>
       <button id="reviewCloseBtn" class="btn" style="margin-left:auto;">Close (Esc)</button>
     </div>
     <div id="reviewErrors" class="reviewErrors"></div>
-    <div id="reviewGrid" class="reviewGrid"></div>
-  </div>
-
-  <!-- MDQ-14: full-resolution lightbox for a review-queue thumbnail, with the same bboxes drawn
-       over it. Opens on thumbnail click, closes on Esc or a click outside the image (same pattern
-       as #modal / #flagPanel). -->
-  <div id="reviewLightbox" class="reviewLightbox hidden">
-    <div class="reviewLightboxCard">
-      <div class="reviewLightboxHeader">
-        <div id="reviewLightboxTitle" class="reviewLightboxTitle"></div>
-        <button id="reviewLightboxClose" class="btn" style="margin-left:auto;">Close (Esc)</button>
-      </div>
-      <div class="reviewLightboxImgWrap">
-        <img id="reviewLightboxImg" alt="">
-      </div>
+    <div class="reviewLayout">
+      <aside class="reviewSide">
+        <div class="reviewFilters">
+          <label class="field"><div class="label">Source</div><select id="reviewSourceFilter"></select></label>
+          <label class="field"><div class="label">Pool</div><select id="reviewPoolFilter"></select></label>
+          <label class="field"><div class="label">Decision</div>
+            <select id="reviewDecisionFilter">
+              <option value="pending">Pending</option>
+              <option value="approve_delete">Approved delete</option>
+              <option value="keep">Keep</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <label class="field"><div class="label">Sort</div>
+            <select id="reviewSort">
+              <option value="newest">Newest flag first</option>
+              <option value="oldest">Oldest flag first</option>
+              <option value="source">By source</option>
+              <option value="class">By pool / class</option>
+            </select>
+          </label>
+        </div>
+        <div id="reviewList" class="reviewList"></div>
+      </aside>
+      <main class="reviewMain">
+        <div class="reviewStageBar">
+          <button id="reviewPrevBtn" class="btn" title="Previous (←)">←</button>
+          <div id="reviewCounter" class="reviewCounter"></div>
+          <button id="reviewNextBtn" class="btn" title="Next (→)">→</button>
+        </div>
+        <div id="reviewStage" class="reviewStage">
+          <img id="reviewMainImg" alt="">
+          <div id="reviewNote" class="reviewNote"></div>
+        </div>
+        <div id="reviewInfo" class="reviewInfo"></div>
+      </main>
     </div>
   </div>
 

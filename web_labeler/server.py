@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import threading
+from collections import OrderedDict
 import logging
 import platform
 import zipfile
@@ -863,8 +864,17 @@ def create_app() -> FastAPI:
         items.sort(key=lambda it: it["entry"].get("flagged_at") or "", reverse=True)
         return {"pools": pools, "items": items, "sources": sorted({it["entry"].get("source") or "" for it in items})}
 
+    # Small in-process LRU of resized review images, keyed (path, mtime, width). Bounded by bytes.
+    _review_img_cache: "OrderedDict[tuple, bytes]" = OrderedDict()
+    _review_img_cache_bytes = [0]
+    _REVIEW_IMG_CACHE_MAX = 200 * 1024 * 1024
+    _review_img_cache_lock = threading.Lock()
+
     @app.get("/api/review/image")
-    def review_image(pool: str = Query(...), image_key: str = Query(...), thumb: int = Query(1)):
+    def review_image(pool: str = Query(...), image_key: str = Query(...), thumb: int = Query(1),
+                     w: int = Query(0)):
+        # `w` (optional, px) = target width of the resized JPEG; default 0 keeps the historical 480 px
+        # thumbnail. thumb=0 still returns the original file.
         _need_flags()
         p = normalize_pool(pool)
         validate_image_key(image_key)
@@ -872,16 +882,37 @@ def create_app() -> FastAPI:
         if img_path is None:
             raise HTTPException(status_code=404, detail=f"No such RAW image: {p}/images/{image_key}")
         if thumb:
-            img = cv2.imread(str(img_path))
-            if img is not None:
-                h, w = img.shape[:2]
-                scale = min(1.0, 480.0 / max(w, 1))
-                if scale < 1.0:
-                    img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                if ok:
-                    return Response(content=buf.tobytes(), media_type="image/jpeg",
-                                    headers={"Cache-Control": "private, max-age=300"})
+            width = 480 if w <= 0 else max(64, min(int(w), 3840))
+            try:
+                ck = (str(img_path), img_path.stat().st_mtime_ns, width)
+            except OSError:
+                ck = None
+            data = None
+            if ck is not None:
+                with _review_img_cache_lock:
+                    data = _review_img_cache.get(ck)
+                    if data is not None:
+                        _review_img_cache.move_to_end(ck)
+            if data is None:
+                img = cv2.imread(str(img_path))
+                if img is not None:
+                    h0, w0 = img.shape[:2]
+                    scale = min(1.0, float(width) / max(w0, 1))
+                    if scale < 1.0:
+                        img = cv2.resize(img, (int(w0 * scale), int(h0 * scale)), interpolation=cv2.INTER_AREA)
+                    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if ok:
+                        data = buf.tobytes()
+                        if ck is not None:
+                            with _review_img_cache_lock:
+                                _review_img_cache[ck] = data
+                                _review_img_cache_bytes[0] += len(data)
+                                while _review_img_cache_bytes[0] > _REVIEW_IMG_CACHE_MAX and _review_img_cache:
+                                    _, old = _review_img_cache.popitem(last=False)
+                                    _review_img_cache_bytes[0] -= len(old)
+            if data is not None:
+                return Response(content=data, media_type="image/jpeg",
+                                headers={"Cache-Control": "private, max-age=300"})
         media = "image/jpeg" if img_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
         return FileResponse(str(img_path), media_type=media, headers={"Cache-Control": "private, max-age=300"})
 

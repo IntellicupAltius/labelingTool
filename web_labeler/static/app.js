@@ -1882,25 +1882,56 @@ function installFlagPanel() {
   $("flagCancelBtn").onclick = closeFlagPanel;
 }
 
-// ---------------- Owner review queue (MDQ-6) ----------------
+// ---------------- Owner review queue (MDQ-6) — viewer layout ----------------
 // Every flagged image from every pool's sidecar (manual_goca / analyzer_auto / data4_audit) in
 // one list. A verdict only writes owner_decision into the same sidecar entry; nothing under RAW
 // is touched here (moving approved images out of RAW is the separate archive script).
+//
+// Layout (Dataset-Fixer style): narrow virtualized list on the left (orientation only), ONE big
+// image with its bboxes in the middle, comment / reason / decision buttons under it. Decisions are
+// made on the big image: arrows = prev/next, K = keep, D = approve delete.
+//
+// Invariants worth not breaking:
+//  * `review.view` (the filtered+sorted array) is rebuilt ONLY on open / Refresh / filter change,
+//    so an item that just got a decision stays put in the list instead of jumping away.
+//  * A decision touches ONE list row (updateReviewRow), never the whole list.
+//  * Bboxes are cleared the instant the current item changes and drawn only from the onload of
+//    the NEW image, guarded by review.token, so a late onload of a previous image can't leave a ghost.
 
-const review = {open: false, items: [], pools: {}, busy: new Set(), metrics: new Map(), lightbox: null};
+const review = {
+  open: false, items: [], pools: {}, view: [], idx: -1, token: 0,
+  busy: new Set(), metrics: new Map(), fullRes: false,
+  rows: new Map(),   // view index -> row element (only the virtualized window)
+  ro: null,
+};
 const REVIEW_DECISION_LABELS = {approve_delete: "Approved delete", keep: "Keep"};
+const REVIEW_ROW_H = 64;          // px, fixed so the list can be windowed by arithmetic
+const REVIEW_WINDOW_PAD = 40;     // extra rows rendered above/below the visible ones
+const REVIEW_MAIN_W = 1600;       // px, big-image width requested from /api/review/image
+const REVIEW_THUMB_W = 160;       // px, side-list thumbnail width
 // MDQ-7: per-image comparison metrics. Fetched on request (button click), one image at a
-// time, cached per card for the life of the panel — never fetched for the whole grid at once.
+// time, cached per image for the life of the panel — never fetched for the whole queue at once.
 const METRIC_BADGE_LABEL = {normal: "normal", moderate: "moderate", large: "large deviation"};
 
 function reviewKey(it) { return `${it.pool}::${it.image_key}`; }
+
+function reviewImgUrl(it, w, full) {
+  const base = `/api/review/image?pool=${encodeURIComponent(it.pool)}&image_key=${encodeURIComponent(it.image_key)}`;
+  return full ? `${base}&thumb=0` : `${base}&w=${w}`;
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = text;
+  return e;
+}
 
 async function openReviewPanel() {
   if (!state.config || !state.config.flagging_available) {
     setStatus("The review queue is not available on this machine (it needs the server's raw_review folder).");
     return;
   }
-  if (state.flagPanelOpen || state.modalOpen) return;
   review.open = true;
   $("reviewPanel").classList.remove("hidden");
   await loadReviewQueue();
@@ -1909,63 +1940,26 @@ async function openReviewPanel() {
 function closeReviewPanel() {
   review.open = false;
   $("reviewPanel").classList.add("hidden");
-  closeReviewLightbox();
-  // A decision can change what the raw-browse badge should say for the image on screen.
-  if (state.mode === "dataset" && state.rawLoaded) renderRawImage(state.datasetImageIdx);
-}
-
-// MDQ-14: place boxes (normalized xc/yc/w/h) over a letterboxed <img> inside `container`.
-// Shared by the review-queue thumbnail and its full-resolution lightbox.
-function renderBoxesOverImage(container, img, boxes) {
-  container.querySelectorAll(".reviewBox").forEach(n => n.remove());
-  const W = container.clientWidth, H = container.clientHeight;
-  const s = Math.min(W / img.naturalWidth, H / img.naturalHeight);
-  const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
-  const ox = (W - dw) / 2, oy = (H - dh) / 2;
-  for (const b of boxes || []) {
-    const bx = el("div", "reviewBox");
-    bx.style.left = `${ox + (b.xc - b.w / 2) * dw}px`;
-    bx.style.top = `${oy + (b.yc - b.h / 2) * dh}px`;
-    bx.style.width = `${b.w * dw}px`;
-    bx.style.height = `${b.h * dh}px`;
-    bx.appendChild(el("span", null, b.class_name));
-    container.appendChild(bx);
-  }
-}
-
-// MDQ-14: full-resolution lightbox for a review-queue thumbnail (thumb=0 on the same endpoint
-// MDQ-6 already serves at reduced size), boxes drawn on top with the same helper as the thumb.
-function openReviewLightbox(it) {
-  if (!it.raw_exists) return;
-  review.lightbox = it;
-  $("reviewLightboxTitle").textContent = `${it.pool} · ${it.class_name || "(forward frame)"} · ${it.filename}`;
-  $("reviewLightbox").classList.remove("hidden");
-  const img = $("reviewLightboxImg");
-  const wrap = img.parentElement;
-  wrap.querySelectorAll(".reviewBox").forEach(n => n.remove());
-  img.onload = () => renderBoxesOverImage(wrap, img, it.boxes);
-  img.src = `/api/review/image?pool=${encodeURIComponent(it.pool)}&image_key=${encodeURIComponent(it.image_key)}&thumb=0`;
-}
-
-function closeReviewLightbox() {
-  if (!review.lightbox) return;
-  review.lightbox = null;
-  $("reviewLightbox").classList.add("hidden");
-  $("reviewLightboxImg").onload = null;
-  $("reviewLightboxImg").src = "";
+  review.token++;                       // orphan any in-flight image load
+  clearReviewBoxes();
+  const img = $("reviewMainImg");
+  img.onload = img.onerror = null;
+  img.removeAttribute("src");
 }
 
 async function loadReviewQueue() {
   $("reviewErrors").textContent = "";
-  $("reviewGrid").innerHTML = '<div class="reviewEmpty">Loading…</div>';
+  $("reviewList").innerHTML = "";
+  review.rows.clear();
+  $("reviewCounter").textContent = "Loading…";
   let data;
   try {
     const r = await fetch("/api/review/queue");
     data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
   } catch (e) {
-    $("reviewGrid").innerHTML = "";
     $("reviewErrors").textContent = `Could not load the review queue: ${e.message}`;
+    $("reviewCounter").textContent = "";
     return;
   }
   review.items = data.items || [];
@@ -1974,7 +1968,7 @@ async function loadReviewQueue() {
   $("reviewErrors").textContent = errs.length ? `Unreadable sidecar (not shown, not modified) — ${errs.join(" | ")}` : "";
   fillReviewFilter("reviewSourceFilter", data.sources || [], "All sources");
   fillReviewFilter("reviewPoolFilter", Object.keys(review.pools).filter(p => review.pools[p].count > 0), "All pools");
-  renderReviewGrid();
+  rebuildReviewView(null);
 }
 
 function fillReviewFilter(id, values, allLabel) {
@@ -2015,90 +2009,271 @@ function filteredReviewItems() {
   return items.sort(cmp);
 }
 
-function renderReviewGrid() {
-  const grid = $("reviewGrid");
-  const items = filteredReviewItems();
-  const pending = review.items.filter(it => !it.entry.owner_decision).length;
-  $("reviewCounts").textContent = `${items.length} shown · ${pending} pending · ${review.items.length} flagged total`;
-  grid.innerHTML = "";
-  if (!items.length) {
-    const e = document.createElement("div");
-    e.className = "reviewEmpty";
-    e.textContent = review.items.length ? "Nothing matches these filters." : "No flagged images yet.";
-    grid.appendChild(e);
-    return;
+// Recompute the filtered list and (re)build the side list. Called on open / Refresh / filter
+// change ONLY. `keepKey` = try to stay on that item if it is still in the new view.
+function rebuildReviewView(keepKey) {
+  const cur = review.view[review.idx];
+  if (keepKey === undefined) keepKey = cur ? reviewKey(cur) : null;
+  review.view = filteredReviewItems();
+  let idx = keepKey ? review.view.findIndex(it => reviewKey(it) === keepKey) : -1;
+  if (idx < 0) idx = review.view.length ? 0 : -1;
+  const list = $("reviewList");
+  list.innerHTML = "";
+  review.rows.clear();
+  const spacer = el("div", "reviewListSpacer");
+  spacer.style.height = `${review.view.length * REVIEW_ROW_H}px`;
+  list.appendChild(spacer);
+  list.scrollTop = 0;
+  if (!review.view.length) {
+    const e = el("div", "reviewEmpty", review.items.length ? "Nothing matches these filters." : "No flagged images yet.");
+    list.appendChild(e);
   }
-  for (const it of items) grid.appendChild(renderReviewCard(it));
+  review.idx = -2;                      // force showReviewItem to treat it as a change
+  showReviewItem(idx, {scrollList: true});
+  renderReviewWindow();
 }
 
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined && text !== null) e.textContent = text;
-  return e;
+function updateReviewCounter() {
+  const n = review.view.length;
+  const pending = review.items.filter(it => !it.entry.owner_decision).length;
+  $("reviewCounter").textContent = n ? `${review.idx + 1} / ${n}` : "0 / 0";
+  $("reviewCounts").textContent = `${pending} pending · ${review.items.length} flagged total`;
 }
 
-function renderReviewCard(it) {
-  const entry = it.entry;
-  const decision = entry.owner_decision || null;
-  const card = el("div", "reviewCard" + (decision ? ` decided-${decision}` : ""));
+// ---- side list: fixed-height rows, only a window of them exists in the DOM ----
+function renderReviewWindow() {
+  const list = $("reviewList");
+  const n = review.view.length;
+  if (!n) return;
+  const first = Math.max(0, Math.floor(list.scrollTop / REVIEW_ROW_H) - REVIEW_WINDOW_PAD);
+  const last = Math.min(n - 1, Math.ceil((list.scrollTop + list.clientHeight) / REVIEW_ROW_H) + REVIEW_WINDOW_PAD);
+  for (const [i, row] of review.rows) {
+    if (i < first || i > last) { row.remove(); review.rows.delete(i); }
+  }
+  for (let i = first; i <= last; i++) {
+    if (review.rows.has(i)) continue;
+    const row = renderReviewRow(review.view[i], i);
+    list.appendChild(row);
+    review.rows.set(i, row);
+  }
+}
 
-  const thumb = el("div", "reviewThumb");
+function reviewRowClass(it, i) {
+  const d = it.entry.owner_decision || "pending";
+  return `reviewRow dec-${d}` + (i === review.idx ? " current" : "");
+}
+
+function renderReviewRow(it, i) {
+  const row = el("div", reviewRowClass(it, i));
+  row.style.top = `${i * REVIEW_ROW_H}px`;
+  row.style.height = `${REVIEW_ROW_H}px`;
+  const th = el("div", "reviewRowThumb");
   if (it.raw_exists) {
     const img = document.createElement("img");
     img.loading = "lazy";
-    img.alt = it.image_key;
-    img.src = `/api/review/image?pool=${encodeURIComponent(it.pool)}&image_key=${encodeURIComponent(it.image_key)}`;
-    thumb.appendChild(img);
-    img.onload = () => renderBoxesOverImage(thumb, img, it.boxes);
-    thumb.classList.add("reviewThumbClickable");
-    thumb.title = "Click to view full resolution";
-    thumb.onclick = () => openReviewLightbox(it);
+    img.decoding = "async";
+    img.alt = "";
+    img.src = reviewImgUrl(it, REVIEW_THUMB_W, false);
+    th.appendChild(img);
   } else {
-    thumb.appendChild(el("div", "reviewThumbNote", it.is_forward
-      ? `Video frame flagged while labeling — not in RAW yet.\n${entry.video || "?"} · frame ${entry.frame_idx != null ? entry.frame_idx + 1 : "?"}`
-      : "RAW image not found (moved or already archived)."));
+    th.textContent = "—";
   }
-  card.appendChild(thumb);
+  row.appendChild(th);
+  const txt = el("div", "reviewRowText");
+  txt.appendChild(el("div", "reviewRowClass", it.class_name || "(forward frame)"));
+  const sub = el("div", "reviewRowSub");
+  sub.appendChild(el("span", `reviewSource src-${it.entry.source || "none"}`, it.entry.source || "no source"));
+  sub.appendChild(document.createTextNode(it.pool));
+  txt.appendChild(sub);
+  row.appendChild(txt);
+  row.onclick = () => showReviewItem(i, {scrollList: false});
+  return row;
+}
 
-  const body = el("div", "reviewBody");
+// Touch ONE row after a decision (class colour + nothing else). No list rebuild.
+function updateReviewRow(it) {
+  const i = review.view.indexOf(it);
+  const row = review.rows.get(i);
+  if (row) row.className = reviewRowClass(it, i);
+}
+
+function scrollReviewListTo(i) {
+  const list = $("reviewList");
+  const top = i * REVIEW_ROW_H, bottom = top + REVIEW_ROW_H;
+  if (top < list.scrollTop) list.scrollTop = top;
+  else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+}
+
+// ---- big image + bboxes ----
+function clearReviewBoxes() {
+  $("reviewStage").querySelectorAll(".reviewBox").forEach(n => n.remove());
+}
+
+// Successor of renderBoxesOverImage for the viewer: scales by the image's own naturalWidth /
+// naturalHeight inside the object-fit:contain letterbox of the stage. Always clears first.
+function drawReviewBoxes(it) {
+  const stage = $("reviewStage"), img = $("reviewMainImg");
+  clearReviewBoxes();
+  if (!img.naturalWidth || !img.naturalHeight) return;
+  const W = stage.clientWidth, H = stage.clientHeight;
+  const s = Math.min(W / img.naturalWidth, H / img.naturalHeight);
+  const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
+  const ox = (W - dw) / 2, oy = (H - dh) / 2;
+  for (const b of it.boxes || []) {
+    const bx = el("div", "reviewBox");
+    bx.style.left = `${ox + (b.xc - b.w / 2) * dw}px`;
+    bx.style.top = `${oy + (b.yc - b.h / 2) * dh}px`;
+    bx.style.width = `${b.w * dw}px`;
+    bx.style.height = `${b.h * dh}px`;
+    bx.appendChild(el("span", null, b.class_name));
+    stage.appendChild(bx);
+  }
+}
+
+function preloadReviewImage(i) {
+  const it = review.view[i];
+  if (it && it.raw_exists) new Image().src = reviewImgUrl(it, REVIEW_MAIN_W, review.fullRes);
+}
+
+function showReviewItem(i, opts) {
+  const n = review.view.length;
+  if (n && i >= 0) i = Math.min(i, n - 1);
+  const prevIdx = review.idx;
+  review.idx = n ? i : -1;
+  const token = ++review.token;         // any onload from an earlier item is now stale
+  const stage = $("reviewStage"), img = $("reviewMainImg");
+  clearReviewBoxes();                   // no ghost, even for the frames before the new image is ready
+  img.onload = img.onerror = null;
+
+  // side-list highlight (only the two touched rows) + keep the current row on screen
+  if (prevIdx >= 0) { const r = review.rows.get(prevIdx); if (r) r.classList.remove("current"); }
+  if (opts && opts.scrollList && review.idx >= 0) scrollReviewListTo(review.idx);
+  if (review.idx >= 0) {
+    if (!(opts && opts.scrollList)) { /* click in the list: row is already visible */ }
+    else renderReviewWindow();
+    const r = review.rows.get(review.idx); if (r) r.classList.add("current");
+  }
+  updateReviewCounter();
+
+  const it = review.view[review.idx];
+  $("reviewNote").textContent = "";
+  if (!it) {
+    img.removeAttribute("src");
+    stage.classList.remove("loading");
+    renderReviewInfo(null);
+    return;
+  }
+  renderReviewInfo(it);
+  if (!it.raw_exists) {
+    img.removeAttribute("src");
+    stage.classList.remove("loading");
+    $("reviewNote").textContent = it.is_forward
+      ? `Video frame flagged while labeling — not in RAW yet.\n${it.entry.video || "?"} · frame ${it.entry.frame_idx != null ? it.entry.frame_idx + 1 : "?"}`
+      : "RAW image not found (moved or already archived).";
+    return;
+  }
+  stage.classList.add("loading");
+  const key = reviewKey(it);
+  img.onload = () => {
+    if (token !== review.token || key !== reviewKey(review.view[review.idx] || {pool: "", image_key: ""})) return;
+    stage.classList.remove("loading");
+    drawReviewBoxes(it);
+  };
+  img.onerror = () => {
+    if (token !== review.token) return;
+    stage.classList.remove("loading");
+    $("reviewNote").textContent = "Could not load this image.";
+  };
+  img.src = reviewImgUrl(it, REVIEW_MAIN_W, review.fullRes);
+  if (img.complete && img.naturalWidth) img.onload();   // already-cached image: don't depend on a load event that may not fire
+  preloadReviewImage(review.idx + 1);
+  preloadReviewImage(review.idx - 1);
+}
+
+function stepReview(delta) {
+  if (!review.view.length) return;
+  const j = review.idx + delta;
+  if (j < 0 || j >= review.view.length) return;
+  showReviewItem(j, {scrollList: true});
+}
+
+// ---- info panel: class/pool, source, FULL comment, short reason, buttons, metrics ----
+function reviewReasonParts(it) {
+  // describe_reason() appends the comment as ` — “comment”`; the comment gets its own big block,
+  // so strip it here and shorten what is left (full text stays in the tooltip).
+  let r = it.reason || "";
+  const c = (it.entry.comment || "").trim();
+  const tail = c ? `“${c}”` : "";
+  if (tail && r.endsWith(tail)) r = r.slice(0, r.length - tail.length).replace(/\s*—\s*$/, "");
+  const short = r.split(" (")[0];
+  return {short: short.length > 110 ? short.slice(0, 107) + "…" : short, full: it.reason || ""};
+}
+
+function renderReviewInfo(it) {
+  const info = $("reviewInfo");
+  info.innerHTML = "";
+  if (!it) return;
+  const entry = it.entry;
+  const decision = entry.owner_decision || null;
+
+  const left = el("div", "reviewInfoLeft");
   const where = el("div", "reviewWhere");
   where.appendChild(el("span", `reviewSource src-${entry.source || "none"}`, entry.source || "no source"));
   where.appendChild(document.createTextNode(`${it.pool} · ${it.class_name || "(forward frame)"}`));
-  body.appendChild(where);
-  body.appendChild(el("div", "reviewFile", it.filename));
-  body.appendChild(it.reason_missing
-    ? el("div", "reviewReason missing", "No reason recorded — invalid flag entry (neither category nor signal)")
-    : el("div", "reviewReason", it.reason));
-  if (it.is_forward && (entry.annotation_classes || []).length) {
-    body.appendChild(el("div", "reviewMeta", `Labeled as: ${entry.annotation_classes.join(", ")}`));
+  left.appendChild(where);
+  left.appendChild(el("div", "reviewFile", it.filename));
+  const cm = (entry.comment || "").trim();
+  left.appendChild(cm ? el("div", "reviewComment", cm) : el("div", "reviewComment empty", "(no comment)"));
+  if (it.reason_missing) {
+    left.appendChild(el("div", "reviewReason missing", "No reason recorded — invalid flag entry (neither category nor signal)"));
+  } else {
+    const rp = reviewReasonParts(it);
+    const r = el("div", "reviewReason", rp.short);
+    r.title = rp.full;
+    left.appendChild(r);
   }
-  body.appendChild(el("div", "reviewMeta", `Flagged ${entry.flagged_at || "?"} by ${entry.flagged_by || "?"}`));
-  body.appendChild(el("div", "reviewDecision",
+  if (it.is_forward && (entry.annotation_classes || []).length) {
+    left.appendChild(el("div", "reviewMeta", `Labeled as: ${entry.annotation_classes.join(", ")}`));
+  }
+  left.appendChild(el("div", "reviewMeta", `Flagged ${entry.flagged_at || "?"} by ${entry.flagged_by || "?"}`));
+  left.appendChild(el("div", "reviewDecision",
     decision ? `Decision: ${REVIEW_DECISION_LABELS[decision] || decision} (${entry.owner_decision_at || ""})` : "Decision: pending"));
-  body.appendChild(renderMetricsSection(it));
-  card.appendChild(body);
+  info.appendChild(left);
 
+  const right = el("div", "reviewInfoRight");
   const actions = el("div", "reviewActions");
   const busy = review.busy.has(reviewKey(it));
-  const mk = (label, value, activeCls) => {
+  const mk = (label, value, activeCls, hint) => {
     const b = el("button", "btn" + (decision === value && activeCls ? ` ${activeCls}` : ""), label);
     b.disabled = busy || decision === value;
-    b.onclick = () => setReviewDecision(it, value);
+    b.title = hint || "";
+    b.onclick = () => { b.blur(); setReviewDecision(it, value); };
     return b;
   };
-  actions.appendChild(mk("Approve delete", "approve_delete", "active-delete"));
-  actions.appendChild(mk("Keep", "keep", "active-keep"));
-  if (decision) actions.appendChild(mk("Undo", null, null));
-  card.appendChild(actions);
-  return card;
+  actions.appendChild(mk("Approve delete (D)", "approve_delete", "active-delete", "Approve deleting this image from RAW (D)"));
+  actions.appendChild(mk("Keep (K)", "keep", "active-keep", "Keep this image (K)"));
+  if (decision) actions.appendChild(mk("Undo", null, null, "Clear the decision"));
+  right.appendChild(actions);
+  const fr = el("button", "btn reviewFullResBtn", review.fullRes ? "Full res: on" : "Full res: off");
+  fr.title = "Load the original-resolution image instead of the 1600 px one";
+  fr.onclick = () => { fr.blur(); review.fullRes = !review.fullRes; showReviewItem(review.idx, {scrollList: false}); };
+  right.appendChild(fr);
+  right.appendChild(renderMetricsSection(it));
+  info.appendChild(right);
 }
 
+// One decision: POST as before, patch ONE row, then move on to the next item. The list is NOT
+// rebuilt and the decided item stays in it (marked) until a filter change / Refresh.
 async function setReviewDecision(it, decision) {
   const k = reviewKey(it);
   if (review.busy.has(k)) return;
+  if (decision !== null && it.entry.owner_decision === decision) {   // already decided this way: no re-write, just move on
+    if (review.view[review.idx] === it) stepReview(1);
+    return;
+  }
   review.busy.add(k);
-  renderReviewGrid();
+  if (review.view[review.idx] === it) renderReviewInfo(it);   // disable buttons while in flight
+  let ok = false;
   try {
     const r = await fetch("/api/review/decision", {
       method: "POST",
@@ -2108,27 +2283,34 @@ async function setReviewDecision(it, decision) {
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
     it.entry = data.entry;
+    ok = true;
     $("reviewErrors").textContent = "";
   } catch (e) {
     $("reviewErrors").textContent = `Could not save the decision for ${it.pool}/${it.image_key}: ${e.message}`;
   } finally {
     review.busy.delete(k);
-    renderReviewGrid();
+  }
+  updateReviewRow(it);
+  updateReviewCounter();
+  const stillHere = review.view[review.idx] === it;
+  if (ok && stillHere && decision !== null && review.idx < review.view.length - 1) {
+    stepReview(1);                      // auto-advance (not after Undo, not past the last item)
+  } else if (stillHere) {
+    renderReviewInfo(it);
   }
 }
 
 // MDQ-7: review queue per-image comparison metrics — bbox area/aspect ratio, hue/saturation,
 // embedding distance from the class centroid, each as a badge (normal/moderate/large deviation)
 // PLUS the raw number next to it (never a bare badge). Fetched on click, one image at a time,
-// never for the whole grid — mutates just this card's own metrics container, no grid re-render
-// (a full re-render would also re-fetch every thumbnail image on screen).
+// never for the whole queue — mutates just this image's own metrics container.
 
 function renderMetricsSection(it) {
   const wrap = el("div", "reviewMetrics");
   const cached = review.metrics.get(reviewKey(it));
   if (cached === undefined) {
     const btn = el("button", "btn reviewMetricsBtn", "Show metrics");
-    btn.onclick = () => loadMetricsForCard(it, wrap);
+    btn.onclick = () => { btn.blur(); loadMetricsForCard(it, wrap); };
     wrap.appendChild(btn);
   } else if (cached === "loading") {
     wrap.appendChild(el("div", "reviewMetricsNote", "Loading metrics…"));
@@ -2195,24 +2377,36 @@ function installReviewPanel() {
   $("reviewCloseBtn").onclick = closeReviewPanel;
   $("reviewRefreshBtn").onclick = loadReviewQueue;
   for (const id of ["reviewSourceFilter", "reviewPoolFilter", "reviewDecisionFilter", "reviewSort"]) {
-    $(id).onchange = renderReviewGrid;
+    $(id).onchange = () => { $(id).blur(); rebuildReviewView(); };   // blur: arrows must page, not change the select
   }
-  $("reviewLightboxClose").onclick = closeReviewLightbox;
-  $("reviewLightbox").addEventListener("mousedown", (e) => {
-    if (e.target === $("reviewLightbox")) closeReviewLightbox();
+  $("reviewList").addEventListener("scroll", renderReviewWindow, {passive: true});
+  $("reviewPrevBtn").onclick = () => stepReview(-1);
+  $("reviewNextBtn").onclick = () => stepReview(1);
+  // Recompute bbox placement whenever the stage changes size (window resize, layout shifts).
+  review.ro = new ResizeObserver(() => {
+    const it = review.view[review.idx];
+    const img = $("reviewMainImg");
+    if (review.open && it && img.complete && img.naturalWidth) drawReviewBoxes(it);
   });
+  review.ro.observe($("reviewStage"));
 }
 
 function installHotkeys() {
   window.addEventListener("keydown", async (e) => {
-    // The lightbox sits on top of the review queue; its own Esc must win over the queue's.
-    if (review.lightbox) {
-      if (e.key === "Escape") { e.preventDefault(); closeReviewLightbox(); }
-      return;
-    }
     // The review queue covers the whole screen: no labeling/browsing hotkey may act behind it.
+    // Its own keys: Left/Right = prev/next, K = keep, D = approve delete, Esc = close (writes nothing).
+    // Ignored while typing/in a <select>, with modifiers held, and (for K/D) on key auto-repeat so a
+    // held key can't stamp a decision on a run of images.
     if (review.open) {
-      if (e.key === "Escape") { e.preventDefault(); closeReviewPanel(); }
+      if (e.key === "Escape") { e.preventDefault(); closeReviewPanel(); return; }
+      if (isTypingTarget(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === "ArrowLeft") { e.preventDefault(); stepReview(-1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); stepReview(1); }
+      else if ((e.key === "k" || e.key === "K" || e.key === "d" || e.key === "D") && !e.repeat) {
+        e.preventDefault();
+        const it = review.view[review.idx];
+        if (it) setReviewDecision(it, (e.key === "k" || e.key === "K") ? "keep" : "approve_delete");
+      }
       return;
     }
     if (state.modalOpen) {
