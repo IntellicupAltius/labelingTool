@@ -526,6 +526,7 @@ const state = {
   flagExisting: null,
   lastFlagPool: null,
   rawImageKey: null,     // "<class>/<filename>" of the RAW image on screen
+  relabelNote: null,     // relabel-batch note of the current Dataset Fixer image (MDQ-15c-2)
   rawFlag: null,         // existing flag entry of that image, if any
 };
 
@@ -594,6 +595,7 @@ function resetWorkspaceUI(message) {
   renderCaseInfoBanner();
   state.rawImageKey = null;
   state.rawFlag = null;
+  state.relabelNote = null;
   closeFlagPanel();
   updateFlagBadge();
 
@@ -857,6 +859,9 @@ async function refreshLists() {
     if (state.rawLoaded) {
       state.rawImageKey = data.image_key || null;
       state.rawFlag = data.flag || null;
+      updateFlagBadge();
+    } else {
+      state.relabelNote = data.relabel_note || null;   // MDQ-15c-2: owner's relabel comment in a relabel batch
       updateFlagBadge();
     }
     let tagsData = {frame_tags: [], bbox_tags: {}, bbox_variations: {}};
@@ -1694,6 +1699,12 @@ function updateFlagBadge() {
   const el = document.getElementById("flagBadge");
   if (!el) return;
   const f = (state.mode === "dataset" && state.rawLoaded) ? state.rawFlag : null;
+  const rn = (state.mode === "dataset" && !state.rawLoaded && state.datasetLoaded) ? state.relabelNote : null;
+  if (rn) {
+    el.textContent = `⚑ RELABEL — ${rn.comment || "(no comment)"}  [${rn.image_key}]`;
+    el.style.display = "block";
+    return;
+  }
   if (!f) {
     el.style.display = "none";
     el.textContent = "";

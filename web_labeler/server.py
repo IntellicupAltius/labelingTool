@@ -58,6 +58,7 @@ from web_labeler.background_labeler import (
     sanitize_part,
 )
 from web_labeler import analyzer as _analyzer
+from web_labeler import relabel_batch as _relabel_batch
 from web_labeler import flag_store as _flags
 from web_labeler import image_metrics as _metrics
 from web_labeler import camera_roi as _camroi
@@ -302,7 +303,7 @@ def create_app() -> FastAPI:
 
             # allow overriding only some keys
             merged = dict(default_cfg)
-            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir", "existing_datasets_dir", "raw_base_path", "raw_review_dir"):
+            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir", "existing_datasets_dir", "raw_base_path", "raw_review_dir", "relabel_batches_dir"):
                 if isinstance(cfg.get(k), str) and cfg.get(k).strip():
                     merged[k] = cfg[k].strip()
             if isinstance(cfg.get("bar_counter_options"), list) and cfg.get("bar_counter_options"):
@@ -376,6 +377,23 @@ def create_app() -> FastAPI:
         logger.error("Flagging disabled: %s", e)
         flag_store = FlagStore(None)
     logger.info("Flagging available: %s (%s)", flag_store.available, flag_store.root)
+
+    # MDQ-15c-2: relabel batches (copies of RAW images + labels for Goca to correct in the Dataset
+    # Fixer) live in their own folder outside RAW; never allowed to be inside/contain the RAW tree.
+    _rb_cfg = (os.getenv("LABELER_RELABEL_BATCHES_DIR") or cfg.get("relabel_batches_dir") or "").strip()
+    if _rb_cfg:
+        relabel_batches_dir: Optional[Path] = Path(_rb_cfg).expanduser().resolve()
+    elif Path("/opt/intellicup/datasets").is_dir():
+        relabel_batches_dir = Path("/opt/intellicup/datasets/relabel_batches")
+    else:
+        relabel_batches_dir = None
+    if relabel_batches_dir is not None and raw_base_path is not None:
+        try:
+            _relabel_batch.check_batches_dir(relabel_batches_dir, raw_base_path)
+        except _relabel_batch.RelabelBatchError as e:
+            logger.error("Relabel batches disabled: %s", e)
+            relabel_batches_dir = None
+    logger.info("Relabel batches dir: %s", relabel_batches_dir)
 
     debug = os.getenv("LABELER_DEBUG", "").strip() not in ("", "0", "false", "False")
     logging.basicConfig(level=(logging.DEBUG if debug else logging.INFO))
@@ -593,9 +611,21 @@ def create_app() -> FastAPI:
         return class_variations
 
     # ---------------- Dataset Fixer API ----------------
+    RELABEL_PREFIX = "relabel/"     # dataset name of a relabel batch: relabel/<pool>/<batch_id>
+
+    def _relabel_batch_names() -> List[str]:
+        if relabel_batches_dir is None:
+            return []
+        try:
+            return [f"{RELABEL_PREFIX}{pool}/{bid}" for pool, bid, _d, _m in _relabel_batch.list_batches(relabel_batches_dir)]
+        except _relabel_batch.RelabelBatchError as e:
+            logger.error("Relabel batch listing failed: %s", e)
+            return []
+
     @app.get("/api/datasets")
     def datasets_list():
-        return {"datasets_dir": str(datasets_dir), "datasets": list_dataset_folders(datasets_dir)}
+        return {"datasets_dir": str(datasets_dir),
+                "datasets": list_dataset_folders(datasets_dir) + _relabel_batch_names()}
 
     # ---------------- Raw Dataset API ----------------
 
@@ -1295,10 +1325,30 @@ def create_app() -> FastAPI:
         names = state.model_to_names.get(req.model)
         if not names:
             raise HTTPException(status_code=400, detail="Invalid model")
-        ds_path = (datasets_dir / req.dataset_name).resolve()
-        if ds_path.parent != datasets_dir or not ds_path.exists():
-            raise HTTPException(status_code=404, detail="Dataset not found")
+        relabel_items: Dict[str, dict] = {}
+        if req.dataset_name.startswith(RELABEL_PREFIX):
+            # MDQ-15c-2 relabel batch: a copy outside RAW. Must be for this model, in the model's class order.
+            parts = req.dataset_name[len(RELABEL_PREFIX):].split("/")
+            if relabel_batches_dir is None or len(parts) != 2:
+                raise HTTPException(status_code=404, detail="Dataset not found")
+            try:
+                ds_path = _relabel_batch.resolve_batch(relabel_batches_dir, parts[0], parts[1], raw_base_path)
+                man = _relabel_batch.read_manifest(ds_path)
+            except _relabel_batch.RelabelBatchError as e:
+                raise HTTPException(status_code=404, detail=str(e))
+            if req.model.lower() != parts[0]:
+                raise HTTPException(status_code=400, detail=f"This relabel batch is for the '{parts[0]}' model, not '{req.model}'")
+            if man.get("class_names") != list(names):
+                raise HTTPException(status_code=400, detail="Class order of this relabel batch differs from the model's classes; refusing to load (boxes would get wrong names)")
+            relabel_items = {it["item_name"]: it for it in man["items"] if it.get("item_name")}
+        else:
+            ds_path = (datasets_dir / req.dataset_name).resolve()
+            if ds_path.parent != datasets_dir or not ds_path.exists():
+                raise HTTPException(status_code=404, detail="Dataset not found")
+        if raw_base_path is not None and (ds_path == raw_base_path or raw_base_path in ds_path.parents or ds_path in raw_base_path.parents):
+            raise HTTPException(status_code=400, detail="Dataset Fixer must never be opened over the RAW tree")
         dataset_session = load_dataset_session(ds_path, model=req.model, class_names=names)
+        dataset_session.relabel_items = relabel_items
         test_mode = False
         mismatch = (req.model.lower() not in req.dataset_name.lower())
         return {
@@ -1337,7 +1387,15 @@ def create_app() -> FastAPI:
             "annotations": [ann_to_dict(a) for a in anns],
             "is_background": is_background,
             "is_deleted": is_deleted,
+            "relabel_note": _relabel_note(dataset_session, idx),
         }
+
+    def _relabel_note(sess: DatasetSession, idx: int) -> Optional[dict]:
+        it = sess.relabel_items.get(sess.image_name(idx)) if sess.relabel_items else None
+        if not it:
+            return None
+        return {"comment": it.get("comment") or "", "image_key": it.get("image_key"), "flag_source": it.get("flag_source"),
+                "copies": len(it.get("raw_paths") or [])}
 
     @app.post("/api/datasets/annotations")
     def datasets_add_annotation(req: DatasetAddAnnRequest = Body(...)):

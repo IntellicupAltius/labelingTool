@@ -39,6 +39,7 @@ class DatasetSession:
     background_images: set[int] = field(default_factory=set)
     deleted_images: set[int] = field(default_factory=set)  # image indices marked for deletion
     image_tags: Dict[int, Dict] = field(default_factory=dict)  # image idx → {frame_tags: [], bbox_tags: {ann_id: []}}
+    relabel_items: Dict[str, Dict] = field(default_factory=dict)  # MDQ-15c-2 relabel batch: image file name → manifest item
 
     def new_id(self) -> str:
         return uuid.uuid4().hex
