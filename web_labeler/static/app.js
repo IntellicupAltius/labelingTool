@@ -1679,7 +1679,7 @@ function installCanvasHandlers() {
 // ── Flag panel (MDQ-3) ─────────────────────────────────────────────────────
 const FLAG_POOLS = ["glasses", "bottles", "cups", "pitchers", "shots"];
 const FLAG_CATEGORIES = [
-  {key: "gibberish", label: "Gibberish",
+  {key: "gibberish", label: "Gibberish", shortcut: "X",
    hint: "Blur / out of focus so strong that even a person cannot tell the class."},
   {key: "wrong_frame_wrong_class", label: "Wrong frame, wrong class",
    hint: "The image is clearly NOT the declared class, regardless of image quality."},
@@ -1835,19 +1835,22 @@ function selectFlagCategory(key) {
   renderFlagPanel();
 }
 
-async function saveFlag() {
+// `opts.category` / `opts.comment` override the panel state (used by the X-X quick gibberish flag, which
+// must be identical to clicking Gibberish with an empty comment).
+async function saveFlag(opts) {
   const t = state.flagTarget;
   if (!t || !flagCanSave(state.flagExisting)) return;
-  if (!state.flagCategory) { showFlagError("Pick a reason first (keys 1–4)."); return; }
-  const comment = $("flagComment").value;
+  const category = (opts && opts.category) || state.flagCategory;
+  if (!category) { showFlagError("Pick a reason first (keys 1–4)."); return; }
+  const comment = (opts && opts.comment !== undefined) ? opts.comment : $("flagComment").value;
   try {
     let res;
     if (t.kind === "raw") {
-      res = await api.rawFlagSet(t.imageKey, t.pool, state.flagCategory, comment);
+      res = await api.rawFlagSet(t.imageKey, t.pool, category, comment);
       state.rawFlag = res.entry;
       updateFlagBadge();
     } else {
-      res = await api.frameFlagSet(t.pool, t.frameIdx, state.flagCategory, comment);
+      res = await api.frameFlagSet(t.pool, t.frameIdx, category, comment);
     }
     state.lastFlagPool = t.pool;
     closeFlagPanel();
@@ -1885,7 +1888,7 @@ function installFlagPanel() {
     b.dataset.cat = c.key;
     const name = document.createElement("div");
     name.className = "flagCatName";
-    name.textContent = `${i + 1} · ${c.label}`;
+    name.textContent = `${i + 1} · ${c.label}${c.shortcut ? ` [${c.shortcut}]` : ""}`;
     const hint = document.createElement("div");
     hint.className = "flagCatHint";
     hint.textContent = c.hint;
@@ -2720,6 +2723,11 @@ function installHotkeys() {
       const typing = isTypingTarget(e.target);
       if (e.key === "Escape") { e.preventDefault(); closeFlagPanel(); }
       else if (e.key === "Enter" && (e.ctrlKey || e.metaKey || !typing)) { e.preventDefault(); await saveFlag(); }
+      // X again while the panel is open = instant gibberish flag, no comment (X is a plain character in the comment field).
+      else if ((e.key === "x" || e.key === "X") && !typing && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        await saveFlag({category: "gibberish", comment: ""});
+      }
       else if (!typing && FLAG_CATEGORIES.some((_c, i) => e.key === String(i + 1))) {
         e.preventDefault();
         selectFlagCategory(FLAG_CATEGORIES[parseInt(e.key, 10) - 1].key);
