@@ -25,7 +25,9 @@ only decision that adds a field: the optional ``relabel_snapshot`` object
 (``image_sha256`` / ``label_sha256`` (null when the image has no label file) / ``recorded_at``) —
 the sha256 of the RAW image and label at the moment of the decision, so the later apply step
 (MDQ-15c-3) can refuse to act if the original changed in the meantime. Changing the decision to
-anything else, or undoing it, drops the snapshot. Old sidecars carry neither the decision nor the
+anything else, or undoing it, drops the snapshot. MDQ-15c-3 adds a second optional field,
+``relabel_result`` (``{"status": "applied"|"unchanged", "at", "batch_id", "apply_run"}``), set by
+``apply_relabel.py`` when the correction was applied to RAW or found unchanged (nothing to apply). Old sidecars carry neither the decision nor the
 field and are read unchanged (``schema_version`` stays 1).
 
 Every entry must carry a ``category`` or a ``signal`` (never an empty reason).
@@ -433,6 +435,37 @@ class FlagStore:
                 entry.pop("relabel_snapshot", None)
             self._write(pool, doc)
         return dict(entry)
+
+    def set_relabel_result(self, pool: str, image_key: str, result: dict) -> dict:
+        """MDQ-15c-3: record that the relabel decision was resolved by ``apply_relabel.py``.
+
+        Adds the optional ``relabel_result`` object (``status`` ``"applied"`` | ``"unchanged"``,
+        ``at``, ``batch_id``, ``apply_run``). ``owner_decision`` / ``relabel_snapshot`` and the rest
+        of the entry are not touched, the entry is never removed. Old sidecars carry no such field.
+        """
+        pool = normalize_pool(pool)
+        if not isinstance(result, dict) or result.get("status") not in ("applied", "unchanged"):
+            raise FlagValidationError("relabel_result.status must be 'applied' or 'unchanged'")
+        with self._locked(pool):
+            doc = self._read(pool)
+            entry = doc["entries"].get(image_key)
+            if entry is None:
+                raise FlagNotFound(f"no flag for {pool}/{image_key}")
+            entry["relabel_result"] = {**result, "at": result.get("at") or _now()}
+            self._write(pool, doc)
+        return dict(entry)
+
+    def clear_relabel_result(self, pool: str, image_key: str) -> bool:
+        """Remove ``relabel_result`` (rollback of an apply). True if there was one."""
+        pool = normalize_pool(pool)
+        with self._locked(pool):
+            doc = self._read(pool)
+            entry = doc["entries"].get(image_key)
+            if entry is None or "relabel_result" not in entry:
+                return False
+            entry.pop("relabel_result")
+            self._write(pool, doc)
+        return True
 
 
 def describe_reason(entry: dict) -> Optional[str]:
