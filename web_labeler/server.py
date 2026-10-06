@@ -58,6 +58,7 @@ from web_labeler.background_labeler import (
     sanitize_part,
 )
 from web_labeler import analyzer as _analyzer
+from web_labeler import class_docs
 from web_labeler import relabel_batch as _relabel_batch
 from web_labeler import flag_store as _flags
 from web_labeler import image_metrics as _metrics
@@ -1913,6 +1914,17 @@ def create_app() -> FastAPI:
         if names is None:
             raise HTTPException(status_code=404, detail="Model not found")
         return {"model": model_name, "classes": names}
+
+    @app.get("/api/model/{model_name}/picker-classes")
+    def get_model_picker_classes(model_name: str):
+        """Classes offered in the class picker (LR-3/LR-4): documented-excluded ones left out, short
+        description attached. Display only - the model's own class list (ids) is untouched."""
+        if not state.model_to_names:
+            refresh_models()
+        names = state.model_to_names.get(model_name)
+        if names is None:
+            raise HTTPException(status_code=404, detail="Model not found")
+        return {"model": model_name, "classes": class_docs.picker_classes(model_name, names)}
 
     @app.post("/api/video/load")
     def load_video(req: LoadVideoRequest):

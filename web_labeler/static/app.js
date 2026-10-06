@@ -222,6 +222,12 @@ const api = {
       return r.json();
     });
   },
+  async getPickerClasses(modelName) {
+    return fetch(`/api/model/${encodeURIComponent(modelName)}/picker-classes`).then(async r => {
+      if (!r.ok) throw new Error((await r.json()).detail || "Failed to load classes");
+      return r.json();
+    });
+  },
   async getFrame(index) {
     const r = await fetch(`/api/frame?index=${index}`);
     if (!r.ok) throw new Error((await r.json()).detail || "Frame fetch failed");
@@ -1530,11 +1536,21 @@ async function refreshModalClasses() {
   const model = $("modalModelSelect").value;
   state.modalModel = model;
   try {
-    const data = await api.getClasses(model);
-    state.modalClasses = data.classes || [];
+    // LR-3/LR-4: picker list = documented-excluded classes left out + short description. Falls back
+    // to the full model list if the picker endpoint is unavailable (e.g. older server still running).
+    let picked;
+    try {
+      picked = (await api.getPickerClasses(model)).classes || [];
+    } catch (e) {
+      picked = ((await api.getClasses(model)).classes || []).map(n => ({name: n, description: ""}));
+    }
+    state.modalClasses = picked.map(c => c.name);
+    state.modalClassDescs = {};
+    for (const c of picked) state.modalClassDescs[c.name] = c.description || "";
     renderClassList();
   } catch (e) {
     state.modalClasses = [];
+    state.modalClassDescs = {};
     renderClassList();
   }
 }
@@ -1562,6 +1578,14 @@ function renderClassList() {
     const li = document.createElement("li");
     li.className = "classItem" + (state.modalSelectedClass === cls ? " selected" : "");
     li.textContent = cls;
+    li.dataset.cls = cls;
+    const desc = (state.modalClassDescs || {})[cls];
+    if (desc) {
+      const sp = document.createElement("span");
+      sp.className = "classDesc";
+      sp.textContent = " — " + desc;
+      li.appendChild(sp);
+    }
     li.onclick = () => {
       state.modalSelectedClass = cls;
       renderClassList();
@@ -2712,7 +2736,7 @@ function installHotkeys() {
         idx = e.key === "ArrowDown" ? Math.min(items.length - 1, idx + 1) : Math.max(0, idx - 1);
         items.forEach(li => li.classList.remove("selected"));
         items[idx].classList.add("selected");
-        state.modalSelectedClass = items[idx].textContent;
+        state.modalSelectedClass = items[idx].dataset.cls || items[idx].textContent;
         items[idx].scrollIntoView({block: "nearest"});
         e.preventDefault();
       }

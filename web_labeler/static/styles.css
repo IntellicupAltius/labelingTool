@@ -749,3 +749,4 @@ body.peeking #currentList, body.peeking #globalList { opacity: 0.55; cursor: not
 .metricBadge.normal   { background: rgba(45, 212, 191, 0.15); color: var(--accent); }
 .metricBadge.moderate { background: rgba(251, 191, 36, 0.18); color: #fde68a; }
 .metricBadge.large    { background: rgba(248, 113, 113, 0.2); color: var(--danger); }
+.classItem .classDesc { opacity: 0.6; font-size: 0.85em; }
