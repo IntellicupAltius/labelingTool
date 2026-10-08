@@ -6,3 +6,9 @@ __pycache__/
 .DS_Store
 *.bak
 data/videos/
+
+# Owner policy 2026-10-08: Claude Code files, local backups and logs never go to git
+.claude/
+CLAUDE.md
+*.bak_*
+*.log
