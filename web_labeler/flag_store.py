@@ -26,7 +26,7 @@ only decision that adds a field: the optional ``relabel_snapshot`` object
 the sha256 of the RAW image and label at the moment of the decision, so the later apply step
 (MDQ-15c-3) can refuse to act if the original changed in the meantime. Changing the decision to
 anything else, or undoing it, drops the snapshot. MDQ-15c-3 adds a second optional field,
-``relabel_result`` (``{"status": "applied"|"unchanged", "at", "batch_id", "apply_run"}``), set by
+``relabel_result`` (``{"status": "applied"|"unchanged"|"deleted", "at", "batch_id", "apply_run"}``), set by
 ``apply_relabel.py`` when the correction was applied to RAW or found unchanged (nothing to apply). Old sidecars carry neither the decision nor the
 field and are read unchanged (``schema_version`` stays 1).
 
@@ -439,13 +439,13 @@ class FlagStore:
     def set_relabel_result(self, pool: str, image_key: str, result: dict) -> dict:
         """MDQ-15c-3: record that the relabel decision was resolved by ``apply_relabel.py``.
 
-        Adds the optional ``relabel_result`` object (``status`` ``"applied"`` | ``"unchanged"``,
+        Adds the optional ``relabel_result`` object (``status`` ``"applied"`` | ``"unchanged"`` | ``"deleted"``,
         ``at``, ``batch_id``, ``apply_run``). ``owner_decision`` / ``relabel_snapshot`` and the rest
         of the entry are not touched, the entry is never removed. Old sidecars carry no such field.
         """
         pool = normalize_pool(pool)
-        if not isinstance(result, dict) or result.get("status") not in ("applied", "unchanged"):
-            raise FlagValidationError("relabel_result.status must be 'applied' or 'unchanged'")
+        if not isinstance(result, dict) or result.get("status") not in ("applied", "unchanged", "deleted"):
+            raise FlagValidationError("relabel_result.status must be 'applied', 'unchanged' or 'deleted'")
         with self._locked(pool):
             doc = self._read(pool)
             entry = doc["entries"].get(image_key)

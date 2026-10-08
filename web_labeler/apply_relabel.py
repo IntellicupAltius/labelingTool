@@ -18,6 +18,12 @@ Per item, in this order (the first failing check skips the item and reports it b
   3. original current  every RAW copy of the file name (all class folders, also new ones) still equals the
                        snapshot (image sha256; label sha256, a missing label counts as empty) and the set
                        of copies equals the manifest's ``raw_paths``; else ``stale`` (zastarela).
+  3b. zero boxes      the corrected label has NO box: if the Dataset Fixer marked it "background"
+                       (``fixer_decisions.json`` in the batch) it goes on as a normal item (into ``background/``);
+                       otherwise (marked "delete", or NO choice made) it is a DELETE: step 5 archives every copy,
+                       nothing is inserted, sidecar ``relabel_result.status = "deleted"``. Delete is the default
+                       on purpose: a skipped image may still show drinks and must never silently become background.
+                       A "delete"/"background" mark on an image that still has boxes is ``invalid`` (skipped).
   4. not corrected     Dataset Fixer Save re-quantizes ALL labels (~1 px drift), so labels are compared by
                        BOXES: same number of boxes, same class per box, every corner (x1,y1,x2,y2 in
                        pixels) within ``--box-tol-px`` (default 2.0). No difference over the tolerance ->
@@ -151,7 +157,7 @@ class ItemPlan:
     pool: str
     batch_id: str
     item: dict
-    action: str                      # apply | unchanged | done | stale | invalid | missing_corrected
+    action: str                      # apply | delete | unchanged | done | stale | invalid | missing_corrected
     detail: str = ""
     copies: List[dict] = field(default_factory=list)   # [{"cls","img","lab"}] current RAW copies
     corrected_img: Optional[Path] = None
@@ -175,7 +181,8 @@ def _copies(raw_base: Path, pool: str, fname: str) -> List[dict]:
 
 
 def plan_item(pool: str, bdir: Path, man: dict, item: dict, state: dict, store: Optional[flag_store.FlagStore],
-              raw_base: Path, class_names: List[str], iutils, tol_px: float) -> ItemPlan:
+              raw_base: Path, class_names: List[str], iutils, tol_px: float,
+              decisions: Optional[Dict[str, str]] = None) -> ItemPlan:
     from PIL import Image  # local import: only needed here
     name = item["item_name"]
     p = ItemPlan(pool, man["batch_id"], item, "invalid")
@@ -232,6 +239,17 @@ def plan_item(pool: str, bdir: Path, man: dict, item: dict, state: dict, store: 
             p.action, p.detail = "stale", f"{c['cls']}: RAW label changed since the decision"
             return p
 
+    dec = (decisions or {}).get(name)
+    if boxes and dec in (relabel_batch.FIXER_DELETE, relabel_batch.FIXER_BACKGROUND):
+        p.detail = f"marked {dec!r} in the Dataset Fixer but the label still has {len(boxes)} box(es)"
+        return p
+    if not boxes and dec != relabel_batch.FIXER_BACKGROUND:
+        p.corrected_img, p.corrected_lab, p.corrected_boxes = c_img, c_lab, boxes
+        p.action = "delete"
+        p.detail = ("marked Delete" if dec == relabel_batch.FIXER_DELETE
+                    else "0 boxes and no background mark -> Delete (default)")
+        return p
+
     orig_lab = next((c["lab"] for c in copies if c["lab"]), None)
     orig_boxes = read_label_boxes(orig_lab, iutils) if orig_lab else []
     if orig_boxes is None:
@@ -284,6 +302,13 @@ def apply_item(p: ItemPlan, raw_base: Path, archive_dir: Path, dist, class_names
                 record["archived"].append({"from": str(src), "to": str(dst), "sha256": sha256_file(dst)})
         if fail_after == "archive":
             raise ApplyError("test hook: failure after archive")
+        if p.action == "delete":
+            left = [c["cls"] for c in _copies(raw_base, pool, name)]
+            if left:
+                raise ApplyError(f"copies remain after archiving in {left}")
+            if fail_after == "verify":
+                raise ApplyError("test hook: failure after verify")
+            return record
 
         yaml_data = {"nc": len(class_names), "names": class_names}
         dist.RAW_BASE = str(raw_base.parent)
@@ -386,18 +411,19 @@ def process_batch(pool: str, bdir: Path, raw_base: Path, store: Optional[flag_st
                   fail_after: Optional[Dict[str, str]] = None) -> dict:
     """Returns counts ``{applied, unchanged, done, skipped, failed}`` plus ``errors``."""
     man = relabel_batch.read_manifest(bdir)
-    res = {"applied": 0, "unchanged": 0, "done": 0, "skipped": 0, "failed": 0, "errors": []}
+    res = {"applied": 0, "deleted": 0, "unchanged": 0, "done": 0, "skipped": 0, "failed": 0, "errors": []}
     if man.get("pool") != pool:
         raise ApplyError(f"manifest pool {man.get('pool')!r} != folder pool {pool!r}")
     class_names = relabel_batch._raw_class_names(raw_base, pool)
     if class_names != man.get("class_names"):
         raise ApplyError("batch class order differs from RAW data.yaml; boxes would get wrong classes")
     dist, iutils = _load_ingest(ingest_root)
+    decisions = relabel_batch.read_fixer_decisions(bdir)
     archive_dir = archive_root / run_stamp
     with _batch_lock(bdir):
         state = _read_state(bdir)
         out(f"\n[{pool}] batch {man['batch_id']}: {len(man['items'])} item(s)")
-        plans = [plan_item(pool, bdir, man, it, state, store, raw_base, class_names, iutils, tol_px) for it in man["items"]]
+        plans = [plan_item(pool, bdir, man, it, state, store, raw_base, class_names, iutils, tol_px, decisions) for it in man["items"]]
         manifest_rec = {"format_version": 1, "run": run_stamp, "pool": pool, "batch_id": man["batch_id"],
                         "box_tol_px": tol_px, "raw_base_path": str(raw_base), "archive_dir": str(archive_dir),
                         "applied_at": datetime.now().astimezone().isoformat(timespec="seconds"), "items": []}
@@ -418,17 +444,22 @@ def process_batch(pool: str, bdir: Path, raw_base: Path, store: Optional[flag_st
                     _mark(store, pool, p.item, "unchanged", man["batch_id"], run_stamp)
                     manifest_rec["items"].append({"item_name": name, "status": "unchanged"})
                 continue
-            if p.action != "apply":
+            if p.action not in ("apply", "delete"):
                 label = {"stale": "zastarela (stale)"}.get(p.action, p.action)
                 out(f"  - {name}: SKIP [{label}] {p.detail}")
                 res["skipped"] += 1
                 continue
             orig_cls = [c["cls"] for c in p.copies]
-            out(f"  + {name}: ARCHIVE {len(p.copies)} copy(ies) in {orig_cls} -> {archive_dir}")
-            out(f"      INSERT corrected image+label into {p.target_classes}"
-                + ("" if sorted(orig_cls) == sorted(p.target_classes) else f"  (folders differ from the original {orig_cls})"))
+            is_del = p.action == "delete"
+            kind = "deleted" if is_del else "applied"
+            if is_del:
+                out(f"  x {name}: DELETE ({p.detail}): ARCHIVE {len(p.copies)} copy(ies) in {orig_cls} -> {archive_dir}, nothing inserted")
+            else:
+                out(f"  + {name}: ARCHIVE {len(p.copies)} copy(ies) in {orig_cls} -> {archive_dir}")
+                out(f"      INSERT corrected image+label into {p.target_classes}"
+                    + ("" if sorted(orig_cls) == sorted(p.target_classes) else f"  (folders differ from the original {orig_cls})"))
             if not apply:
-                res["applied"] += 1
+                res[kind] += 1
                 continue
             try:
                 rec = apply_item(p, raw_base, archive_dir, dist, class_names, (fail_after or {}).get(name))
@@ -438,14 +469,16 @@ def process_batch(pool: str, bdir: Path, raw_base: Path, store: Optional[flag_st
                 res["errors"].append(str(e))
                 manifest_rec["items"].append({"item_name": name, "status": "failed", "error": str(e)})
                 continue
-            res["applied"] += 1
-            rec["status"] = "applied"
+            res[kind] += 1
+            rec["status"] = kind
+            if is_del:
+                rec["delete_reason"] = p.detail
             manifest_rec["items"].append(rec)
             archive_dir.mkdir(parents=True, exist_ok=True)
             _atomic_json(archive_dir / f"{APPLY_MANIFEST}", _merge_manifest(archive_dir, manifest_rec))
-            state[name] = {"status": "applied", "run": run_stamp, "at": rec_time()}
+            state[name] = {"status": kind, "run": run_stamp, "at": rec_time()}
             _write_state(bdir, state)
-            _mark(store, pool, p.item, "applied", man["batch_id"], run_stamp)
+            _mark(store, pool, p.item, kind, man["batch_id"], run_stamp)
             out(f"    ok: archived {len(rec['archived'])} file(s), inserted {len(rec['inserted'])} file(s)")
         if apply and manifest_rec["items"]:
             archive_dir.mkdir(parents=True, exist_ok=True)
@@ -493,7 +526,7 @@ def rollback_run(run_stamp: str, archive_root: Path, batches_dir: Path, store: O
         out(f"\n[{pool}] rollback of {batch_id} (run {run_stamp})")
         state = _read_state(bdir) if bdir.is_dir() else {}
         for rec in b["items"]:
-            if rec.get("status") not in ("applied", "unchanged"):
+            if rec.get("status") not in ("applied", "unchanged", "deleted"):
                 continue
             name = rec["item_name"]
             if rec["status"] == "unchanged":
@@ -585,7 +618,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             r = process_batch(pool, bdir, raw_base, store, args.archive_root, run_stamp, args.box_tol_px,
                               args.ingest_root, args.apply)
             failed += r["failed"]
-            print(f"  => {'applied' if args.apply else 'would apply'} {r['applied']}, unchanged {r['unchanged']}, "
+            print(f"  => {'applied' if args.apply else 'would apply'} {r['applied']}, "
+                  f"{'deleted' if args.apply else 'would delete'} {r['deleted']}, unchanged {r['unchanged']}, "
                   f"already done {r['done']}, skipped {r['skipped']}, failed {r['failed']}")
         return 1 if failed else 0
     except (ApplyError, relabel_batch.RelabelBatchError, flag_store.FlagError, ValueError) as e:

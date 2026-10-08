@@ -163,6 +163,12 @@ def save_dataset_session(sess: DatasetSession, strategy: str) -> Path:
     strategy = (strategy or "").lower().strip()
     if strategy not in ("overwrite", "create_new"):
         raise ValueError("strategy must be overwrite or create_new")
+    # Relabel batch (MDQ-15c-2): only overwrite, and Delete never removes files here. The Delete /
+    # Background marks are written by the server to the batch's fixer_decisions.json and acted on
+    # by apply_relabel.py (Delete = archive every RAW copy).
+    relabel = bool(sess.relabel_items)
+    if relabel and strategy != "overwrite":
+        raise ValueError("a relabel batch can only be saved with overwrite")
 
     if strategy == "overwrite":
         out_path = sess.dataset_path
@@ -187,9 +193,9 @@ def save_dataset_session(sess: DatasetSession, strategy: str) -> Path:
             except Exception:
                 shutil.copy2(src, dst)
 
-    # Write labels (skip deleted images)
+    # Write labels (skip deleted images; a relabel batch keeps them, with their (empty) label)
     for i, img_path in enumerate(sess.img_files):
-        if i in sess.deleted_images:
+        if i in sess.deleted_images and not relabel:
             continue  # skip deleted images
         w, h = sess.img_sizes[i]
         anns = sess.ann_by_image.get(i, [])
@@ -199,7 +205,7 @@ def save_dataset_session(sess: DatasetSession, strategy: str) -> Path:
                 fp.write(_xyxy_to_yolo(a.class_id, a.x1, a.y1, a.x2, a.y2, w, h) + "\n")
 
     # Delete images and labels marked for deletion (only when overwriting)
-    if strategy == "overwrite" and sess.deleted_images:
+    if strategy == "overwrite" and sess.deleted_images and not relabel:
         for i in sess.deleted_images:
             if i >= len(sess.img_files):
                 continue

@@ -321,6 +321,127 @@ class ApplyRelabelTests(unittest.TestCase):
         self.assertEqual(set(doc["entries"]["CAJ/o.png"]["relabel_result"]), {"status", "at", "batch_id", "apply_run"})
 
 
+class ZeroBoxDecisionTests(unittest.TestCase):
+    """Zero boxes in the corrected label: Background only when marked, otherwise Delete (archive every copy)."""
+    setUp = ApplyRelabelTests.setUp
+    tearDown = ApplyRelabelTests.tearDown
+    lbl = ApplyRelabelTests.lbl
+
+    def _two(self, name, color="red"):
+        e = self.e
+        both = "0 0.5 0.5 0.2 0.2\n1 0.2 0.2 0.1 0.1\n"
+        e.put("CAJ", name, img_bytes(color), both)
+        e.put("CAFFE_LATTE", name, img_bytes(color), both)
+        return e.flag("CAJ", name)
+
+    def test_no_choice_is_delete_and_archives_every_copy(self):
+        e = self.e
+        k = self._two("d.png")
+        e.export()
+        e.correct("d.png", "")
+        res, out = e.run(apply=False)
+        self.assertEqual((res["deleted"], res["applied"]), (1, 0))
+        self.assertIn("Delete (default)", out)
+        self.assertEqual(e.where("d.png"), ["CAFFE_LATTE", "CAJ"])     # dry run changes nothing
+        res, _ = e.run()
+        self.assertEqual((res["deleted"], res["failed"]), (1, 0))
+        self.assertEqual(e.where("d.png"), [])
+        arch = e.archive / "20261005_100000_relabel" / POOL
+        for cls in ("CAJ", "CAFFE_LATTE"):
+            self.assertTrue((arch / "images" / cls / "d.png").is_file())
+            self.assertTrue((arch / "labels" / cls / "d.txt").is_file())
+        self.assertEqual(e.store.get(POOL, k)["relabel_result"]["status"], "deleted")
+        self.assertEqual(rb.read_manifest(e.batch)["status"], "applied")
+
+    def test_marked_delete(self):
+        e = self.e
+        e.put("CAJ", "m.png", img_bytes("red"), ORIG)
+        e.flag("CAJ", "m.png")
+        e.export()
+        e.correct("m.png", "")
+        rb.write_fixer_decisions(e.batch, {"m.png": "delete"})
+        res, out = e.run()
+        self.assertEqual(res["deleted"], 1)
+        self.assertIn("marked Delete", out)
+        self.assertEqual(e.where("m.png"), [])
+
+    def test_marked_background_goes_to_background(self):
+        e = self.e
+        e.put("CAJ", "b.png", img_bytes("red"), ORIG)
+        k = e.flag("CAJ", "b.png")
+        e.export()
+        e.correct("b.png", "")
+        rb.write_fixer_decisions(e.batch, {"b.png": "background"})
+        res, _ = e.run()
+        self.assertEqual((res["applied"], res["deleted"]), (1, 0))
+        self.assertEqual(e.where("b.png"), ["background"])
+        self.assertEqual(self.lbl("background", "b.png"), "")
+        self.assertEqual(e.store.get(POOL, k)["relabel_result"]["status"], "applied")
+
+    def test_mark_on_image_with_boxes_is_invalid(self):
+        e = self.e
+        e.put("CAJ", "i.png", img_bytes("red"), ORIG)
+        e.flag("CAJ", "i.png")
+        e.export()
+        e.correct("i.png", MOVED)
+        rb.write_fixer_decisions(e.batch, {"i.png": "delete"})
+        res, out = e.run()
+        self.assertEqual((res["skipped"], res["deleted"], res["applied"]), (1, 0, 0))
+        self.assertEqual(e.where("i.png"), ["CAJ"])
+
+    def test_delete_rollback_restores_every_copy(self):
+        e = self.e
+        k = self._two("r.png", "blue")
+        e.export()
+        e.correct("r.png", "")
+        before = tree_hash(e.raw)
+        e.run()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(ar.rollback_run("20261005_100000_relabel", e.archive, e.batches, e.store, True), 0)
+        self.assertEqual(tree_hash(e.raw), before)
+        self.assertNotIn("relabel_result", e.store.get(POOL, k))
+        self.assertEqual(rb.read_manifest(e.batch)["status"], "open")
+
+    def test_failure_after_archive_rolls_back_delete(self):
+        e = self.e
+        self._two("f.png")
+        e.export()
+        e.correct("f.png", "")
+        before = tree_hash(e.raw)
+        res, _ = e.run(fail_after={"f.png": "archive"})
+        self.assertEqual((res["failed"], res["deleted"]), (1, 0))
+        self.assertEqual(tree_hash(e.raw), before)
+
+
+class FixerSaveRelabelTests(unittest.TestCase):
+    """Dataset Fixer Save on a relabel batch never erases files; marks round-trip through fixer_decisions.json."""
+
+    def test_save_keeps_deleted_files_and_rejects_create_new(self):
+        import dataset as ds
+        with tempfile.TemporaryDirectory() as td:
+            b = Path(td) / "B"
+            (b / "images").mkdir(parents=True)
+            (b / "labels").mkdir()
+            for n in ("a.png", "b.png"):
+                (b / "images" / n).write_bytes(img_bytes("red"))
+                (b / "labels" / (Path(n).stem + ".txt")).write_text(ORIG)
+            sess = ds.load_dataset_session(b, "cups", ["CAJ", "CAFFE_LATTE"])
+            sess.relabel_items = {"a.png": {}, "b.png": {}}
+            sess.ann_by_image[0] = []
+            sess.deleted_images.add(0)
+            with self.assertRaises(ValueError):
+                ds.save_dataset_session(sess, "create_new")
+            ds.save_dataset_session(sess, "overwrite")
+            self.assertTrue((b / "images" / "a.png").is_file())
+            self.assertEqual((b / "labels" / "a.txt").read_text(), "")
+            self.assertTrue((b / "labels" / "b.txt").read_text().startswith("0 "))
+            rb.write_fixer_decisions(b, {"a.png": "delete"})
+            self.assertEqual(rb.read_fixer_decisions(b), {"a.png": "delete"})
+            with self.assertRaises(rb.RelabelBatchError):
+                rb.write_fixer_decisions(b, {"a.png": "nonsense"})
+
+
 class ArchiveRawRegression(unittest.TestCase):
     """archive_raw.py is not modified by 15c-3; its approve_delete behaviour is pinned here."""
 
@@ -339,7 +460,6 @@ class ArchiveRawRegression(unittest.TestCase):
             self.assertTrue((e.archive / "S" / POOL / "images" / "CAJ" / "x.png").is_file())
             self.assertTrue((e.archive / "S" / POOL / "labels" / "CAJ" / "x.txt").is_file())
             self.assertTrue((e.raw / POOL / "images" / "CAJ" / "y.png").is_file())
-
 
 if __name__ == "__main__":
     unittest.main()

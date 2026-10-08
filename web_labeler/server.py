@@ -1348,8 +1348,20 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="Dataset not found")
         if raw_base_path is not None and (ds_path == raw_base_path or raw_base_path in ds_path.parents or ds_path in raw_base_path.parents):
             raise HTTPException(status_code=400, detail="Dataset Fixer must never be opened over the RAW tree")
+        if relabel_items:
+            try:
+                fixer_decisions = _relabel_batch.read_fixer_decisions(ds_path)
+            except _relabel_batch.RelabelBatchError as e:
+                raise HTTPException(status_code=400, detail=str(e))
         dataset_session = load_dataset_session(ds_path, model=req.model, class_names=names)
         dataset_session.relabel_items = relabel_items
+        if relabel_items:
+            # Restore the Background / Delete marks of an earlier Save (only on images still without boxes).
+            for i, f in enumerate(dataset_session.img_files):
+                d = fixer_decisions.get(f.name)
+                if d and not dataset_session.ann_by_image.get(i):
+                    (dataset_session.background_images if d == _relabel_batch.FIXER_BACKGROUND
+                     else dataset_session.deleted_images).add(i)
         test_mode = False
         mismatch = (req.model.lower() not in req.dataset_name.lower())
         return {
@@ -1357,6 +1369,7 @@ def create_app() -> FastAPI:
             "dataset_path": str(ds_path),
             "model": req.model,
             "image_count": len(dataset_session.img_files),
+            "relabel_batch": bool(relabel_items),
             "dataset_name_contains_model": (not mismatch),
         }
 
@@ -1389,6 +1402,7 @@ def create_app() -> FastAPI:
             "is_background": is_background,
             "is_deleted": is_deleted,
             "relabel_note": _relabel_note(dataset_session, idx),
+            "relabel_batch": bool(dataset_session.relabel_items),
         }
 
     def _relabel_note(sess: DatasetSession, idx: int) -> Optional[dict]:
@@ -1477,6 +1491,35 @@ def create_app() -> FastAPI:
         if dataset_session is None:
             raise HTTPException(status_code=400, detail="No dataset loaded")
         deleted_count = len(dataset_session.deleted_images)
+        sess = dataset_session
+        if sess.relabel_items:
+            if (req.strategy or "").lower().strip() != "overwrite":
+                raise HTTPException(status_code=400, detail="A relabel batch can only be saved with Save (overwrite)")
+            # Marks only count on images that really have no box left.
+            decisions: Dict[str, str] = {}
+            default_delete = 0
+            for i, f in enumerate(sess.img_files):
+                if sess.ann_by_image.get(i):
+                    continue
+                if i in sess.background_images:
+                    decisions[f.name] = _relabel_batch.FIXER_BACKGROUND
+                elif i in sess.deleted_images:
+                    decisions[f.name] = _relabel_batch.FIXER_DELETE
+                else:
+                    default_delete += 1
+            save_dataset_session(sess, "overwrite")
+            try:
+                _relabel_batch.write_fixer_decisions(sess.dataset_path, decisions)
+            except (OSError, _relabel_batch.RelabelBatchError) as e:
+                raise HTTPException(status_code=500, detail=f"Labels saved, but the Background/Delete marks could not be written: {e}")
+            vals = list(decisions.values())
+            dataset_session = None
+            # No zip: a relabel batch is not sent to labelers, apply_relabel.py reads the folder itself.
+            return {"ok": True, "cleared": True, "relabel_batch": True, "zip_path": None,
+                    "batch_path": str(sess.dataset_path),
+                    "background_count": vals.count(_relabel_batch.FIXER_BACKGROUND),
+                    "delete_count": vals.count(_relabel_batch.FIXER_DELETE),
+                    "default_delete_count": default_delete}
         out_path = save_dataset_session(dataset_session, req.strategy)
 
         # Copy data.yaml file to output dataset directory

@@ -159,6 +159,42 @@ def resolve_batch(batches_dir: Path, pool: str, batch_id: str, raw_base: Optiona
     return bdir
 
 
+FIXER_DECISIONS = "fixer_decisions.json"
+FIXER_BACKGROUND = "background"
+FIXER_DELETE = "delete"
+
+
+def read_fixer_decisions(batch_dir: Path) -> Dict[str, str]:
+    """Dataset Fixer marks of a relabel batch: ``{item_name: "background" | "delete"}`` ({} if none saved yet).
+
+    Written by the Dataset Fixer's Save. ``apply_relabel.py`` reads it: an image left with zero boxes goes
+    to ``background/`` ONLY when it is marked background here; otherwise (marked delete, or no choice made)
+    every RAW copy of it is archived.
+    """
+    p = batch_dir / FIXER_DECISIONS
+    if not p.is_file():
+        return {}
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise RelabelBatchError(f"{p} is unreadable ({e})") from e
+    items = doc.get("items") if isinstance(doc, dict) else None
+    if not isinstance(items, dict) or any(v not in (FIXER_BACKGROUND, FIXER_DELETE) for v in items.values()):
+        raise RelabelBatchError(f"{p} has an unsupported format")
+    return {str(k): v for k, v in items.items()}
+
+
+def write_fixer_decisions(batch_dir: Path, items: Dict[str, str]) -> None:
+    if any(v not in (FIXER_BACKGROUND, FIXER_DELETE) for v in items.values()):
+        raise RelabelBatchError("fixer decision must be 'background' or 'delete'")
+    doc = {"format_version": 1, "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+           "items": dict(sorted(items.items()))}
+    p = batch_dir / FIXER_DECISIONS
+    tmp = p.with_name(f".{p.name}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+
+
 def _raw_class_names(raw_base: Path, pool: str) -> List[str]:
     y = raw_base / pool / "data.yaml"
     if not y.is_file():

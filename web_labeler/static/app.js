@@ -533,6 +533,7 @@ const state = {
   lastFlagPool: null,
   rawImageKey: null,     // "<class>/<filename>" of the RAW image on screen
   relabelNote: null,     // relabel-batch note of the current Dataset Fixer image (MDQ-15c-2)
+  datasetRelabel: false, // Dataset Fixer holds a relabel batch: Delete = archive on apply, no _fixed save
   rawFlag: null,         // existing flag entry of that image, if any
 };
 
@@ -561,6 +562,8 @@ function resetWorkspaceUI(message) {
 
   state.datasetLoaded = false;
   state.rawLoaded = false;
+  state.datasetRelabel = false;
+  updateSaveButtons();
   state.datasetName = null;
   state.datasetModel = null;
   state.datasetImageCount = 0;
@@ -877,6 +880,7 @@ async function refreshLists() {
     }
     const isBackground = data.is_background || false;
     const isDeleted = data.is_deleted || false;
+    const relabelMode = !state.rawLoaded && !!data.relabel_batch;   // relabel batch: Delete = archive on apply
 
     // current image list
     const ul = $("currentList");
@@ -954,7 +958,9 @@ async function refreshLists() {
       titleDel.style.fontWeight = "bold";
       const subDel = document.createElement("div");
       subDel.className = "itemSub";
-      subDel.textContent = "Image and label will be deleted on save (overwrite)";
+      subDel.textContent = relabelMode
+        ? "On apply every RAW copy of this image goes to the archive (nothing is erased)."
+        : "Image and label will be deleted on save (overwrite)";
       mainDel.appendChild(titleDel); mainDel.appendChild(subDel);
       const btnsDel = document.createElement("div");
       btnsDel.className = "itemBtns";
@@ -984,10 +990,17 @@ async function refreshLists() {
       mainBg.className = "itemMain";
       const titleBg = document.createElement("div");
       titleBg.className = "itemTitle";
-      titleBg.textContent = isBackground ? `✅ BACKGROUND (${state.datasetModel || ""})` : `BACKGROUND (${state.datasetModel || ""})`;
+      titleBg.textContent = isBackground ? `✅ BACKGROUND (${state.datasetModel || ""})`
+        : relabelMode ? "⚠️ NO BOXES, NO CHOICE → DELETE" : `BACKGROUND (${state.datasetModel || ""})`;
       const subBg = document.createElement("div");
       subBg.className = "itemSub";
-      subBg.textContent = isBackground ? "Empty label file will be saved" : "Click Mark to set as background";
+      subBg.textContent = isBackground ? "Empty label file will be saved"
+        : relabelMode ? "If nothing is chosen, apply archives this image (Delete). Mark = keep it as background."
+        : "Click Mark to set as background";
+      if (relabelMode && !isBackground) {
+        liBg.style.backgroundColor = "#fff4e0";
+        liBg.style.borderLeft = "3px solid #e08a00";
+      }
       mainBg.appendChild(titleBg); mainBg.appendChild(subBg);
       const btnsBg = document.createElement("div");
       btnsBg.className = "itemBtns";
@@ -1021,7 +1034,8 @@ async function refreshLists() {
         delBtn.textContent = "Delete";
         delBtn.onclick = async (e) => {
           e.stopPropagation();
-          if (window.confirm("Mark this image for deletion? It will be removed from the dataset when you save (overwrite).")) {
+          // Relabel batch: no confirm dialog (a blocked dialog silently swallowed the click); Unmark undoes it.
+          if (relabelMode || window.confirm("Mark this image for deletion? It will be removed from the dataset when you save (overwrite).")) {
             await api.markDatasetDelete(state.datasetImageIdx);
             await refreshLists();
           }
@@ -1966,6 +1980,12 @@ const review = {
   roiReq: new Map(),         // image_key -> in-flight/finished /api/cameras/roi promise
   roiData: new Map(),        // image_key -> resolved /api/cameras/roi response
 };
+// A relabel batch is only ever saved in place (apply_relabel.py reads that folder); hide the duplicate save.
+function updateSaveButtons() {
+  const b = document.getElementById("saveFixedBtn");
+  if (b) b.style.display = state.datasetRelabel ? "none" : "";
+}
+
 const REVIEW_DECISION_LABELS = {approve_delete: "Approved delete", keep: "Keep", relabel: "Relabel"};
 const REVIEW_ROW_H = 64;          // px, fixed so the list can be windowed by arithmetic
 const REVIEW_WINDOW_PAD = 40;     // extra rows rendered above/below the visible ones
@@ -3288,6 +3308,8 @@ async function init() {
       setMode("dataset");
       const res = await api.loadDataset(dsName, model);
       state.datasetLoaded = true;
+      state.datasetRelabel = !!res.relabel_batch;
+      updateSaveButtons();
       state.datasetName = dsName;
       state.datasetModel = model;
       state.datasetImageCount = res.image_count || 0;
@@ -3348,6 +3370,14 @@ async function init() {
   $("saveOverwriteBtn").onclick = async () => {
     if (!state.datasetLoaded) return;
     try {
+      if (state.datasetRelabel) {
+        const r = await api.saveDataset("overwrite");
+        window.alert(`Relabel batch saved (overwrite).\n\nBackground: ${r.background_count}\nDelete (marked): ${r.delete_count}\n` +
+          `Delete (no boxes, nothing chosen): ${r.default_delete_count}\n\nNothing is changed in RAW until apply_relabel.py --apply.`);
+        resetWorkspaceUI("Relabel batch saved. Dataset unloaded.");
+        setMode("dataset");
+        return;
+      }
       // Check for deletions
       const status = await api.getDatasetStatus();
       if (status.deleted_count > 0) {
@@ -3369,7 +3399,7 @@ async function init() {
     }
   };
   $("saveFixedBtn").onclick = async () => {
-    if (!state.datasetLoaded) return;
+    if (!state.datasetLoaded || state.datasetRelabel) return;
     try {
       const res = await api.saveDataset("create_new");
       let msg = `Saved as _fixed.\n\nZip ready to send:\n${res.zip_path}`;
