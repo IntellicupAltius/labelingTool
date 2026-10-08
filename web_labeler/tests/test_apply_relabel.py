@@ -461,5 +461,31 @@ class ArchiveRawRegression(unittest.TestCase):
             self.assertTrue((e.archive / "S" / POOL / "labels" / "CAJ" / "x.txt").is_file())
             self.assertTrue((e.raw / POOL / "images" / "CAJ" / "y.png").is_file())
 
+    def test_execute_writes_audit_log_and_manifest_dry_run_does_not(self):
+        with tempfile.TemporaryDirectory() as td:
+            e = Env(Path(td))
+            img = img_bytes("red")
+            e.put("CAJ", "x.png", img, ORIG)
+            e.store.add_manual_flag(POOL, "CAJ/x.png", "gibberish", "")
+            e.store.set_owner_decision(POOL, "CAJ/x.png", "approve_delete")
+            argv = ["--pool", POOL, "--raw-base-path", str(e.raw), "--review-dir", str(e.review),
+                    "--archive-root", str(e.archive)]
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(archive_raw.main(argv), 0)
+            self.assertFalse(e.archive.exists())                         # dry run: nothing at all
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(archive_raw.main(argv + ["--execute"]), 0)
+            [run] = list(e.archive.iterdir())
+            man = json.loads((run / "archive_manifest.json").read_text())
+            self.assertEqual(man["counts"], {"planned": 1, "moved": 1, "errors": 0, "skipped": 0})
+            m = man["moved"][0]
+            self.assertEqual(m["image_key"], "CAJ/x.png")
+            self.assertEqual(m["image_sha256"], hashlib.sha256(img).hexdigest())
+            self.assertEqual(m["label_sha256"], hashlib.sha256(ORIG.encode()).hexdigest())
+            log = (run / "archive_log.txt").read_text()
+            self.assertIn("CAJ/x.png", log)
+            self.assertIn("Moved 1/1 pair(s).", log)
+
+
 if __name__ == "__main__":
     unittest.main()

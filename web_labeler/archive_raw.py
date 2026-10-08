@@ -31,6 +31,13 @@ Skipped, always reported by name rather than silently dropped:
 ``--dry-run`` is the default: prints the exact plan, moves nothing. Pass ``--execute`` to
 actually perform the moves.
 
+Audit trail (``--execute`` only, 2026-10-08): the run's own archive folder
+``<archive_root>/<run_stamp>/`` gets
+  - ``archive_log.txt``      — the exact console output of the run (plan, skips, result, errors);
+  - ``archive_manifest.json`` — machine-readable record: when, which pools, counts, and per moved pair
+    the RAW path it came from, the archive path it went to and the sha256 of image + label.
+Written after the moves (also when some moves failed); a dry run writes nothing.
+
 Usage:
     # Dry run (default) — prints what WOULD move, touches nothing:
     /opt/interpreters/INTELLICUP_LABELING_TOOL/bin/python web_labeler/archive_raw.py
@@ -48,6 +55,8 @@ interpreter or the system one.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -172,7 +181,7 @@ def _unique_dest(dst: Path) -> Path:
         n += 1
 
 
-def execute_plan(plan: Plan) -> List[str]:
+def execute_plan(plan: Plan, moved: Optional[List[dict]] = None) -> List[str]:
     """Perform the moves. Returns a list of human-readable error strings (never raises).
 
     Each entry's directory creation AND move are scoped inside that entry's own try/except —
@@ -208,10 +217,49 @@ def execute_plan(plan: Plan) -> List[str]:
                     f"ALSO FAILED to move image back to {e.image_src} ({rollback_exc}) — "
                     f"image now sits at {image_dst} without its label, needs manual fix"
                 )
+            continue
+        if moved is not None:
+            moved.append({"pool": e.pool, "image_key": e.image_key,
+                          "image_from": str(e.image_src), "image_to": str(image_dst),
+                          "label_from": str(e.label_src), "label_to": str(label_dst)})
     return errors
 
 
-def _print_plan(plan: Plan, raw_base_path: Path, review_dir: Path, archive_root: Path, execute: bool) -> None:
+def _sha256(path: Path) -> Optional[str]:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fp:
+            for chunk in iter(lambda: fp.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def write_audit(run_dir: Path, run_stamp: str, raw_base_path: Path, review_dir: Path, pools: List[str],
+                plan: Plan, moved: List[dict], errors: List[str], log_lines: List[str]) -> None:
+    """``archive_log.txt`` + ``archive_manifest.json`` in the run's archive folder (never overwrites)."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for m in moved:
+        m["image_sha256"] = _sha256(Path(m["image_to"]))
+        m["label_sha256"] = _sha256(Path(m["label_to"]))
+    doc = {
+        "format_version": 1, "run": run_stamp, "script": "archive_raw.py",
+        "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "raw_base_path": str(raw_base_path), "review_dir": str(review_dir), "pools": pools,
+        "counts": {"planned": len(plan.to_move), "moved": len(moved), "errors": len(errors),
+                   "skipped": len(plan.skipped)},
+        "moved": moved,
+        "skipped": [{"pool": s.pool, "image_key": s.image_key, "reason": s.reason} for s in plan.skipped],
+        "errors": errors,
+        "pool_errors": plan.pool_errors,
+    }
+    for name, text in (("archive_manifest.json", json.dumps(doc, indent=2, ensure_ascii=False) + "\n"),
+                       ("archive_log.txt", "\n".join(log_lines) + "\n")):
+        _unique_dest(run_dir / name).write_text(text, encoding="utf-8")
+
+
+def _print_plan(plan: Plan, raw_base_path: Path, review_dir: Path, archive_root: Path, execute: bool, print=print) -> None:
     print(f"RAW base path : {raw_base_path}")
     print(f"Review dir    : {review_dir}")
     print(f"Archive root  : {archive_root}")
@@ -264,7 +312,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     plan = build_plan(store, raw_base_path, archive_root, run_stamp, pools)
-    _print_plan(plan, raw_base_path, review_dir, archive_root, args.execute)
+    log_lines: List[str] = [f"archive_raw.py run {run_stamp} — started {datetime.now().astimezone().isoformat(timespec='seconds')}",
+                            f"Pools         : {', '.join(pools)}"]
+
+    def out(*a) -> None:
+        line = " ".join(str(x) for x in a)
+        log_lines.extend(line.split("\n"))
+        print(line)
+
+    _print_plan(plan, raw_base_path, review_dir, archive_root, args.execute, print=out)
 
     if not args.execute:
         print("\n[dry-run] No files were moved. Re-run with --execute to perform the moves above.")
@@ -274,14 +330,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("\nNothing to move.")
         return 0
 
-    errors = execute_plan(plan)
-    print(f"\nMoved {len(plan.to_move) - len(errors)}/{len(plan.to_move)} pair(s).")
+    moved: List[dict] = []
+    errors = execute_plan(plan, moved)
+    out(f"\nMoved {len(moved)}/{len(plan.to_move)} pair(s).")
     if errors:
-        print(f"{len(errors)} error(s):")
+        out(f"{len(errors)} error(s):")
         for msg in errors:
-            print(f"  ! {msg}")
+            out(f"  ! {msg}")
+    run_dir = archive_root / run_stamp
+    try:
+        write_audit(run_dir, run_stamp, raw_base_path, review_dir, pools, plan, moved, errors, log_lines)
+        print(f"Audit: {run_dir / 'archive_log.txt'} + archive_manifest.json")
+    except OSError as e:
+        print(f"WARNING: moves done, but the audit files could not be written to {run_dir}: {e}", file=sys.stderr)
         return 1
-    return 0
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":
