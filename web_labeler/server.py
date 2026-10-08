@@ -1339,8 +1339,9 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail=str(e))
             if req.model.lower() != parts[0]:
                 raise HTTPException(status_code=400, detail=f"This relabel batch is for the '{parts[0]}' model, not '{req.model}'")
-            if man.get("class_names") != list(names):
-                raise HTTPException(status_code=400, detail="Class order of this relabel batch differs from the model's classes; refusing to load (boxes would get wrong names)")
+            # Classes appended to the model after the export are fine (existing ids unchanged); anything else is not.
+            if not _relabel_batch.class_names_compatible(man.get("class_names"), names):
+                raise HTTPException(status_code=400, detail="Classes of this relabel batch do not match the start of the model's class list (renamed/reordered/removed); refusing to load (boxes would get wrong names)")
             relabel_items = {it["item_name"]: it for it in man["items"] if it.get("item_name")}
         else:
             ds_path = (datasets_dir / req.dataset_name).resolve()

@@ -414,6 +414,62 @@ class ZeroBoxDecisionTests(unittest.TestCase):
         self.assertEqual(tree_hash(e.raw), before)
 
 
+class AppendedClassTests(unittest.TestCase):
+    """A class appended to RAW data.yaml after the export (e.g. shots BLOW_JOB) keeps the batch usable."""
+    setUp = ApplyRelabelTests.setUp
+    tearDown = ApplyRelabelTests.tearDown
+    lbl = ApplyRelabelTests.lbl
+
+    def _yaml(self, names):
+        (self.e.raw / POOL / "data.yaml").write_text(f"nc: {len(names)}\nnames: {names!r}\n")
+
+    def test_compatible_helper(self):
+        ok = rb.class_names_compatible
+        self.assertTrue(ok(["A", "B"], ["A", "B"]))
+        self.assertTrue(ok(["A", "B"], ["A", "B", "NEW"]))
+        self.assertFalse(ok(["A", "B"], ["B", "A", "NEW"]))     # reorder
+        self.assertFalse(ok(["A", "B"], ["A", "X"]))            # rename
+        self.assertFalse(ok(["A", "B"], ["A"]))                 # removal
+        self.assertFalse(ok([], ["A"]))
+        self.assertFalse(ok(None, ["A"]))
+
+    def test_new_class_appended_after_export_is_applied(self):
+        e = self.e
+        e.put("CAJ", "n.png", img_bytes("red"), ORIG)
+        k = e.flag("CAJ", "n.png")
+        e.export()                                               # batch has 2 classes
+        self._yaml(["CAJ", "CAFFE_LATTE", "NEW_CLS"])           # class appended afterwards
+        e.correct("n.png", "2 0.5 0.5 0.2 0.2\n")              # Goca uses the new class (id 2)
+        res, _ = e.run()
+        self.assertEqual((res["applied"], res["failed"], res["skipped"]), (1, 0, 0))
+        self.assertEqual(e.where("n.png"), ["NEW_CLS"])
+        self.assertEqual(self.lbl("NEW_CLS", "n.png"), "2 0.5 0.5 0.2 0.2\n")
+        self.assertEqual(e.store.get(POOL, k)["relabel_result"]["status"], "applied")
+
+    def test_new_class_id_before_raw_has_it_is_skipped(self):
+        e = self.e
+        e.put("CAJ", "s.png", img_bytes("red"), ORIG)
+        e.flag("CAJ", "s.png")
+        e.export()
+        e.correct("s.png", "2 0.5 0.5 0.2 0.2\n")              # id 2 but RAW still has 2 classes
+        res, out = e.run()
+        self.assertEqual((res["applied"], res["skipped"]), (0, 1))
+        self.assertIn("class id that is not in RAW data.yaml", out)
+        self.assertEqual(e.where("s.png"), ["CAJ"])
+
+    def test_reordered_raw_classes_refuse_the_batch(self):
+        e = self.e
+        e.put("CAJ", "r.png", img_bytes("red"), ORIG)
+        e.flag("CAJ", "r.png")
+        e.export()
+        self._yaml(["CAFFE_LATTE", "CAJ", "NEW_CLS"])
+        e.correct("r.png", MOVED)
+        before = tree_hash(e.raw)
+        with self.assertRaises(ar.ApplyError):
+            e.run()
+        self.assertEqual(tree_hash(e.raw), before)
+
+
 class FixerSaveRelabelTests(unittest.TestCase):
     """Dataset Fixer Save on a relabel batch never erases files; marks round-trip through fixer_decisions.json."""
 

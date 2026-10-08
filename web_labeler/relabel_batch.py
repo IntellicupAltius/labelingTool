@@ -159,6 +159,19 @@ def resolve_batch(batches_dir: Path, pool: str, batch_id: str, raw_base: Optiona
     return bdir
 
 
+def class_names_compatible(batch_names, current_names) -> bool:
+    """A batch stays usable when classes were only APPENDED after its export.
+
+    The batch's ``class_names`` (RAW ``data.yaml`` order at export time) must be the start of the current
+    list: every existing class keeps its id, new classes only add ids at the end (the same append-only rule
+    the ingest pipeline enforces). Any rename / reorder / removal -> incompatible (boxes would get wrong names).
+    """
+    if not isinstance(batch_names, list) or not batch_names:
+        return False
+    current = list(current_names or [])
+    return len(current) >= len(batch_names) and current[:len(batch_names)] == batch_names
+
+
 FIXER_DECISIONS = "fixer_decisions.json"
 FIXER_BACKGROUND = "background"
 FIXER_DELETE = "delete"

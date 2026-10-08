@@ -415,8 +415,11 @@ def process_batch(pool: str, bdir: Path, raw_base: Path, store: Optional[flag_st
     if man.get("pool") != pool:
         raise ApplyError(f"manifest pool {man.get('pool')!r} != folder pool {pool!r}")
     class_names = relabel_batch._raw_class_names(raw_base, pool)
-    if class_names != man.get("class_names"):
-        raise ApplyError("batch class order differs from RAW data.yaml; boxes would get wrong classes")
+    # RAW may have classes APPENDED since the export (ids of existing classes unchanged): allowed, and the
+    # corrected labels may then use the new ids. Rename / reorder / removal is refused.
+    if not relabel_batch.class_names_compatible(man.get("class_names"), class_names):
+        raise ApplyError("batch classes are not the start of RAW data.yaml's class list (renamed/reordered/removed); "
+                         "boxes would get wrong classes")
     dist, iutils = _load_ingest(ingest_root)
     decisions = relabel_batch.read_fixer_decisions(bdir)
     archive_dir = archive_root / run_stamp
