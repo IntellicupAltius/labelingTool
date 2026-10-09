@@ -682,6 +682,11 @@ input[type="range"] {
   background: rgba(30, 58, 138, 0.92); color: #bfdbfe; font-size: 12px; font-weight: 700;
 }
 .peekBadge.hidden { display: none; }
+.zoomBadge {
+  position: absolute; bottom: 8px; left: 8px; padding: 4px 8px; border-radius: 6px; pointer-events: none; z-index: 5;
+  background: rgba(20, 83, 45, 0.92); color: #bbf7d0; font-size: 12px; font-weight: 700;
+}
+.zoomBadge.hidden { display: none; }
 /* B held in the Dataset Fixer / Video Labeler: the canvas and the box lists ignore the mouse (JS capture guard,
    installPeek); no pointer-events:none here, that lets a drag start a text selection on the parent instead. */
 body.peeking #canvas { cursor: not-allowed; }

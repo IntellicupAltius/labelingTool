@@ -469,6 +469,8 @@ const state = {
   scale: 1,
   offsetX: 0,
   offsetY: 0,
+  zoom: null,           // Z: {cx, cy, factor, imgW, imgH} — image-px center + magnification over the fit; null = whole frame
+  mouseClient: null,    // last mouse position over the canvas (client px), where Z zooms in
 
   // annotations
   frameAnnotations: [],
@@ -582,6 +584,7 @@ function resetWorkspaceUI(message) {
   state.dragging = false;
   state.dragStart = null;
   state.dragRect = null;
+  setZoom(null);
 
   state.frameAnnotations = [];
   state.allAnnotations = [];
@@ -711,12 +714,85 @@ function canvasSizeToDisplaySize(canvas) {
 function computeScaleAndOffset() {
   const cW = state.canvas.width;
   const cH = state.canvas.height;
-  const scale = Math.min(cW / state.imgW, cH / state.imgH);
+  const z = state.zoom;
+  if (z && (z.imgW !== state.imgW || z.imgH !== state.imgH)) setZoom(null);   // different frame size: zoom no longer applies
+  const fit = Math.min(cW / state.imgW, cH / state.imgH);
+  const scale = state.zoom ? fit * state.zoom.factor : fit;
   const newW = Math.floor(state.imgW * scale);
   const newH = Math.floor(state.imgH * scale);
   state.scale = scale;
-  state.offsetX = Math.floor((cW - newW) / 2);
-  state.offsetY = Math.floor((cH - newH) / 2);
+  // Whole frame: centered (letterbox). Zoomed: the zoom center in the middle of the canvas, clamped so the
+  // image always covers the canvas on an axis where it is larger than it (no empty band at the edges).
+  const place = (cSize, size, center) => {
+    if (!state.zoom || size <= cSize) return Math.floor((cSize - size) / 2);
+    return Math.floor(clamp(cSize / 2 - center * scale, cSize - size, 0));
+  };
+  state.offsetX = place(cW, newW, state.zoom ? state.zoom.cx : 0);
+  state.offsetY = place(cH, newH, state.zoom ? state.zoom.cy : 0);
+}
+
+// ---------------- Zoom (Z) ----------------
+// Magnifies the shared canvas only: everything else (class popup, sidebar lists, transport) is untouched, and
+// boxes are still stored in full-image pixels because every draw/mouse path goes through state.scale/offset
+// (computeScaleAndOffset, canvasToImage, imageToCanvas). Z = zoom in at the mouse / back to the whole frame;
+// mouse wheel while zoomed = more/less magnification around the mouse. Kept across frames of the same video.
+const ZOOM_DEFAULT = 3, ZOOM_MIN = 1.5, ZOOM_MAX = 8;
+
+function canvasImageReady() {
+  if (!state.imgW || !state.imgH) return false;
+  if (state.mode === "video") return state.videoLoaded;
+  if (state.mode === "dataset") return state.datasetLoaded || state.rawLoaded;
+  return state.bgLoaded;
+}
+
+// Image point under the mouse (unclamped), or the image center when the mouse isn't over the canvas.
+function zoomAnchor() {
+  const m = state.mouseClient;
+  if (!m) return {x: state.imgW / 2, y: state.imgH / 2};
+  const dpr = window.devicePixelRatio || 1;
+  const rect = state.canvas.getBoundingClientRect();
+  return {x: ((m.x - rect.left) * dpr - state.offsetX) / (state.scale || 1),
+          y: ((m.y - rect.top) * dpr - state.offsetY) / (state.scale || 1)};
+}
+
+function setZoom(z) {
+  state.zoom = z;
+  const b = document.getElementById("zoomBadge");
+  if (!b) return;
+  b.textContent = z ? `ZOOM ${Math.round(z.factor * 10) / 10}× — Z = whole frame · wheel = more/less` : "";
+  b.classList.toggle("hidden", !z);
+}
+
+// Zoom to `factor` keeping the image point under the mouse where it is (image center if the mouse is elsewhere).
+function zoomTo(factor) {
+  const a = zoomAnchor();
+  const dpr = window.devicePixelRatio || 1;
+  const cW = state.canvas.width, cH = state.canvas.height;
+  const scale = Math.min(cW / state.imgW, cH / state.imgH) * factor;
+  let mx = cW / 2, my = cH / 2;
+  if (state.mouseClient) {
+    const rect = state.canvas.getBoundingClientRect();
+    mx = (state.mouseClient.x - rect.left) * dpr;
+    my = (state.mouseClient.y - rect.top) * dpr;
+  }
+  // computeScaleAndOffset puts (cx, cy) at the canvas center: offset = c/2 - cx*scale, and we want a*scale + offset = m
+  setZoom({factor, imgW: state.imgW, imgH: state.imgH,
+           cx: clamp(a.x + (cW / 2 - mx) / scale, 0, state.imgW),
+           cy: clamp(a.y + (cH / 2 - my) / scale, 0, state.imgH)});
+  draw();
+}
+
+function toggleZoom() {
+  if (state.zoom) { setZoom(null); draw(); return; }
+  if (canvasImageReady()) zoomTo(ZOOM_DEFAULT);
+}
+
+// Wheel while zoomed: more/less magnification around the mouse.
+function wheelZoom(evt) {
+  if (!state.zoom || !canvasImageReady()) return;
+  evt.preventDefault();
+  const factor = clamp(state.zoom.factor * (evt.deltaY < 0 ? 1.25 : 0.8), ZOOM_MIN, ZOOM_MAX);
+  if (factor !== state.zoom.factor) zoomTo(factor);
 }
 
 function canvasToImage(cx, cy) {
@@ -1686,6 +1762,11 @@ function installCanvasHandlers() {
     state.dragRect = {x1: p.x, y1: p.y, x2: p.x, y2: p.y};
     draw();
   });
+
+  // Z zooms in where the mouse is; the wheel only acts while zoomed (otherwise the page scrolls as before).
+  state.canvas.addEventListener("mousemove", (evt) => { state.mouseClient = {x: evt.clientX, y: evt.clientY}; });
+  state.canvas.addEventListener("mouseleave", () => { state.mouseClient = null; });
+  state.canvas.addEventListener("wheel", (evt) => { if (state.mouseClient) wheelZoom(evt); }, {passive: false});
 
   state.canvas.addEventListener("mousemove", (evt) => {
     if (!state.dragging) return;
@@ -2784,6 +2865,13 @@ function installHotkeys() {
         && !isTypingTarget(e.target) && (state.mode === "video" || state.mode === "dataset")) {
       e.preventDefault();
       await openFlagPanel();
+      return;
+    }
+
+    // Z = zoom in at the mouse / back to the whole frame (canvas only; every mode with an image on the canvas).
+    if ((e.key === "z" || e.key === "Z") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat && !isTypingTarget(e.target)) {
+      e.preventDefault();
+      toggleZoom();
       return;
     }
 

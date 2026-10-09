@@ -123,6 +123,7 @@ Nothing overwrites your original dataset.
 - `P`: play/pause
 - `Shift + Left/Right`: step -50 / +50 frames
 - `Home/End`: jump to start / end
+- `Z`: zoom in where the mouse is (3×); mouse wheel while zoomed = more/less (1.5×–8×); `Z` again = whole frame. Only the image area zooms — class popup, lists and boxes keep working as usual
 
 ### Optional configuration (advanced)
 
