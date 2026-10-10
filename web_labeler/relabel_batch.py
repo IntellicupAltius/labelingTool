@@ -197,15 +197,36 @@ def read_fixer_decisions(batch_dir: Path) -> Dict[str, str]:
     return {str(k): v for k, v in items.items()}
 
 
-def write_fixer_decisions(batch_dir: Path, items: Dict[str, str]) -> None:
+def write_fixer_decisions(batch_dir: Path, items: Dict[str, str], prefilled_by: Optional[str] = None) -> None:
+    """Without ``prefilled_by`` this is the Dataset Fixer's Save and stamps ``saved_at`` (= Goca reviewed the
+    batch, see ``batch_saved_at``). With it, a script pre-fills marks for Goca to confirm: ``prefilled_by`` /
+    ``prefilled_at`` instead, so a pre-filled batch never counts as reviewed."""
     if any(v not in (FIXER_BACKGROUND, FIXER_DELETE) for v in items.values()):
         raise RelabelBatchError("fixer decision must be 'background' or 'delete'")
-    doc = {"format_version": 1, "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-           "items": dict(sorted(items.items()))}
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    doc = {"format_version": 1}
+    if prefilled_by:
+        doc.update(prefilled_by=prefilled_by, prefilled_at=now)
+    else:
+        doc["saved_at"] = now
+    doc["items"] = dict(sorted(items.items()))
     p = batch_dir / FIXER_DECISIONS
     tmp = p.with_name(f".{p.name}.tmp.{os.getpid()}")
     tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(tmp, p)
+
+
+def batch_saved_at(batch_dir: Path) -> Optional[str]:
+    """When the Dataset Fixer last saved this batch (Save overwrite always writes ``fixer_decisions.json`` with
+    ``saved_at``, also with no marks), or None if it never did — then nobody has reviewed it."""
+    p = batch_dir / FIXER_DECISIONS
+    if not p.is_file():
+        return None
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise RelabelBatchError(f"{p} is unreadable ({e})") from e
+    return doc.get("saved_at") if isinstance(doc, dict) else None
 
 
 def _raw_class_names(raw_base: Path, pool: str) -> List[str]:

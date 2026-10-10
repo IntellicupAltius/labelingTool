@@ -593,6 +593,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help=f"max corner difference in pixels for 'not corrected' (default {DEFAULT_BOX_TOL_PX})")
     ap.add_argument("--rollback", metavar="STAMP", help="roll back the run <archive-root>/<STAMP>")
     ap.add_argument("--apply", "--execute", dest="apply", action="store_true", help="really change RAW (default: dry run)")
+    ap.add_argument("-f", "--force", action="store_true",
+                    help="apply a batch even if the Dataset Fixer never saved it (nobody confirmed the review)")
     args = ap.parse_args(argv)
 
     raw_base = args.raw_base_path.expanduser().resolve()
@@ -618,6 +620,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         failed = 0
         for pool, bdir in todo:
+            # Save (overwrite) in the Dataset Fixer = Goca reviewed the batch. Without it the batch (possibly
+            # pre-filled by a script) is applied only with -f.
+            if not relabel_batch.batch_saved_at(bdir):
+                msg = (f"\n[{pool}] {bdir.name}: NIJE SAČUVAN u Dataset Fixer-u (Save overwrite) — Goca ga nije potvrdila.")
+                if not args.apply:
+                    print(msg + " Apply će ga odbiti bez -f; prikaz ispod je samo dry-run.")
+                elif args.force:
+                    print(msg + " -f: primenjujem ipak.")
+                else:
+                    print(msg + " PRESKOČEN (pokreni sa -f da ga ipak primeniš).")
+                    failed += 1
+                    continue
             r = process_batch(pool, bdir, raw_base, store, args.archive_root, run_stamp, args.box_tol_px,
                               args.ingest_root, args.apply)
             failed += r["failed"]

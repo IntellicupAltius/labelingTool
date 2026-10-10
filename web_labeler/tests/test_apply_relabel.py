@@ -30,6 +30,10 @@ ADD1 = "0 0.5 0.5 0.2 0.2\n1 0.2 0.2 0.1 0.1\n"            # a second class adde
 ONLY0 = "0 0.5 0.5 0.2 0.2\n"
 
 
+def lbl(e, name, cls="CAJ") -> str:
+    return (e.raw / POOL / "labels" / cls / (Path(name).stem + ".txt")).read_text()
+
+
 def img_bytes(color) -> bytes:
     b = io.BytesIO()
     Image.new("RGB", (W, H), color).save(b, "PNG")
@@ -516,6 +520,56 @@ class ArchiveRawRegression(unittest.TestCase):
             self.assertTrue((e.archive / "S" / POOL / "images" / "CAJ" / "x.png").is_file())
             self.assertTrue((e.archive / "S" / POOL / "labels" / "CAJ" / "x.txt").is_file())
             self.assertTrue((e.raw / POOL / "images" / "CAJ" / "y.png").is_file())
+
+    def _env(self) -> "Env":
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        import ingestion_pipeline.distributor as d
+        self.addCleanup(setattr, d, "RAW_BASE", d.RAW_BASE)
+        return Env(Path(td.name))
+
+    def test_saved_at_only_from_save_not_from_prefill(self):
+        e = self._env()
+        e.put("CAJ", "a.png", img_bytes("red"), ORIG)
+        e.flag("CAJ", "a.png")
+        e.export()
+        self.assertIsNone(rb.batch_saved_at(e.batch))
+        rb.write_fixer_decisions(e.batch, {"a.png": "background"}, prefilled_by="kibla_rule")
+        self.assertIsNone(rb.batch_saved_at(e.batch))                    # pre-filled marks are not a review
+        self.assertEqual(rb.read_fixer_decisions(e.batch), {"a.png": "background"})
+        rb.write_fixer_decisions(e.batch, {"a.png": "background"})       # what the Dataset Fixer's Save does
+        self.assertTrue(rb.batch_saved_at(e.batch))
+
+    def test_apply_refuses_unsaved_batch_without_force(self):
+        e = self._env()
+        e.put("CAJ", "a.png", img_bytes("red"), ORIG)
+        e.flag("CAJ", "a.png")
+        e.export()
+        e.correct("a.png", ADD1)
+        argv = ["--pool", POOL, "--raw-base-path", str(e.raw), "--review-dir", str(e.review),
+                "--batches-dir", str(e.batches), "--archive-root", str(e.archive), "--apply"]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(ar.main(argv), 1)
+        self.assertIn("NIJE SAČUVAN", out.getvalue())
+        self.assertEqual(lbl(e, "a.png"), ORIG)                          # RAW untouched
+        self.assertEqual(rb.read_manifest(e.batch)["status"], "open")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(ar.main(argv + ["-f"]), 0)
+        self.assertEqual(lbl(e, "a.png"), ADD1)
+
+    def test_apply_runs_saved_batch_without_force(self):
+        e = self._env()
+        e.put("CAJ", "a.png", img_bytes("red"), ORIG)
+        e.flag("CAJ", "a.png")
+        e.export()
+        e.correct("a.png", ADD1)
+        rb.write_fixer_decisions(e.batch, {})                            # Save with no marks still stamps saved_at
+        argv = ["--pool", POOL, "--raw-base-path", str(e.raw), "--review-dir", str(e.review),
+                "--batches-dir", str(e.batches), "--archive-root", str(e.archive), "--apply"]
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(ar.main(argv), 0)
+        self.assertEqual(lbl(e, "a.png"), ADD1)
 
     def test_execute_writes_audit_log_and_manifest_dry_run_does_not(self):
         with tempfile.TemporaryDirectory() as td:
