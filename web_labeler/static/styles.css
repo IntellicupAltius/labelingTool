@@ -755,3 +755,11 @@ body.peeking #currentList, body.peeking #globalList { opacity: 0.55; cursor: not
 .metricBadge.moderate { background: rgba(251, 191, 36, 0.18); color: #fde68a; }
 .metricBadge.large    { background: rgba(248, 113, 113, 0.2); color: var(--danger); }
 .classItem .classDesc { opacity: 0.6; font-size: 0.85em; }
+
+/* ── Box focus: selected row in "Current … boxes" (its box is yellow on the canvas) ── */
+.item.annSelected,
+.item.annSelected:hover {
+  border-color: #ffd600;
+  background: rgba(255, 214, 0, 0.12);
+  box-shadow: inset 3px 0 0 #ffd600;
+}

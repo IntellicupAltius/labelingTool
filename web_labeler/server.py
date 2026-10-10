@@ -2233,6 +2233,23 @@ def create_app() -> FastAPI:
             return {"ok": True, "removed": True}
         return {"ok": True, "removed": False}
 
+    @app.put("/api/annotations/{ann_id}")
+    def update_annotation(ann_id: str, req: DatasetUpdateAnnRequest = Body(...)):
+        """Change class of a video-frame box (same model; the box itself is kept)."""
+        for anns in state.ann_by_frame.values():
+            for a in anns:
+                if a.id != ann_id:
+                    continue
+                if req.class_name is not None:
+                    names = state.model_to_names.get(a.model, [])
+                    if req.class_name not in names:
+                        raise HTTPException(status_code=400, detail="Invalid class")
+                    a.class_name = req.class_name
+                    a.class_id = names.index(req.class_name)
+                    state.last_annotation = (a.model, a.class_name)
+                return {"ok": True, "annotation": asdict(a)}
+        raise HTTPException(status_code=404, detail="Annotation not found")
+
     @app.delete("/api/annotations/{ann_id}")
     def delete_annotation(ann_id: str):
         removed = False

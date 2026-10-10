@@ -1,5 +1,15 @@
 /* global window, document */
 
+async function _putJson(url, payload) {
+  const r = await fetch(url, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const d = data.detail;
+    throw new Error(((typeof d === "string") ? d : JSON.stringify(d || data)) || `PUT ${url} failed`);
+  }
+  return data;
+}
+
 const api = {
   async getConfig() {
     return fetch("/api/config").then(r => r.json());
@@ -163,6 +173,12 @@ const api = {
       }
       return data;
     });
+  },
+  async updateDatasetAnnotation(annId, payload) {
+    return _putJson(`/api/datasets/annotations/${encodeURIComponent(annId)}`, payload);
+  },
+  async updateAnnotation(annId, payload) {
+    return _putJson(`/api/annotations/${encodeURIComponent(annId)}`, payload);
   },
   async deleteDatasetAnnotation(annId) {
     return fetch(`/api/datasets/annotations/${encodeURIComponent(annId)}`, {method: "DELETE"}).then(async r => {
@@ -526,6 +542,11 @@ const state = {
   modalModel: null,
   modalClasses: [],
   modalSelectedClass: null,
+  modalEditAnn: null,    // set = the class modal changes this box's class instead of adding a new box
+
+  // box focus: hover/click a row in "Current … boxes" (or click a box on the canvas) highlights that box
+  hoverAnnId: null,
+  selectedAnnId: null,
 
   // flag panel (MDQ-3)
   flagPanelOpen: false,
@@ -843,13 +864,47 @@ function drawCanvas() {
   ctx.fillStyle = "#00ff88";
   ctx.font = `${Math.floor(12 * (window.devicePixelRatio || 1))}px ui-sans-serif`;
 
-  const drawAnn = (a) => {
+  // #n = the box's number in the "Current … boxes" list. A hovered/selected box is drawn on top,
+  // thick yellow and filled; while one is focused the others are dimmed.
+  const dpr = window.devicePixelRatio || 1;
+  const focusId = state.hoverAnnId || state.selectedAnnId;
+  const anns = state.frameAnnotations || [];
+  const hasFocus = !!focusId && anns.some(a => a.id === focusId);
+  const drawAnn = (a, n, focused) => {
     const c1 = imageToCanvas(a.x1, a.y1);
     const c2 = imageToCanvas(a.x2, a.y2);
-    ctx.strokeRect(c1.x, c1.y, c2.x - c1.x, c2.y - c1.y);
-    ctx.fillText(`${a.model}:${a.class_name}`, c1.x + 6, c1.y + 16);
+    const w = c2.x - c1.x, h = c2.y - c1.y;
+    const label = `#${n} ${a.model ? a.model + ":" : ""}${a.class_name}`;
+    ctx.globalAlpha = (hasFocus && !focused) ? 0.3 : 1;
+    if (focused) {
+      ctx.fillStyle = "rgba(255,214,0,0.22)";
+      ctx.fillRect(c1.x, c1.y, w, h);
+      ctx.lineWidth = 4 * dpr;
+      ctx.strokeStyle = "#ffd600";
+      ctx.strokeRect(c1.x, c1.y, w, h);
+      ctx.font = `bold ${Math.floor(13 * dpr)}px ui-sans-serif`;
+      const tw = ctx.measureText(label).width;
+      const ty = c1.y > 22 * dpr ? c1.y - 20 * dpr : c1.y + 4 * dpr;
+      ctx.fillStyle = "#ffd600";
+      ctx.fillRect(c1.x - 2 * dpr, ty, tw + 10 * dpr, 18 * dpr);
+      ctx.fillStyle = "#111";
+      ctx.fillText(label, c1.x + 3 * dpr, ty + 14 * dpr);
+    } else {
+      ctx.lineWidth = 2 * dpr;
+      ctx.strokeStyle = "#00ff88";
+      ctx.fillStyle = "#00ff88";
+      ctx.font = `${Math.floor(12 * dpr)}px ui-sans-serif`;
+      ctx.strokeRect(c1.x, c1.y, w, h);
+      ctx.fillText(label, c1.x + 6, c1.y + 16);
+    }
+    ctx.globalAlpha = 1;
   };
-  if (!state.peek) for (const a of state.frameAnnotations) drawAnn(a);   // B held: boxes hidden
+  if (!state.peek) {   // B held: boxes hidden
+    anns.forEach((a, i) => { if (a.id !== focusId) drawAnn(a, i + 1, false); });
+    const fi = anns.findIndex(a => a.id === focusId);
+    if (fi >= 0) drawAnn(anns[fi], fi + 1, true);
+  }
+  ctx.lineWidth = 2 * dpr;
 
   // temporary drag rect
   if (state.dragging && state.dragRect) {
@@ -933,6 +988,87 @@ function renderFrameTagsPanel(frameIdx, frameTagsData) {
   content.appendChild(grid);
 }
 
+// ---------------- Box focus: "Current … boxes" list ↔ canvas ----------------
+// Hover a row = that box lights up on the canvas (others dimmed). Click a row (or click inside a box on
+// the canvas) = sticky selection; click again / Esc = clear. Selected box: Del = delete, C = change class.
+function setHoverAnn(id) {
+  if (state.hoverAnnId === id) return;
+  state.hoverAnnId = id;
+  draw();
+}
+
+function selectAnn(id, scroll) {
+  state.selectedAnnId = id || null;
+  for (const li of $("currentList").querySelectorAll("li[data-ann-id]")) {
+    const on = li.dataset.annId === state.selectedAnnId;
+    li.classList.toggle("annSelected", on);
+    if (on && scroll) li.scrollIntoView({block: "nearest"});
+  }
+  draw();
+}
+
+function selectedAnn() {
+  return (state.frameAnnotations || []).find(a => a.id === state.selectedAnnId) || null;
+}
+
+// Smallest box containing the image point (nested/overlapping boxes: the inner one wins).
+function annAtPoint(p) {
+  let best = null, bestArea = Infinity;
+  for (const a of state.frameAnnotations || []) {
+    if (p.x < a.x1 || p.x > a.x2 || p.y < a.y1 || p.y > a.y2) continue;
+    const area = (a.x2 - a.x1) * (a.y2 - a.y1);
+    if (area < bestArea) { best = a; bestArea = area; }
+  }
+  return best;
+}
+
+// Class changes only where the box can be saved: video frames and the Dataset Fixer session (not RAW browse).
+function canChangeClass() {
+  return state.mode === "video" ? state.videoLoaded : (state.mode === "dataset" && state.datasetLoaded && !state.rawLoaded);
+}
+
+async function deleteAnn(a) {
+  if (state.mode === "dataset") {
+    await api.deleteDatasetAnnotation(a.id);
+  } else {
+    await api.deleteAnnotation(a.id);
+    state.dirty = true;
+  }
+  if (state.selectedAnnId === a.id) state.selectedAnnId = null;
+  if (state.hoverAnnId === a.id) state.hoverAnnId = null;
+  await refreshLists();
+  draw();
+}
+
+// Shared by the dataset and video rows: number, hover/click focus, "Class" button.
+function wireAnnRow(li, title, btns, a) {
+  const n = (state.frameAnnotations || []).indexOf(a) + 1;
+  title.textContent = `#${n}  ${title.textContent}`;
+  li.dataset.annId = a.id;
+  if (a.id === state.selectedAnnId) li.classList.add("annSelected");
+  li.addEventListener("mouseenter", () => setHoverAnn(a.id));
+  li.addEventListener("mouseleave", () => setHoverAnn(null));
+  li.addEventListener("click", (e) => {
+    if (e.target.closest("button, input, select, label")) return;
+    selectAnn(state.selectedAnnId === a.id ? null : a.id, false);
+  });
+  if (canChangeClass()) {
+    const cb = document.createElement("button");
+    cb.className = "btn";
+    cb.textContent = "Class";
+    cb.title = "Change class of this box (C)";
+    cb.onclick = (e) => { e.stopPropagation(); openModalForEdit(a); };
+    btns.insertBefore(cb, btns.firstChild);
+  }
+}
+
+// A new image/frame (or a deleted box) drops a focus that no longer points at a box on screen.
+function _pruneAnnFocus() {
+  const ids = new Set((state.frameAnnotations || []).map(a => a.id));
+  if (!ids.has(state.selectedAnnId)) state.selectedAnnId = null;
+  state.hoverAnnId = null;   // rows are rebuilt; the next mouseenter sets it again
+}
+
 async function refreshLists() {
   if (state.mode === "dataset") {
     if (!state.datasetLoaded && !state.rawLoaded) return;
@@ -940,6 +1076,7 @@ async function refreshLists() {
       ? await api.getRawAnnotations(state.datasetImageIdx)
       : await api.getDatasetAnnotations(state.datasetImageIdx);
     state.frameAnnotations = data.annotations || [];
+    _pruneAnnFocus();
     state.allAnnotations = [];
     if (state.rawLoaded) {
       state.rawImageKey = data.image_key || null;
@@ -1143,11 +1280,10 @@ async function refreshLists() {
       del.textContent = "Delete";
       del.onclick = async (e) => {
         e.stopPropagation();
-        await api.deleteDatasetAnnotation(a.id);
-        await refreshLists();
-        draw();
+        await deleteAnn(a);
       };
       btns.appendChild(del);
+      wireAnnRow(li, title, btns, a);
       li.appendChild(main);
       li.appendChild(btns);
 
@@ -1223,6 +1359,7 @@ async function refreshLists() {
   if (!state.videoLoaded) return;
   const frameData = await api.getFrameAnnotations(state.frameIdx);
   state.frameAnnotations = frameData.annotations || [];
+  _pruneAnnFocus();
   const backgroundModels = frameData.background_models || [];
   const allData = await api.getAllAnnotations();
   state.allAnnotations = allData.annotations || [];
@@ -1288,12 +1425,10 @@ async function refreshLists() {
     del.textContent = "Delete";
     del.onclick = async (e) => {
       e.stopPropagation();
-      await api.deleteAnnotation(a.id);
-      state.dirty = true;
-      await refreshLists();
-      draw();
+      await deleteAnn(a);
     };
     btns.appendChild(del);
+    wireAnnRow(li, title, btns, a);
     li.appendChild(main);
     li.appendChild(btns);
 
@@ -1614,10 +1749,34 @@ function openModalForRect(rect) {
   refreshModalClasses();
 }
 
+// Change class of an existing box: same picker, model fixed to the box's model, no background option.
+function openModalForEdit(a) {
+  if (!canChangeClass()) return;
+  const n = (state.frameAnnotations || []).indexOf(a) + 1;
+  state.modalOpen = true;
+  state.modalRect = null;
+  state.modalEditAnn = a;
+  state.modalSelectedClass = a.class_name;
+  selectAnn(a.id, true);
+  $("modalTitle").textContent = `Change class — #${n} ${a.class_name}`;
+  $("backgroundRow").classList.add("hidden");
+  $("modalError").textContent = "";
+  $("classFilter").value = "";
+  $("backgroundCheck").checked = false;
+  $("modalModelSelect").value = (state.mode === "dataset" ? state.datasetModel : a.model) || $("modalModelSelect").value;
+  $("modalModelSelect").disabled = true;
+  $("modal").classList.remove("hidden");
+  $("classFilter").focus();
+  refreshModalClasses();
+}
+
 function closeModal() {
   state.modalOpen = false;
   state.modalRect = null;
   state.modalSelectedClass = null;
+  state.modalEditAnn = null;
+  $("modalTitle").textContent = "Assign label";
+  $("backgroundRow").classList.remove("hidden");
   $("modal").classList.add("hidden");
   draw();
 }
@@ -1702,6 +1861,26 @@ async function onModalSave() {
     return;
   }
   const r = state.modalRect;
+  const edit = state.modalEditAnn;
+  if (edit) {
+    if (!cls) { $("modalError").textContent = "Pick a class."; return; }
+    try {
+      if (cls !== edit.class_name) {
+        if (state.mode === "dataset") {
+          await api.updateDatasetAnnotation(edit.id, {class_name: cls});
+        } else {
+          await api.updateAnnotation(edit.id, {class_name: cls});
+          state.dirty = true;
+        }
+      }
+      closeModal();
+      await refreshLists();
+      draw();
+    } catch (e) {
+      $("modalError").textContent = e.message || String(e);
+    }
+    return;
+  }
   try {
     if (state.mode === "dataset") {
       if (asBackground) {
@@ -1754,7 +1933,7 @@ function installCanvasHandlers() {
       if (!state.videoLoaded) return;
       if (state.playing) stopPlayback();
     } else {
-      if (!state.datasetLoaded) return;
+      if (!state.datasetLoaded && !state.rawLoaded) return;   // RAW browse: click-to-select only, no drawing
     }
     state.dragging = true;
     const p = canvasToImage(evt.clientX, evt.clientY);
@@ -1786,9 +1965,12 @@ function installCanvasHandlers() {
     if (y2 < y1) [y1, y2] = [y2, y1];
     state.dragRect = null;
     if ((x2 - x1) < 4 || (y2 - y1) < 4) {
-      draw();
+      // A click (no drag) inside a box selects it (smallest box under the cursor); on empty space it clears.
+      const hit = annAtPoint(p);
+      selectAnn(hit ? hit.id : null, true);
       return;
     }
+    if (state.mode === "dataset" && !state.datasetLoaded) { draw(); return; }   // RAW browse is read-only
     openModalForRect({x1, y1, x2, y2});
   });
 
@@ -2881,6 +3063,15 @@ function installHotkeys() {
       e.preventDefault();
       if (!e.repeat) setPeek(true);
       return;
+    }
+
+    // Selected box (click a row or the box): Esc = clear, Delete/Backspace = delete it, C = change class.
+    if ((state.mode === "video" || state.mode === "dataset") && !state.peek && !isTypingTarget(e.target)
+        && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const sel = selectedAnn();
+      if (e.key === "Escape" && state.selectedAnnId) { e.preventDefault(); selectAnn(null); return; }
+      if (sel && (e.key === "Delete" || e.key === "Backspace") && !e.repeat) { e.preventDefault(); await deleteAnn(sel); return; }
+      if (sel && (e.key === "c" || e.key === "C") && !e.repeat && canChangeClass()) { e.preventDefault(); openModalForEdit(sel); return; }
     }
 
     if (state.mode === "dataset") {
