@@ -1616,6 +1616,7 @@ async function renderDatasetImage(idx) {
   draw();
 
   setStatus(`Dataset ${state.datasetName} | ${state.datasetImageIdx + 1}/${state.datasetImageCount} | ${state.datasetImageName}`);
+  updateJumpImg();
 }
 
 async function renderRawImage(idx) {
@@ -1648,6 +1649,7 @@ async function renderRawImage(idx) {
   draw();
 
   setStatus(`Raw ${state.datasetName} | ${state.datasetImageIdx + 1}/${state.datasetImageCount} | ${state.datasetImageName}`);
+  updateJumpImg();
 }
 
 
@@ -1989,6 +1991,16 @@ const FLAG_CATEGORIES = [
   {key: "mislabeled_background", label: "Mislabeled background",
    hint: "A background image that actually contains a visible example of some class."},
 ];
+
+// Image number box next to Prev/Next shows the current position (1-based) and the total.
+function updateJumpImg() {
+  const inp = $("jumpImgInput");
+  if (!inp) return;
+  const n = state.datasetImageCount || 0;
+  inp.max = String(Math.max(1, n));
+  if (document.activeElement !== inp) inp.value = n ? String(state.datasetImageIdx + 1) : "";
+  $("jumpImgTotal").textContent = `/ ${n}`;
+}
 
 function isTypingTarget(t) {
   if (!t || !t.tagName) return false;
@@ -3081,6 +3093,7 @@ function installHotkeys() {
       }
       // RAW browsing has its own renderer (renderDatasetImage is a no-op for a RAW session) — same routing as Prev/Next.
       const render = state.rawLoaded ? renderRawImage : renderDatasetImage;
+      if (e.target && e.target.id === "jumpImgInput") return;   // arrows edit the number, not the image
       if (e.key === "ArrowLeft") { e.preventDefault(); await render(state.datasetImageIdx - 1); }
       if (e.key === "ArrowRight") { e.preventDefault(); await render(state.datasetImageIdx + 1); }
       return;
@@ -3605,6 +3618,17 @@ async function init() {
     }
   };
 
+  // Jump to image N (1-based) in the loaded dataset / relabel batch / RAW browse: type a number, press Enter.
+  $("jumpImgInput").addEventListener("keydown", async (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const n = parseInt($("jumpImgInput").value, 10);
+    if (!Number.isFinite(n)) { updateJumpImg(); return; }
+    $("jumpImgInput").blur();             // arrows/hotkeys work on the image again
+    if (state.rawLoaded) { await renderRawImage(n - 1); return; }
+    if (!state.datasetLoaded) return;
+    await renderDatasetImage(n - 1);
+  });
   $("prevImgBtn").onclick = async () => {
     if (state.rawLoaded) { await renderRawImage(state.datasetImageIdx - 1); return; }
     if (!state.datasetLoaded) return;

@@ -46,7 +46,8 @@ Manifest (``format_version`` 1)::
                    "owner_decision_at", "relabel_snapshot"}]}]}
 
 ``--dry-run`` (the default) prints exactly what would be exported and skipped and writes nothing;
-``--execute`` writes the batch. Stdlib only (plus PyYAML for ``data.yaml``).
+``--execute`` writes the batch. ``--max-items N`` splits a pool into several batches of at most N items
+(file-name order, so one session stays together); the later ones get a ``_2``, ``_3``... suffix. Stdlib only (plus PyYAML for ``data.yaml``).
 
     /opt/interpreters/INTELLICUP_LABELING_TOOL/bin/python web_labeler/relabel_batch.py --dry-run
     /opt/interpreters/INTELLICUP_LABELING_TOOL/bin/python web_labeler/relabel_batch.py --pool cups --execute
@@ -359,6 +360,15 @@ def plan_pool(pool: str, raw_base: Path, review_dir: Path, batches_dir: Path) ->
     return plan
 
 
+def split_items(items: List[dict], max_items: int) -> List[List[dict]]:
+    """``items`` in chunks of at most ``max_items`` (0 = one chunk); never an empty chunk."""
+    if not items:
+        return []
+    if max_items <= 0:
+        return [items]
+    return [items[i:i + max_items] for i in range(0, len(items), max_items)]
+
+
 def write_batch(plan: Plan, raw_base: Path, batches_dir: Path, now: Optional[datetime] = None) -> Optional[Path]:
     """Copy the planned items into a new batch folder. Returns it, or None if nothing to export."""
     if not plan.items:
@@ -416,7 +426,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="print what would be exported/skipped; write nothing (default)")
     mode.add_argument("--execute", action="store_true", help="actually write the batch(es)")
+    ap.add_argument("--max-items", type=int, default=0, help="split a pool into batches of at most N items (0 = one batch)")
     args = ap.parse_args(argv)
+    if args.max_items < 0:
+        ap.error("--max-items must be >= 0")
 
     try:
         check_batches_dir(args.batches_dir, args.raw_base_path)
@@ -428,7 +441,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"{'EXECUTE' if args.execute else 'DRY RUN (nothing is written)'} — raw={args.raw_base_path} batches={args.batches_dir}")
     total = 0
     for pl in plans:
-        print(f"\n[{pl.pool}] would export {len(pl.items)} item(s), skip {len(pl.skipped)}")
+        chunks = split_items(pl.items, args.max_items)
+        print(f"\n[{pl.pool}] would export {len(pl.items)} item(s) in {len(chunks)} batch(es), skip {len(pl.skipped)}")
         for it in pl.items:
             print(f"  + {it['image_key']}  copies={len(it['raw_paths'])}  comment={it['comment']!r}")
         for s in pl.skipped:
@@ -436,13 +450,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  - {s.image_key}  [{label}] {s.detail}")
         total += len(pl.items)
         if args.execute:
-            try:
-                out = write_batch(pl, args.raw_base_path, args.batches_dir)
-            except (RelabelBatchError, OSError) as e:
-                print(f"ERROR: {pl.pool}: {e}", file=sys.stderr)
-                return 1
-            if out:
-                print(f"  => wrote {out}")
+            for chunk in chunks:
+                try:
+                    out = write_batch(Plan(pool=pl.pool, items=chunk, class_names=pl.class_names),
+                                      args.raw_base_path, args.batches_dir)
+                except (RelabelBatchError, OSError) as e:
+                    print(f"ERROR: {pl.pool}: {e}", file=sys.stderr)
+                    return 1
+                if out:
+                    print(f"  => wrote {out}  ({len(chunk)} items)")
     print(f"\ntotal items {'exported' if args.execute else 'that would be exported'}: {total}")
     return 0
 

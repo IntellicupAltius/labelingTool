@@ -235,6 +235,26 @@ class RelabelBatchTests(unittest.TestCase):
         self.assertEqual(len(rb.list_batches(e.batches)), 1)
         self.assertEqual((e.review / "cups_flagged.json").read_bytes(), side_before)   # sidecar never written
 
+    def test_max_items_splits_into_several_batches(self):
+        e = self.env
+        for n in "abcde":
+            e.put("CAJ", f"{n}.jpg", n.encode())
+            e.flag_relabel("CAJ", f"{n}.jpg")
+        argv = ["--raw-base-path", str(e.raw), "--review-dir", str(e.review), "--batches-dir", str(e.batches),
+                "--pool", "cups", "--execute", "--max-items", "2"]
+        self.assertEqual(rb.main(argv), 0)
+        batches = rb.list_batches(e.batches)
+        self.assertEqual(sorted(len(m["items"]) for _p, _b, _d, m in batches), [1, 2, 2])
+        names = [i["item_name"] for _p, _b, _d, m in batches for i in m["items"]]
+        self.assertEqual(sorted(names), ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"])   # each item exactly once
+        self.assertEqual(rb.main(argv), 0)                    # re-run: all in open batches, nothing new
+        self.assertEqual(len(rb.list_batches(e.batches)), 3)
+
+    def test_split_items(self):
+        self.assertEqual(rb.split_items([], 2), [])
+        self.assertEqual(rb.split_items([1, 2, 3], 0), [[1, 2, 3]])
+        self.assertEqual(rb.split_items([1, 2, 3], 2), [[1, 2], [3]])
+
     def test_batches_dir_inside_raw_refused(self):
         e = self.env
         self.assertEqual(rb.main(["--raw-base-path", str(e.raw), "--review-dir", str(e.review),
