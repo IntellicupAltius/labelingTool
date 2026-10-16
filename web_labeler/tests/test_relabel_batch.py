@@ -250,6 +250,29 @@ class RelabelBatchTests(unittest.TestCase):
         self.assertEqual(rb.main(argv), 0)                    # re-run: all in open batches, nothing new
         self.assertEqual(len(rb.list_batches(e.batches)), 3)
 
+    def test_resolved_decision_is_skipped_and_does_not_block_new_one(self):
+        # Applied relabel moved x.jpg from CAJ to CAFFE_LATTE; the owner then flagged the new copy again.
+        e = self.env
+        e.put("CAJ", "x.jpg", b"X")
+        old = e.flag_relabel("CAJ", "x.jpg")
+        e.store.set_relabel_result(POOL, old, {"status": "applied", "at": "2026-10-16T16:00:00+02:00",
+                                               "batch_id": "RELABEL_cups_1", "apply_run": "r1"})
+        (e.raw / POOL / "images" / "CAJ" / "x.jpg").unlink()
+        (e.raw / POOL / "labels" / "CAJ" / "x.txt").unlink()
+        e.put("CAFFE_LATTE", "x.jpg", b"X", label="1 0.5 0.5 0.2 0.2\n")
+        new = e.flag_relabel("CAFFE_LATTE", "x.jpg", "ovo je CAJ")
+        pl = e.plan()
+        self.assertEqual([i["image_keys"] for i in pl.items], [[new]])
+        self.assertEqual(pl.skipped, [])
+
+    def test_unchanged_decision_is_exported_again(self):
+        e = self.env
+        e.put("CAJ", "u.jpg", b"U")
+        k = e.flag_relabel("CAJ", "u.jpg")
+        e.store.set_relabel_result(POOL, k, {"status": "unchanged", "at": "2026-10-16T16:00:00+02:00",
+                                             "batch_id": "RELABEL_cups_1", "apply_run": "r1"})
+        self.assertEqual([i["image_key"] for i in e.plan().items], [k])
+
     def test_split_items(self):
         self.assertEqual(rb.split_items([], 2), [])
         self.assertEqual(rb.split_items([1, 2, 3], 0), [[1, 2, 3]])

@@ -13,7 +13,8 @@ A batch is written to a hidden ``.tmp_*`` folder and renamed into place, so an i
 never leaves a half batch that the Dataset Fixer or a re-run could pick up.
 
 Which entries: every sidecar entry with ``owner_decision == "relabel"`` (MDQ-15c-1) that is not
-already in an OPEN batch (a manifest with ``"status": "open"``; MDQ-15c-3 closes it when applied).
+already in an OPEN batch (a manifest with ``"status": "open"``; MDQ-15c-3 closes it when applied) and that
+``apply_relabel.py`` has not already resolved (``relabel_result.status`` ``applied`` or ``deleted``).
 Per entry, in this order:
   - ``forward``     a ``_forward/`` key (video frame, not in RAW yet) — nothing to relabel.
   - ``no_snapshot`` the entry carries no ``relabel_snapshot`` — cannot prove the original is unchanged.
@@ -70,6 +71,7 @@ import flag_store  # noqa: E402  (sibling module; see sys.path insert above)
 
 FORMAT_VERSION = 1
 STATUS_OPEN = "open"
+RESOLVED_STATUSES = ("applied", "deleted")    # relabel_result of an entry apply_relabel.py finished
 MANIFEST = "manifest.json"
 BATCH_PREFIX = "RELABEL_"
 DEFAULT_RAW_BASE = Path("/opt/intellicup/datasets/raw/blaznavac")
@@ -259,7 +261,10 @@ def plan_pool(pool: str, raw_base: Path, review_dir: Path, batches_dir: Path) ->
     pool = flag_store.normalize_pool(pool)
     plan = Plan(pool=pool)
     entries = flag_store.FlagStore(review_dir).list_entries(pool)
-    relabel = {k: e for k, e in entries.items() if e.get("owner_decision") == flag_store.DECISION_RELABEL}
+    # A decision apply_relabel.py already resolved (applied / deleted) is done: it is not exported again and
+    # never blocks a newer decision on another copy of the same file name. "unchanged" stays exportable.
+    relabel = {k: e for k, e in entries.items() if e.get("owner_decision") == flag_store.DECISION_RELABEL
+               and (e.get("relabel_result") or {}).get("status") not in RESOLVED_STATUSES}
     if not relabel:
         return plan
     plan.class_names = _raw_class_names(raw_base, pool)
