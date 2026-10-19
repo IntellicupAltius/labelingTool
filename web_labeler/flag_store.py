@@ -10,12 +10,12 @@ Schema (``schema_version`` 1)::
 
     {"schema_version": 1,
      "entries": {"<class>/<filename.jpg>": {
-         "source": "manual_goca" | "analyzer_auto" | "data4_audit",
+         "source": "manual_goca" | "manual_owner" | "analyzer_auto" | "data4_audit",
          "category": one of CATEGORIES or null,
          "comment": "<free text>",
          "signal": {"metric": ..., "value": ...} | null,
          "flagged_at": "<ISO timestamp>",
-         "flagged_by": "goca" | "analyzer_overlap_report" | "data4_audit",
+         "flagged_by": "goca" | "owner" | "analyzer_overlap_report" | "data4_audit",
          "owner_decision": "approve_delete" | "keep" | "relabel" | null,
          "owner_decision_at": "<ISO timestamp>" | null,
          "flag_context": "retroactive_review" | "forward_labeling"}}}
@@ -49,6 +49,16 @@ removed through this module's manual API. The analyzer / audit sources (MDQ-9 / 
 the owner review queue (MDQ-6) will write the same files; concurrent writers are serialized
 with a per-pool lock file and every write is temp-file + ``os.replace`` (no torn files).
 A sidecar that fails to parse is never overwritten.
+
+MDQ-16a (owner RAW pass, 2026-10-19): ``set_raw_action`` lets the owner decide straight from RAW
+browse, without the flag -> review-queue round trip. ``approve_delete`` / ``relabel`` write a
+``source == "manual_owner"`` entry that is decided at once (category ``owner_direct``); ``flag``
+writes an ordinary pending manual flag (``flagged_by == "owner"``, category ``flag``) that goes to
+the review queue as before. Whatever undecided-or-queue-decided entry was on the key before is
+kept verbatim in ``replaced_flag`` and comes back on undo, so model-pass evidence is never lost.
+The caller passes ``lock_check`` (open relabel batch, archived file) — a locked key is never changed.
+The old categories (gibberish / wrong_frame_wrong_class / near_duplicate / mislabeled_background)
+are retired for new flags but stay valid, so existing sidecars need no migration.
 """
 from __future__ import annotations
 
@@ -59,7 +69,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional
 
 try:  # POSIX only; the labeler also runs on Windows where flagging is unavailable
     import fcntl  # type: ignore
@@ -68,8 +78,13 @@ except ImportError:  # pragma: no cover
 
 SCHEMA_VERSION = 1
 POOLS = ("glasses", "bottles", "cups", "pitchers", "shots")
-CATEGORIES = ("gibberish", "wrong_frame_wrong_class", "near_duplicate", "mislabeled_background")
+CATEGORY_FLAG = "flag"
+CATEGORY_OWNER_DIRECT = "owner_direct"
+LEGACY_CATEGORIES = ("gibberish", "wrong_frame_wrong_class", "near_duplicate", "mislabeled_background")
+CATEGORIES = (CATEGORY_FLAG, *LEGACY_CATEGORIES)     # legacy ones still accepted until the UI drops them (MDQ-16c)
 CATEGORY_LABELS = {
+    "flag": "Flag",
+    "owner_direct": "Owner decision (RAW)",
     "gibberish": "Gibberish",
     "wrong_frame_wrong_class": "Wrong frame, wrong class",
     "near_duplicate": "Near-duplicate",
@@ -77,7 +92,10 @@ CATEGORY_LABELS = {
 }
 OWNER_DECISIONS = ("approve_delete", "keep", "relabel")
 DECISION_RELABEL = "relabel"
+DECISION_DELETE = "approve_delete"
+RAW_ACTIONS = (DECISION_DELETE, DECISION_RELABEL, CATEGORY_FLAG)
 SOURCE_MANUAL = "manual_goca"
+SOURCE_OWNER = "manual_owner"
 SOURCE_ANALYZER_AUTO = "analyzer_auto"
 SOURCE_DATA4_AUDIT = "data4_audit"
 AUTO_SOURCES = (SOURCE_ANALYZER_AUTO, SOURCE_DATA4_AUDIT)
@@ -149,6 +167,15 @@ def _now() -> str:
 
 def _is_mutable_by_manual(entry: dict) -> bool:
     return entry.get("source") == SOURCE_MANUAL and entry.get("owner_decision") is None
+
+
+def _is_owner_raw_action(entry: dict) -> bool:
+    """An entry the owner wrote from RAW browse (MDQ-16a): a direct decision, or his own pending flag
+    that carries ``replaced_flag`` / ``flagged_by == "owner"``. Undo and re-decide apply to it."""
+    if entry.get("source") == SOURCE_OWNER:
+        return True
+    return entry.get("source") == SOURCE_MANUAL and entry.get("flagged_by") == "owner" \
+        and entry.get("owner_decision") is None
 
 
 def _is_replaceable_by_manual(entry: dict) -> bool:
@@ -254,6 +281,7 @@ class FlagStore:
         comment: str = "",
         flag_context: str = CONTEXT_RETROACTIVE,
         extra: Optional[dict] = None,
+        flagged_by: str = "goca",
     ) -> dict:
         pool = normalize_pool(pool)
         forward = flag_context == CONTEXT_FORWARD
@@ -282,7 +310,7 @@ class FlagStore:
                 "comment": comment,
                 "signal": None,
                 "flagged_at": _now(),
-                "flagged_by": "goca",
+                "flagged_by": flagged_by,
                 "owner_decision": None,
                 "owner_decision_at": None,
                 "flag_context": flag_context,
@@ -292,6 +320,8 @@ class FlagStore:
                     entry[k] = extra[k]
             if replaced is not None:
                 entry["replaced_auto"] = replaced
+            if existing is not None and isinstance(existing.get("replaced_flag"), dict):
+                entry["replaced_flag"] = existing["replaced_flag"]   # re-saving an owner RAW flag keeps what it replaced
             doc["entries"][image_key] = entry
             self._write(pool, doc)
         return entry
@@ -313,7 +343,10 @@ class FlagStore:
                 raise FlagConflict(_conflict_message(existing), existing)
             ra = existing.get("replaced_auto")
             restored = None
-            if isinstance(ra, dict) and ra.get("source") in AUTO_SOURCES:
+            if isinstance(existing.get("replaced_flag"), dict):      # an owner RAW flag (MDQ-16a) keeps the whole entry
+                restored = existing["replaced_flag"]
+                doc["entries"][image_key] = restored
+            elif isinstance(ra, dict) and ra.get("source") in AUTO_SOURCES:
                 restored = {k: ra.get(k) for k in _REPLACED_AUTO_KEYS}
                 restored["owner_decision"] = None
                 restored["owner_decision_at"] = None
@@ -327,6 +360,81 @@ class FlagStore:
         """True if the manual flag was removed, False if there was none (restores a replaced automated flag)."""
         return self.unflag_manual(pool, image_key)["removed"]
 
+
+    # -- owner RAW pass (MDQ-16a) ------------------------------------------------
+
+    def set_raw_action(
+        self,
+        pool: str,
+        image_key: str,
+        action: Optional[str],
+        comment: str = "",
+        relabel_snapshot: Optional[dict] = None,
+        lock_check: Optional[Callable[[str, Optional[dict]], Optional[str]]] = None,
+    ) -> dict:
+        """The owner's one-key action on a RAW image. ``{"entry": entry | None}``.
+
+        ``action``: ``approve_delete`` / ``relabel`` (decided at once, ``source == manual_owner``),
+        ``flag`` (pending manual flag for the review queue), or None = undo the owner's action on
+        this key. Any previous entry that is not the owner's own RAW action (a pending manual or
+        automated flag, or one already decided in the review queue) is stored verbatim in
+        ``replaced_flag`` and written back by undo. A relabel with an empty comment inherits the
+        replaced entry's comment, so Goca still sees the model-pass hint. ``lock_check(image_key,
+        existing)`` runs under the sidecar lock and returns a reason when the key must not change
+        (already in an open relabel batch, archived); the store then raises ``FlagConflict``.
+        """
+        pool = normalize_pool(pool)
+        validate_image_key(image_key, forward=False)
+        if action is not None and action not in RAW_ACTIONS:
+            raise FlagValidationError(f"action must be one of {', '.join(RAW_ACTIONS)} or null")
+        comment = (comment or "").strip()
+        if len(comment) > MAX_COMMENT_LEN:
+            raise FlagValidationError(f"comment is longer than {MAX_COMMENT_LEN} characters")
+        if action == DECISION_RELABEL:
+            snap = relabel_snapshot
+            if not isinstance(snap, dict) or not isinstance(snap.get("image_sha256"), str) or not snap["image_sha256"] \
+                    or (snap.get("label_sha256") is not None and not isinstance(snap["label_sha256"], str)):
+                raise FlagValidationError("relabel needs a relabel_snapshot with image_sha256 (and label_sha256 or null)")
+        with self._locked(pool):
+            doc = self._read(pool)
+            existing = doc["entries"].get(image_key)
+            if lock_check is not None:
+                reason = lock_check(image_key, dict(existing) if existing else None)
+                if reason:
+                    raise FlagConflict(reason, existing)
+            own = existing is not None and _is_owner_raw_action(existing)
+            replaced = existing.get("replaced_flag") if own else existing
+            if action is None:
+                if existing is None:
+                    return {"entry": None}
+                if not own:
+                    raise FlagConflict("nothing of the owner's to undo on this image", existing)
+                if isinstance(replaced, dict):
+                    doc["entries"][image_key] = replaced
+                else:
+                    del doc["entries"][image_key]
+                self._write(pool, doc)
+                return {"entry": dict(replaced) if isinstance(replaced, dict) else None}
+            now = _now()
+            if action == CATEGORY_FLAG:
+                entry = {"source": SOURCE_MANUAL, "category": CATEGORY_FLAG, "comment": comment, "signal": None,
+                         "flagged_at": now, "flagged_by": "owner", "owner_decision": None,
+                         "owner_decision_at": None, "flag_context": CONTEXT_RETROACTIVE}
+            else:
+                if not comment and isinstance(replaced, dict) and action == DECISION_RELABEL:
+                    comment = (replaced.get("comment") or "").strip()
+                entry = {"source": SOURCE_OWNER, "category": CATEGORY_OWNER_DIRECT, "comment": comment,
+                         "signal": None, "flagged_at": now, "flagged_by": "owner", "owner_decision": action,
+                         "owner_decision_at": now, "flag_context": CONTEXT_RETROACTIVE}
+                if action == DECISION_RELABEL:
+                    entry["relabel_snapshot"] = {"image_sha256": relabel_snapshot["image_sha256"],
+                                                 "label_sha256": relabel_snapshot.get("label_sha256"),
+                                                 "recorded_at": now}
+            if isinstance(replaced, dict):
+                entry["replaced_flag"] = replaced
+            doc["entries"][image_key] = entry
+            self._write(pool, doc)
+        return {"entry": dict(entry)}
 
     # -- owner review queue (MDQ-6) ---------------------------------------------
 
