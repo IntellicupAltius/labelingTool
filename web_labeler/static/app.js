@@ -438,11 +438,8 @@ const api = {
     if (!r.ok) throw new Error(data.detail || `Flag request failed (${r.status})`);
     return data;
   },
-  async rawFlagSet(imageKey, pool, category, comment) {
-    return this._flagFetch("/api/raw/flag", "POST", {image_key: imageKey, pool, category, comment});
-  },
-  async rawFlagRemove(imageKey, pool) {
-    return this._flagFetch(`/api/raw/flag?image_key=${encodeURIComponent(imageKey)}&pool=${encodeURIComponent(pool)}`, "DELETE");
+  async rawAction(imageKey, pool, action, comment) {     // MDQ-16b: D / R / flag / undo (action null)
+    return this._flagFetch("/api/raw/action", "POST", {image_key: imageKey, pool, action, comment});
   },
   async frameFlagGet(model, frameIdx) {
     return this._flagFetch(`/api/frame/flag?model=${encodeURIComponent(model)}&frame_idx=${frameIdx}`, "GET");
@@ -551,7 +548,8 @@ const state = {
   // flag panel (MDQ-3)
   flagPanelOpen: false,
   flagTarget: null,      // {kind: "raw"|"frame", pool, imageKey?, frameIdx?, label}
-  flagCategory: null,
+  flagMode: "flag",      // flag panel: "flag" (X) | "relabel" (R, RAW only)
+  rawStatus: null,       // /api/raw/annotations raw_status of the current RAW image (badge + lock)
   flagExisting: null,
   lastFlagPool: null,
   rawImageKey: null,     // "<class>/<filename>" of the RAW image on screen
@@ -628,6 +626,7 @@ function resetWorkspaceUI(message) {
   renderCaseInfoBanner();
   state.rawImageKey = null;
   state.rawFlag = null;
+  state.rawStatus = null;
   state.relabelNote = null;
   closeFlagPanel();
   updateFlagBadge();
@@ -1081,6 +1080,7 @@ async function refreshLists() {
     if (state.rawLoaded) {
       state.rawImageKey = data.image_key || null;
       state.rawFlag = data.flag || null;
+      state.rawStatus = data.raw_status || null;
       updateFlagBadge();
     } else {
       state.relabelNote = data.relabel_note || null;   // MDQ-15c-2: owner's relabel comment in a relabel batch
@@ -1981,16 +1981,15 @@ function installCanvasHandlers() {
 
 // ── Flag panel (MDQ-3) ─────────────────────────────────────────────────────
 const FLAG_POOLS = ["glasses", "bottles", "cups", "pitchers", "shots"];
-const FLAG_CATEGORIES = [
-  {key: "gibberish", label: "Gibberish", shortcut: "X",
-   hint: "Blur / out of focus so strong that even a person cannot tell the class."},
-  {key: "wrong_frame_wrong_class", label: "Wrong frame, wrong class",
-   hint: "The image is clearly NOT the declared class, regardless of image quality."},
-  {key: "near_duplicate", label: "Near-duplicate",
-   hint: "Visually almost identical to another example of this class — adds no new information."},
-  {key: "mislabeled_background", label: "Mislabeled background",
-   hint: "A background image that actually contains a visible example of some class."},
-];
+// MDQ-16c: what the RAW-browse badge says for /api/raw/annotations' raw_status.state.
+const RAW_BADGE = {
+  in_batch: {cls: "inBatch", text: s => `🔒 IN BATCH ${s.batch_id} — locked until Goca's batch is applied`},
+  delete:   {cls: "del",     text: () => "D · delete (archived on the next archive run) — D again = undo"},
+  relabel:  {cls: "relabel", text: s => `R · relabel — ${s.comment || "(no comment)"} — R again = undo`},
+  flag:     {cls: "flagged", text: s => `? · flagged for the review queue${s.comment ? " — " + s.comment : ""}`},
+  model:    {cls: "model",   text: s => `MODEL · ${s.reason || "automatic flag"} — D / R / X overrides it`},
+  decided:  {cls: "flagged", text: (s, f) => `decided in the review queue: ${(f && f.owner_decision) || "?"}`},
+};
 
 // Image number box next to Prev/Next shows the current position (1-based) and the total.
 function updateJumpImg() {
@@ -2011,35 +2010,47 @@ function isTypingTarget(t) {
 function updateFlagBadge() {
   const el = document.getElementById("flagBadge");
   if (!el) return;
-  const f = (state.mode === "dataset" && state.rawLoaded) ? state.rawFlag : null;
+  el.className = "flagBadge";
+  const raw = state.mode === "dataset" && state.rawLoaded;
   const rn = (state.mode === "dataset" && !state.rawLoaded && state.datasetLoaded) ? state.relabelNote : null;
   if (rn) {
     el.textContent = `⚑ RELABEL — ${rn.comment || "(no comment)"}  [${rn.image_key}]`;
     el.style.display = "block";
     return;
   }
-  if (!f) {
+  const st = raw ? state.rawStatus : null;
+  const b = st && RAW_BADGE[st.state];
+  const f = raw ? state.rawFlag : null;
+  if (b) {
+    el.classList.add(b.cls);
+    el.textContent = b.text(st, f);
+  } else if (!st && f) {    // no status from the server (unreadable batch manifest): plain flag text
+    el.textContent = `⚑ FLAGGED — ${f.category || (f.signal ? `${f.signal.metric}: ${f.signal.value}` : "flagged")}`
+      + `${f.owner_decision ? " · owner: " + f.owner_decision : ""}${f.comment ? " — " + f.comment : ""}`;
+  } else {
     el.style.display = "none";
     el.textContent = "";
     return;
   }
-  const cat = FLAG_CATEGORIES.find(c => c.key === f.category);
-  const what = f.category ? (cat ? cat.label : f.category)
-    : (f.signal ? `${f.signal.metric}: ${f.signal.value}` : "flagged");
-  const dec = f.owner_decision ? ` · owner: ${f.owner_decision}` : "";
-  el.textContent = `⚑ FLAGGED — ${what}${dec}${f.comment ? " — " + f.comment : ""}`;
   el.style.display = "block";
 }
 
-// Goca may write a manual flag over her own undecided flag AND over an undecided automated one
-// (analyzer_auto / data4_audit) — the server keeps the automated flag in `replaced_auto` and
-// restores it on Unflag. Anything the owner already decided on stays locked.
+// Video-frame flags: Goca may write over her own undecided flag AND over an undecided automated one.
+// Anything the owner already decided on stays locked.
 function flagCanSave(entry) {
   return !entry || (!entry.owner_decision && ["manual_goca", "analyzer_auto", "data4_audit"].includes(entry.source));
 }
 
 function flagIsMutable(entry) {
   return !entry || (entry.source === "manual_goca" && !entry.owner_decision);
+}
+
+// An entry the owner wrote from RAW browse (MDQ-16a): his direct D/R, or his own still-pending flag.
+// Only these are undone by pressing the same key again.
+function isOwnerRawAction(entry) {
+  if (!entry) return false;
+  if (entry.source === "manual_owner") return true;
+  return entry.source === "manual_goca" && entry.flagged_by === "owner" && !entry.owner_decision;
 }
 
 function showFlagError(msg) {
@@ -2049,32 +2060,48 @@ function showFlagError(msg) {
 function renderFlagPanel() {
   const t = state.flagTarget;
   if (!t) return;
+  const relabel = state.flagMode === "relabel";
+  $("flagTitle").textContent = relabel ? "Relabel (R) — comment for Goca" : "Flag for the review queue (X)";
   $("flagTarget").textContent = `${t.pool} · ${t.label}`;
   $("flagPoolRow").style.display = t.kind === "frame" ? "" : "none";
+  $("flagCommentLabel").textContent = relabel
+    ? "Comment for Goca (optional) — Enter saves, Shift+Enter = new line"
+    : "Comment (optional) — Enter saves; X with an empty comment = flag without a comment";
+  $("flagHint").style.display = relabel ? "none" : "";
   const ex = state.flagExisting;
   const box = $("flagExisting");
-  if (ex) {
-    const what = ex.category ? ex.category : (ex.signal ? `${ex.signal.metric}: ${ex.signal.value}` : "flagged");
+  let editable = true;
+  if (ex && t.kind === "raw") {
+    const what = flagReasonText(ex);
+    box.textContent = ex.source === "manual_owner" ? `Your decision: ${ex.owner_decision}${ex.comment ? " — " + ex.comment : ""}. Saving replaces it.`
+      : `Already flagged by ${ex.flagged_by || ex.source}${ex.owner_decision ? ", queue decision: " + ex.owner_decision : ""} (${what}). `
+        + "Saving replaces it; the earlier flag is kept and comes back if you undo (same key again).";
+    box.style.display = "";
+  } else if (ex) {
+    const what = flagReasonText(ex);
+    editable = flagCanSave(ex);
     if (flagIsMutable(ex)) {
-      const ra = ex.replaced_auto ? ` It replaced an automatic ${ex.replaced_auto.source} flag; Unflag brings that one back.` : "";
-      box.textContent = `Already flagged by you (${what}${ex.comment ? " — " + ex.comment : ""}). Pick a reason and save to change it, or Unflag.${ra}`;
-    } else if (flagCanSave(ex)) {
-      box.textContent = `Automatically flagged by ${ex.source} (${what}). Pick a reason and save to replace it with your manual flag (the automatic one is kept and comes back if you Unflag).`;
+      box.textContent = `Already flagged by you (${what}). Save to change the comment, or Unflag.`;
+    } else if (editable) {
+      box.textContent = `Automatically flagged by ${ex.source} (${what}). Save to replace it with your manual flag (the automatic one comes back if you Unflag).`;
     } else {
-      const dec = ex.owner_decision ? `, owner decided: ${ex.owner_decision}` : "";
-      box.textContent = `Already flagged by ${ex.source}${dec} (${what}). It can no longer be changed here.`;
+      box.textContent = `Already flagged by ${ex.source}${ex.owner_decision ? ", owner decided: " + ex.owner_decision : ""} (${what}). It can no longer be changed here.`;
     }
     box.style.display = "";
   } else {
     box.style.display = "none";
   }
-  const editable = flagCanSave(ex);
+  // R with an empty comment keeps the model / earlier flag comment for Goca (flag_store.set_raw_action).
+  $("flagComment").placeholder = relabel
+    ? (ex && ex.comment && ex.source !== "manual_owner" ? `empty = keep: ${ex.comment}` : "e.g. oznaci sve case, boks bez tanjirica")
+    : "Why is this image doubtful?";
   $("flagSaveBtn").disabled = !editable;
-  $("flagRemoveBtn").style.display = (ex && flagIsMutable(ex)) ? "" : "none";
-  for (const b of $("flagCats").children) {
-    b.classList.toggle("selected", b.dataset.cat === state.flagCategory);
-    b.disabled = !editable;
-  }
+  $("flagSaveBtn").textContent = relabel ? "Relabel (Enter)" : "Flag (Enter)";
+  $("flagRemoveBtn").style.display = (t.kind === "frame" && ex && flagIsMutable(ex)) ? "" : "none";
+}
+
+function flagReasonText(ex) {
+  return ex.category ? ex.category : (ex.signal ? `${ex.signal.metric}: ${ex.signal.value}` : "flagged");
 }
 
 async function loadFlagExisting() {
@@ -2085,20 +2112,18 @@ async function loadFlagExisting() {
     if (t.kind === "frame") {
       const res = await api.frameFlagGet(t.pool, t.frameIdx);
       state.flagExisting = res.entry || null;
+      if (state.flagExisting && flagIsMutable(state.flagExisting)) $("flagComment").value = state.flagExisting.comment || "";
     } else {
       state.flagExisting = state.rawFlag || null;
     }
   } catch (e) {
     showFlagError(e.message || String(e));
   }
-  if (state.flagExisting && state.flagExisting.category) {
-    state.flagCategory = state.flagExisting.category;
-    $("flagComment").value = state.flagExisting.comment || "";
-  }
   renderFlagPanel();
 }
 
-async function openFlagPanel() {
+// mode: "flag" (X, RAW or video frame) | "relabel" (R, RAW only)
+async function openFlagPanel(mode) {
   if (state.flagPanelOpen || state.modalOpen) return;
   if (!state.config || !state.config.flagging_available) {
     setStatus("Flagging is not available on this machine (it needs the server's raw_review folder).");
@@ -2111,6 +2136,7 @@ async function openFlagPanel() {
               imageKey: state.rawImageKey, label: state.rawImageKey};
   } else if (state.mode === "video" && state.videoLoaded) {
     stopPlayback();
+    mode = "flag";
     const fa = state.frameAnnotations || [];
     const fromAnn = fa.length ? String(fa[fa.length - 1].model || "").toLowerCase() : "";
     const fromSel = String($("modelSelect").value || "").toLowerCase();
@@ -2121,8 +2147,8 @@ async function openFlagPanel() {
     setStatus("Flagging works on RAW images (Dataset Fixer → Load raw) and on a loaded video frame.");
     return;
   }
+  state.flagMode = mode === "relabel" ? "relabel" : "flag";
   state.flagTarget = target;
-  state.flagCategory = null;
   state.flagExisting = null;
   $("flagComment").value = "";
   $("flagPoolSelect").value = target.pool;
@@ -2131,85 +2157,109 @@ async function openFlagPanel() {
   $("flagPanel").classList.remove("hidden");
   renderFlagPanel();
   await loadFlagExisting();
+  if (state.flagPanelOpen) $("flagComment").focus();
 }
 
 function closeFlagPanel() {
   state.flagPanelOpen = false;
   state.flagTarget = null;
   state.flagExisting = null;
-  state.flagCategory = null;
   const panel = document.getElementById("flagPanel");
   if (panel) panel.classList.add("hidden");
 }
 
-function selectFlagCategory(key) {
-  if (!flagCanSave(state.flagExisting)) return;
-  state.flagCategory = key;
-  renderFlagPanel();
+// MDQ-16c: one owner action on the current RAW image through /api/raw/action. Updates the badge only
+// if the user is still on the same image.
+async function rawAction(action, comment) {
+  const key = state.rawImageKey;
+  const pool = String(state.datasetModel || "").toLowerCase();
+  const res = await api.rawAction(key, pool, action, comment || "");
+  if (state.rawImageKey === key) {
+    state.rawFlag = res.entry || null;
+    state.rawStatus = res.raw_status || null;
+    updateFlagBadge();
+  }
+  return res;
 }
 
-// `opts.category` / `opts.comment` override the panel state (used by the X-X quick gibberish flag, which
-// must be identical to clicking Gibberish with an empty comment).
+// D / R / X in RAW browse. kind: "approve_delete" | "relabel" | "flag".
+// The same key on the owner's own action undoes it (stays on the image); otherwise D saves at once and
+// R / X open the comment panel. Every save moves on to the next image.
+async function ownerRawKey(kind) {
+  if (!state.config || !state.config.flagging_available) {
+    setStatus("Flagging is not available on this machine (it needs the server's raw_review folder).");
+    return;
+  }
+  const key = state.rawImageKey;
+  if (!key) { setStatus("No RAW image is loaded."); return; }
+  const st = state.rawStatus;
+  if (st && st.locked) {
+    setStatus(`Locked: ${key} is in open relabel batch ${st.batch_id} — change it there or after apply.`);
+    return;
+  }
+  const f = state.rawFlag;
+  const current = isOwnerRawAction(f) ? (f.owner_decision || "flag") : null;
+  if (current === kind) {
+    try {
+      const res = await rawAction(null);
+      setStatus(`Undone: ${key}` + (res.entry ? ` (the earlier ${res.entry.flagged_by || res.entry.source} flag is back)` : ""));
+    } catch (e) {
+      setStatus(`Undo failed: ${e.message || e}`);
+    }
+    return;
+  }
+  if (kind === "approve_delete") {
+    try {
+      await rawAction("approve_delete");
+    } catch (e) {
+      setStatus(`D failed: ${e.message || e}`);
+      return;
+    }
+    await renderRawImage(state.datasetImageIdx + 1);
+    setStatus(`D (delete): ${key}`);
+    return;
+  }
+  await openFlagPanel(kind === "relabel" ? "relabel" : "flag");
+}
+
+// `opts.comment` overrides the comment field (X X = flag without a comment).
 async function saveFlag(opts) {
   const t = state.flagTarget;
-  if (!t || !flagCanSave(state.flagExisting)) return;
-  const category = (opts && opts.category) || state.flagCategory;
-  if (!category) { showFlagError("Pick a reason first (keys 1–4)."); return; }
+  if (!t) return;
   const comment = (opts && opts.comment !== undefined) ? opts.comment : $("flagComment").value;
   try {
-    let res;
     if (t.kind === "raw") {
-      res = await api.rawFlagSet(t.imageKey, t.pool, category, comment);
-      state.rawFlag = res.entry;
-      updateFlagBadge();
+      const action = state.flagMode === "relabel" ? "relabel" : "flag";
+      await rawAction(action, comment);
+      closeFlagPanel();
+      await renderRawImage(state.datasetImageIdx + 1);
+      setStatus(`${action === "relabel" ? "R (relabel)" : "Flagged"}: ${t.label}`);
     } else {
-      res = await api.frameFlagSet(t.pool, t.frameIdx, category, comment);
+      if (!flagCanSave(state.flagExisting)) return;
+      await api.frameFlagSet(t.pool, t.frameIdx, "flag", comment);
+      state.lastFlagPool = t.pool;
+      closeFlagPanel();
+      setStatus(`Flagged: ${t.label}`);
     }
-    state.lastFlagPool = t.pool;
-    closeFlagPanel();
-    setStatus(`Flagged (${res.entry.category}): ${t.label}`);
   } catch (e) {
     showFlagError(e.message || String(e));
   }
 }
 
+// Video-frame flags only; a RAW action is undone with the same key.
 async function removeFlag() {
   const t = state.flagTarget;
-  if (!t || !state.flagExisting || !flagIsMutable(state.flagExisting)) return;
+  if (!t || t.kind !== "frame" || !state.flagExisting || !flagIsMutable(state.flagExisting)) return;
   try {
-    if (t.kind === "raw") {
-      const rr = await api.rawFlagRemove(t.imageKey, t.pool);
-      state.rawFlag = rr.restored || null;   // a replaced automatic flag comes back
-      updateFlagBadge();
-    } else {
-      await api.frameFlagRemove(t.pool, t.frameIdx);
-    }
+    await api.frameFlagRemove(t.pool, t.frameIdx);
     closeFlagPanel();
-    setStatus(state.rawFlag && t.kind === "raw" ? `Manual flag removed, automatic ${state.rawFlag.source} flag restored: ${t.label}` : `Unflagged: ${t.label}`);
+    setStatus(`Unflagged: ${t.label}`);
   } catch (e) {
     showFlagError(e.message || String(e));
   }
 }
 
 function installFlagPanel() {
-  const cats = $("flagCats");
-  cats.innerHTML = "";
-  FLAG_CATEGORIES.forEach((c, i) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "flagCat";
-    b.dataset.cat = c.key;
-    const name = document.createElement("div");
-    name.className = "flagCatName";
-    name.textContent = `${i + 1} · ${c.label}${c.shortcut ? ` [${c.shortcut}]` : ""}`;
-    const hint = document.createElement("div");
-    hint.className = "flagCatHint";
-    hint.textContent = c.hint;
-    b.appendChild(name);
-    b.appendChild(hint);
-    b.onclick = () => selectFlagCategory(c.key);
-    cats.appendChild(b);
-  });
   const ps = $("flagPoolSelect");
   ps.innerHTML = "";
   for (const p of FLAG_POOLS) {
@@ -2221,11 +2271,10 @@ function installFlagPanel() {
   ps.onchange = async () => {
     if (!state.flagTarget || state.flagTarget.kind !== "frame") return;
     state.flagTarget.pool = ps.value;
-    state.flagCategory = null;
     $("flagComment").value = "";
     await loadFlagExisting();
   };
-  $("flagSaveBtn").onclick = saveFlag;
+  $("flagSaveBtn").onclick = () => saveFlag();
   $("flagRemoveBtn").onclick = removeFlag;
   $("flagCancelBtn").onclick = closeFlagPanel;
 }
@@ -3041,24 +3090,32 @@ function installHotkeys() {
     if (state.flagPanelOpen) {
       const typing = isTypingTarget(e.target);
       if (e.key === "Escape") { e.preventDefault(); closeFlagPanel(); }
-      else if (e.key === "Enter" && (e.ctrlKey || e.metaKey || !typing)) { e.preventDefault(); await saveFlag(); }
-      // X again while the panel is open = instant gibberish flag, no comment (X is a plain character in the comment field).
-      else if ((e.key === "x" || e.key === "X") && !typing && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      else if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); await saveFlag(); }   // Shift+Enter = new line
+      // X X = instant flag without a comment: X in the flag panel while the comment is still empty
+      // (the field has focus, so a non-empty comment keeps X as a plain character).
+      else if ((e.key === "x" || e.key === "X") && state.flagMode === "flag" && (!typing || !$("flagComment").value)
+               && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
-        await saveFlag({category: "gibberish", comment: ""});
-      }
-      else if (!typing && FLAG_CATEGORIES.some((_c, i) => e.key === String(i + 1))) {
-        e.preventDefault();
-        selectFlagCategory(FLAG_CATEGORIES[parseInt(e.key, 10) - 1].key);
+        await saveFlag({comment: ""});
       }
       return;
     }
 
-    // X = flag the current RAW image / video frame for review (Dataset Fixer raw-browse + Video Labeler).
+    // MDQ-16c — RAW browse (Dataset Fixer → Load raw): D = delete, R = relabel, X = flag for the review
+    // queue; the same key again undoes. Not in a relabel batch / normal dataset (handled below: X only says so).
+    if (state.mode === "dataset" && state.rawLoaded && !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat
+        && !isTypingTarget(e.target) && ["d", "r", "x"].includes(e.key.toLowerCase())) {
+      e.preventDefault();
+      const k = e.key.toLowerCase();
+      await ownerRawKey(k === "d" ? "approve_delete" : k === "r" ? "relabel" : "flag");
+      return;
+    }
+
+    // X = flag the current video frame for review (Video Labeler).
     if ((e.key === "x" || e.key === "X") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat
         && !isTypingTarget(e.target) && (state.mode === "video" || state.mode === "dataset")) {
       e.preventDefault();
-      await openFlagPanel();
+      await openFlagPanel("flag");
       return;
     }
 

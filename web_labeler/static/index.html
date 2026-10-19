@@ -194,7 +194,7 @@
         </div>
 
         <div class="hint">
-          Drag to draw a box. Then pick class (type to filter) and press Enter to save. Press X to flag a doubtful image for the owner's review. Hold B to hide the boxes (editing is locked meanwhile); O toggles the camera crop zone in the Dataset Fixer. Z zooms in where the mouse is (mouse wheel = more/less, Z again = whole frame).
+          Drag to draw a box. Then pick class (type to filter) and press Enter to save. RAW browse: D = delete, R = relabel (comment for Goca, Enter), X = flag for the review queue (X X = no comment); the same key again undoes; each one moves to the next image. In a video, X flags the frame. Hold B to hide the boxes (editing is locked meanwhile); O toggles the camera crop zone in the Dataset Fixer. Z zooms in where the mouse is (mouse wheel = more/less, Z again = whole frame).
         </div>
       </section>
 
@@ -313,7 +313,7 @@
        Flagging only writes a sidecar entry — it never deletes or edits anything. -->
   <div id="flagPanel" class="modal hidden">
     <div class="modalCard flagCard">
-      <div class="modalTitle">Flag for review</div>
+      <div id="flagTitle" class="modalTitle">Flag for review</div>
       <div id="flagTarget" class="flagTarget"></div>
 
       <div id="flagPoolRow" class="modalRow" style="display:none;">
@@ -326,18 +326,13 @@
       <div id="flagExisting" class="flagExisting" style="display:none;"></div>
 
       <div class="modalRow">
-        <div class="label">Reason (keys 1–4)</div>
-        <div id="flagCats" class="flagCats"></div>
-      </div>
-
-      <div class="modalRow">
         <label class="field full">
-          <div class="label">Comment (optional)</div>
+          <div id="flagCommentLabel" class="label">Comment (optional)</div>
           <textarea id="flagComment" rows="3" maxlength="2000" placeholder="Why is this image doubtful?"></textarea>
         </label>
       </div>
 
-      <div class="label">Do NOT flag: low-but-readable confidence, or an unusual angle/lighting that is still labeled correctly.</div>
+      <div id="flagHint" class="label">Do NOT flag: low-but-readable confidence, or an unusual angle/lighting that is still labeled correctly.</div>
 
       <div class="modalActions">
         <button id="flagRemoveBtn" class="btn" style="margin-right:auto; display:none;">Unflag</button>
