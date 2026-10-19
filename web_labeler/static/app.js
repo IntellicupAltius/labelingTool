@@ -1983,7 +1983,7 @@ function installCanvasHandlers() {
 const FLAG_POOLS = ["glasses", "bottles", "cups", "pitchers", "shots"];
 // MDQ-16c: what the RAW-browse badge says for /api/raw/annotations' raw_status.state.
 const RAW_BADGE = {
-  in_batch: {cls: "inBatch", text: s => `🔒 IN BATCH ${s.batch_id} — locked until Goca's batch is applied`},
+  in_batch: {cls: "inBatch", text: s => `🔒 IN BATCH ${s.batch_id} — locked until the batch is applied`},
   delete:   {cls: "del",     text: () => "D · delete (archived on the next archive run) — D again = undo"},
   relabel:  {cls: "relabel", text: s => `R · relabel — ${s.comment || "(no comment)"} — R again = undo`},
   flag:     {cls: "flagged", text: s => `? · flagged for the review queue${s.comment ? " — " + s.comment : ""}`},
@@ -2061,11 +2061,11 @@ function renderFlagPanel() {
   const t = state.flagTarget;
   if (!t) return;
   const relabel = state.flagMode === "relabel";
-  $("flagTitle").textContent = relabel ? "Relabel (R) — comment for Goca" : "Flag for the review queue (X)";
+  $("flagTitle").textContent = relabel ? "Relabel (R) — comment for labelers" : "Flag for the review queue (X)";
   $("flagTarget").textContent = `${t.pool} · ${t.label}`;
   $("flagPoolRow").style.display = t.kind === "frame" ? "" : "none";
   $("flagCommentLabel").textContent = relabel
-    ? "Comment for Goca (optional) — Enter saves, Shift+Enter = new line"
+    ? "Comment for labelers (optional) — Enter saves, Shift+Enter = new line"
     : "Comment (optional) — Enter saves; X with an empty comment = flag without a comment";
   $("flagHint").style.display = relabel ? "none" : "";
   const ex = state.flagExisting;
@@ -2815,7 +2815,7 @@ function renderReviewInfo(it) {
   };
   actions.appendChild(mk("Approve delete (D)", "approve_delete", "active-delete", "Approve deleting this image from RAW (D)"));
   actions.appendChild(mk("Keep (K)", "keep", "active-keep", "Keep this image (K)"));
-  actions.appendChild(mk("Relabel (R)", "relabel", "active-relabel", "Keep the image, but its RAW label must be corrected (R). Goca's flag comment says what to fix."));
+  actions.appendChild(mk("Relabel (R)", "relabel", "active-relabel", "Keep the image, but its RAW label must be corrected (R). The flag comment says what to fix."));
   if (decision) actions.appendChild(mk("Undo", null, null, "Clear the decision"));
   right.appendChild(actions);
   const fr = el("button", "btn reviewFullResBtn", review.fullRes ? "Full res: on" : "Full res: off");
