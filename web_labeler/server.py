@@ -252,6 +252,14 @@ class RawFlagRequest(BaseModel):
     pool: Optional[str] = None  # defaults to the loaded raw session's model
 
 
+class RawActionRequest(BaseModel):
+    """MDQ-16b: the owner's one-key action in RAW browse (D / R / X)."""
+    image_key: str
+    action: Optional[str] = None  # "approve_delete" | "relabel" | "flag" | null (undo)
+    comment: str = ""
+    pool: Optional[str] = None
+
+
 class ReviewDecisionRequest(BaseModel):
     pool: str
     image_key: str
@@ -268,7 +276,7 @@ class FrameFlagRequest(BaseModel):
 def create_app() -> FastAPI:
     # Directories (configurable via env vars)
     base_dir = Path(__file__).resolve().parents[1]
-    config_path = base_dir / "labeler_config.json"
+    config_path = Path(os.getenv("LABELER_CONFIG_PATH") or base_dir / "labeler_config.json")  # env: tests use a tmp config
 
     def _default_data_root() -> Path:
         # Cross-platform (Windows/Linux): puts data outside the project by default.
@@ -737,7 +745,14 @@ def create_app() -> FastAPI:
                 flag = flag_store.get(raw_session.model, image_key)
             except FlagError as e:  # a bad sidecar must not break browsing
                 flag_error = str(e)
+        raw_status = None
+        if image_key:
+            try:
+                raw_status = _raw_status(normalize_pool(raw_session.model), image_key, flag)
+            except (FlagError, _relabel_batch.RelabelBatchError, OSError, ValueError):
+                raw_status = None   # badge is informational: a bad manifest must not break browsing
         return {
+            "raw_status": raw_status,
             "image_idx": idx,
             "annotations": [ann_to_dict(a) for a in anns],
             "is_background": False,
@@ -787,6 +802,98 @@ def create_app() -> FastAPI:
         validate_image_key(image_key)
         res = flag_store.unflag_manual(p, image_key)
         return {"pool": p, "image_key": image_key, "removed": res["removed"], "restored": res["restored"]}
+
+    # ---------------- Owner RAW actions (MDQ-16b) ----------------
+    # D / R / X straight from RAW browse (flag_store.set_raw_action). A key that is already in an
+    # OPEN relabel batch is locked (same rule as relabel_batch.plan_pool: the key, or any key with
+    # the same file name). Manifests are big (~1 MB each), so the per-pool index is cached by mtime.
+
+    _batch_index_cache: Dict[str, tuple] = {}
+
+    def _open_batch_index(pool: str) -> tuple:
+        """``(keys -> batch_id, file names -> batch_id)`` of the pool's open relabel batches."""
+        if relabel_batches_dir is None:
+            return {}, {}
+        pdir = relabel_batches_dir / pool
+        sig = []
+        if pdir.is_dir():
+            for bdir in sorted(pdir.iterdir()):
+                m = bdir / _relabel_batch.MANIFEST
+                if bdir.is_dir() and not bdir.name.startswith(".") and m.is_file():
+                    sig.append((bdir.name, m.stat().st_mtime_ns))
+        sig = tuple(sig)
+        hit = _batch_index_cache.get(pool)
+        if hit is not None and hit[0] == sig:
+            return hit[1], hit[2]
+        keys: Dict[str, str] = {}
+        names: Dict[str, str] = {}
+        for _p, bid, _d, man in _relabel_batch.list_batches(relabel_batches_dir, pool):
+            for it in man.get("items") or []:
+                if it.get("item_name"):
+                    names[it["item_name"]] = bid
+                for k in it.get("image_keys") or [it.get("image_key")]:
+                    if k:
+                        keys[k] = bid
+        _batch_index_cache[pool] = (sig, keys, names)
+        return keys, names
+
+    def _open_batch_of(pool: str, image_key: str) -> Optional[str]:
+        keys, names = _open_batch_index(pool)
+        return keys.get(image_key) or names.get(image_key.split("/")[-1])
+
+    def _raw_status(pool: str, image_key: str, entry: Optional[dict]) -> dict:
+        """What the RAW-browse badge shows: ``state`` is one of
+        in_batch (locked) / delete / relabel / flag (pending, owner's or Goca's) / model (pending
+        automated flag) / decided (queue decision keep etc.) / none (no entry, or a relabel already
+        applied to RAW)."""
+        batch = _open_batch_of(pool, image_key)
+        resolved = ((entry or {}).get("relabel_result") or {}).get("status") in _relabel_batch.RESOLVED_STATUSES
+        if batch:
+            st = "in_batch"
+        elif entry is None or resolved:
+            st = "none"      # an applied relabel is already corrected in RAW: a clean image again
+        elif entry.get("owner_decision") == _flags.DECISION_DELETE:
+            st = "delete"
+        elif entry.get("owner_decision") == _flags.DECISION_RELABEL:
+            st = "relabel"
+        elif entry.get("owner_decision") is not None:
+            st = "decided"
+        elif entry.get("source") in _flags.AUTO_SOURCES:
+            st = "model"
+        else:
+            st = "flag"
+        return {"state": st, "batch_id": batch, "locked": bool(batch),
+                "comment": (entry or {}).get("comment") or "",
+                "reason": _flags.describe_reason(entry) if entry else None}
+
+    def _relabel_snapshot(pool: str, image_key: str) -> dict:
+        """sha256 of the RAW image + label right now (read-only), for MDQ-15c-3's change check."""
+        img_path = _raw_image_path(pool, image_key)
+        if img_path is None:
+            raise FlagValidationError("relabel needs an image that exists in RAW (not a forward frame or a missing file)")
+        txt = raw_base_path / pool / "labels" / image_key.split("/")[0] / f"{img_path.stem}.txt"
+        try:
+            return {"image_sha256": _sha256_file(img_path),
+                    "label_sha256": _sha256_file(txt) if txt.is_file() else None}
+        except OSError as e:
+            raise FlagValidationError(f"could not read the RAW image/label to record its checksum: {e}")
+
+    @app.post("/api/raw/action")
+    def raw_action(req: RawActionRequest):
+        _need_flags()
+        p = _raw_pool(req.pool)
+        validate_image_key(req.image_key)
+        _require_raw_image(p, req.image_key)      # an archived (moved out) image cannot be acted on
+
+        def _lock(key: str, _existing: Optional[dict]) -> Optional[str]:
+            bid = _open_batch_of(p, key)
+            return f"already in open relabel batch {bid}; change it there (Dataset Fixer) or after apply" if bid else None
+
+        snapshot = _relabel_snapshot(p, req.image_key) if req.action == _flags.DECISION_RELABEL else None
+        res = flag_store.set_raw_action(p, req.image_key, req.action, req.comment,
+                                        relabel_snapshot=snapshot, lock_check=_lock)
+        return {"pool": p, "image_key": req.image_key, "entry": res["entry"],
+                "raw_status": _raw_status(p, req.image_key, res["entry"])}
 
     def _frame_flag_key(frame_idx: int) -> str:
         if state.video_path is None:
@@ -961,19 +1068,8 @@ def create_app() -> FastAPI:
     def review_decision(req: ReviewDecisionRequest):
         _need_flags()
         p = normalize_pool(req.pool)
-        snapshot = None
-        if req.decision == _flags.DECISION_RELABEL:
-            # sha256 of the RAW image + label right now (read-only) so MDQ-15c-3 can detect a
-            # change before it acts. A forward frame / missing file has nothing to relabel.
-            img_path = _raw_image_path(p, req.image_key)
-            if img_path is None:
-                raise FlagValidationError("relabel needs an image that exists in RAW (not a forward frame or a missing file)")
-            txt = raw_base_path / p / "labels" / req.image_key.split("/")[0] / f"{img_path.stem}.txt"
-            try:
-                snapshot = {"image_sha256": _sha256_file(img_path),
-                            "label_sha256": _sha256_file(txt) if txt.is_file() else None}
-            except OSError as e:
-                raise FlagValidationError(f"could not read the RAW image/label to record its checksum: {e}")
+        # A forward frame / missing file has nothing to relabel (_relabel_snapshot raises).
+        snapshot = _relabel_snapshot(p, req.image_key) if req.decision == _flags.DECISION_RELABEL else None
         entry = flag_store.set_owner_decision(p, req.image_key, req.decision, relabel_snapshot=snapshot)
         return {"pool": p, "image_key": req.image_key, "entry": entry}
 
