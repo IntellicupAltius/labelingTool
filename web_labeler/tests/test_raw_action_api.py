@@ -88,7 +88,7 @@ class RawActionApiTests(unittest.TestCase):
         lab = (self.raw / POOL / "labels" / "CASA" / "a.txt").read_bytes()
         self.assertEqual(snap["image_sha256"], hashlib.sha256(img).hexdigest())
         self.assertEqual(snap["label_sha256"], hashlib.sha256(lab).hexdigest())
-        self.assertEqual(r["raw_status"], {"state": "relabel", "batch_id": None, "locked": False,
+        self.assertEqual(r["raw_status"], {"state": "relabel", "batch_id": None, "locked": False, "applied": None,
                                            "comment": "oznaci sve case",
                                            "reason": fs.describe_reason(r["entry"])})
 
@@ -161,6 +161,25 @@ class RawActionApiTests(unittest.TestCase):
         bid = self.open_batch("CASA2/a.jpg")              # same file name, other class -> CASA/a.jpg locked
         st = self.badge(0)
         self.assertEqual((st["state"], st["batch_id"], st["locked"]), ("in_batch", bid, True))
+
+    def test_annotations_badge_applied_info(self):
+        bdir = self.batches / POOL / "RELABEL_glasses_20261001_000000"
+        bdir.mkdir(parents=True)
+        (bdir / "manifest.json").write_text(json.dumps({"format_version": 1, "status": "applied", "items": []}))
+        (bdir / "apply_state.json").write_text(json.dumps({"format_version": 1, "items": {
+            "a.jpg": {"status": "applied", "run": "20261001_1_relabel", "at": "2026-10-01T10:00:00+02:00"},
+            "b.jpg": {"status": "unchanged", "run": "20261001_1_relabel", "at": "2026-10-01T10:00:00+02:00"}}}))
+        st = self.badge(0)
+        self.assertEqual(st["state"], "none")
+        self.assertEqual(st["applied"]["batch_id"], "RELABEL_glasses_20261001_000000")
+        self.assertIsNone(self.badge(1)["applied"])            # "unchanged" is not shown
+        # a newer applied batch for the same file wins
+        b2 = self.batches / POOL / "RELABEL_glasses_20261005_000000"
+        b2.mkdir(parents=True)
+        (b2 / "manifest.json").write_text(json.dumps({"format_version": 1, "status": "applied", "items": []}))
+        (b2 / "apply_state.json").write_text(json.dumps({"format_version": 1, "items": {
+            "a.jpg": {"status": "applied", "run": "r2", "at": "2026-10-05T10:00:00+02:00"}}}))
+        self.assertEqual(self.badge(0)["applied"]["batch_id"], "RELABEL_glasses_20261005_000000")
 
     def test_annotations_survive_a_broken_manifest(self):
         bdir = self.batches / POOL / "RELABEL_glasses_broken"

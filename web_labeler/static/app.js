@@ -2021,9 +2021,14 @@ function updateFlagBadge() {
   const st = raw ? state.rawStatus : null;
   const b = st && RAW_BADGE[st.state];
   const f = raw ? state.rawFlag : null;
+  const ap = st && st.applied;
+  const apText = ap ? `✔ applied to RAW in ${ap.batch_id}${ap.at ? " (" + ap.at.slice(0, 10) + ")" : ""}` : "";
   if (b) {
     el.classList.add(b.cls);
-    el.textContent = b.text(st, f);
+    el.textContent = b.text(st, f) + (apText ? "  ·  " + apText : "");
+  } else if (apText) {      // a clean image that came in through an applied relabel batch: info only
+    el.classList.add("applied");
+    el.textContent = apText;
   } else if (!st && f) {    // no status from the server (unreadable batch manifest): plain flag text
     el.textContent = `⚑ FLAGGED — ${f.category || (f.signal ? `${f.signal.metric}: ${f.signal.value}` : "flagged")}`
       + `${f.owner_decision ? " · owner: " + f.owner_decision : ""}${f.comment ? " — " + f.comment : ""}`;

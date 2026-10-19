@@ -837,6 +837,38 @@ def create_app() -> FastAPI:
         _batch_index_cache[pool] = (sig, keys, names)
         return keys, names
 
+    _applied_index_cache: Dict[str, tuple] = {}
+
+    def _applied_index(pool: str) -> Dict[str, dict]:
+        """File name -> ``{batch_id, run, at}`` of the newest relabel batch that APPLIED it to RAW
+        (``apply_state.json`` status ``applied``; unchanged / deleted are not shown). Cached by mtime."""
+        if relabel_batches_dir is None:
+            return {}
+        pdir = relabel_batches_dir / pool
+        sig = []
+        if pdir.is_dir():
+            for bdir in sorted(pdir.iterdir()):
+                f = bdir / "apply_state.json"
+                if bdir.is_dir() and not bdir.name.startswith(".") and f.is_file():
+                    sig.append((bdir.name, f.stat().st_mtime_ns))
+        sig = tuple(sig)
+        hit = _applied_index_cache.get(pool)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+        out: Dict[str, dict] = {}
+        for bid, _m in sig:
+            try:
+                doc = json.loads((pdir / bid / "apply_state.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            items = doc.get("items") if isinstance(doc, dict) else None
+            for name, rec in (items or {}).items():
+                if isinstance(rec, dict) and rec.get("status") == "applied" \
+                        and (rec.get("at") or "") >= (out.get(name, {}).get("at") or ""):
+                    out[name] = {"batch_id": bid, "run": rec.get("run"), "at": rec.get("at")}
+        _applied_index_cache[pool] = (sig, out)
+        return out
+
     def _open_batch_of(pool: str, image_key: str) -> Optional[str]:
         keys, names = _open_batch_index(pool)
         return keys.get(image_key) or names.get(image_key.split("/")[-1])
@@ -845,7 +877,8 @@ def create_app() -> FastAPI:
         """What the RAW-browse badge shows: ``state`` is one of
         in_batch (locked) / delete / relabel / flag (pending, owner's or Goca's) / model (pending
         automated flag) / decided (queue decision keep etc.) / none (no entry, or a relabel already
-        applied to RAW)."""
+        applied to RAW). ``applied`` (or None) says which relabel batch last put this file into RAW —
+        information only, it never locks anything."""
         batch = _open_batch_of(pool, image_key)
         resolved = ((entry or {}).get("relabel_result") or {}).get("status") in _relabel_batch.RESOLVED_STATUSES
         if batch:
@@ -863,6 +896,7 @@ def create_app() -> FastAPI:
         else:
             st = "flag"
         return {"state": st, "batch_id": batch, "locked": bool(batch),
+                "applied": _applied_index(pool).get(image_key.split("/")[-1]),
                 "comment": (entry or {}).get("comment") or "",
                 "reason": _flags.describe_reason(entry) if entry else None}
 
