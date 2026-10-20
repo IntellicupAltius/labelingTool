@@ -13,6 +13,8 @@ DRY RUN: the plan is printed per item and nothing is changed. ``--apply`` really
 Per item, in this order (the first failing check skips the item and reports it by name):
   1. already done      ``apply_state.json`` of the batch says applied/unchanged -> nothing is done twice
                        (a sidecar mark that is still missing is repaired).
+  1b. proposals       MDQ-17c: the image still has a model proposal nobody confirmed or deleted
+                       (``proposals.json`` minus ``proposal_decisions.json``) -> skipped, nothing changes.
   2. corrected copy    ``labels/<stem>.txt`` exists, parses, class ids exist in RAW ``data.yaml``, coords in
                        [0,1]; ``images/<name>`` sha256 == the snapshot's ``image_sha256`` (image not edited).
   3. original current  every RAW copy of the file name (all class folders, also new ones) still equals the
@@ -182,7 +184,7 @@ def _copies(raw_base: Path, pool: str, fname: str) -> List[dict]:
 
 def plan_item(pool: str, bdir: Path, man: dict, item: dict, state: dict, store: Optional[flag_store.FlagStore],
               raw_base: Path, class_names: List[str], iutils, tol_px: float,
-              decisions: Optional[Dict[str, str]] = None) -> ItemPlan:
+              decisions: Optional[Dict[str, str]] = None, pending: Optional[Dict[str, int]] = None) -> ItemPlan:
     from PIL import Image  # local import: only needed here
     name = item["item_name"]
     p = ItemPlan(pool, man["batch_id"], item, "invalid")
@@ -197,6 +199,11 @@ def plan_item(pool: str, bdir: Path, man: dict, item: dict, state: dict, store: 
                 ent = store.get(pool, k)
                 if ent is not None and not ent.get("relabel_result"):
                     p.marked = False
+        return p
+
+    if (pending or {}).get(name):
+        p.action = "pending_proposals"
+        p.detail = f"{pending[name]} model proposal(s) not yet confirmed or deleted in the Dataset Fixer"
         return p
 
     c_img = bdir / "images" / name
@@ -422,11 +429,12 @@ def process_batch(pool: str, bdir: Path, raw_base: Path, store: Optional[flag_st
                          "boxes would get wrong classes")
     dist, iutils = _load_ingest(ingest_root)
     decisions = relabel_batch.read_fixer_decisions(bdir)
+    pending = relabel_batch.pending_proposals(bdir)
     archive_dir = archive_root / run_stamp
     with _batch_lock(bdir):
         state = _read_state(bdir)
         out(f"\n[{pool}] batch {man['batch_id']}: {len(man['items'])} item(s)")
-        plans = [plan_item(pool, bdir, man, it, state, store, raw_base, class_names, iutils, tol_px, decisions) for it in man["items"]]
+        plans = [plan_item(pool, bdir, man, it, state, store, raw_base, class_names, iutils, tol_px, decisions, pending) for it in man["items"]]
         manifest_rec = {"format_version": 1, "run": run_stamp, "pool": pool, "batch_id": man["batch_id"],
                         "box_tol_px": tol_px, "raw_base_path": str(raw_base), "archive_dir": str(archive_dir),
                         "applied_at": datetime.now().astimezone().isoformat(timespec="seconds"), "items": []}

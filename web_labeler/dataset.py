@@ -25,6 +25,14 @@ class DatasetAnnotation:
     y1: int
     x2: int
     y2: int
+    # MDQ-17c: a model proposal in a relabel batch (proposal=True until confirmed/re-classed; never saved
+    # while it is a proposal). proposal_id/proposal_class stay after confirming, to record the decision.
+    proposal: bool = False
+    proposal_id: Optional[str] = None
+    proposal_class: Optional[str] = None
+    proposal_conf: Optional[float] = None
+    proposal_agreement: Optional[str] = None
+    decoy: bool = False          # QA decoy: never written to labels/, never sent to the browser
 
 
 @dataclass
@@ -40,6 +48,7 @@ class DatasetSession:
     deleted_images: set[int] = field(default_factory=set)  # image indices marked for deletion
     image_tags: Dict[int, Dict] = field(default_factory=dict)  # image idx → {frame_tags: [], bbox_tags: {ann_id: []}}
     relabel_items: Dict[str, Dict] = field(default_factory=dict)  # MDQ-15c-2 relabel batch: image file name → manifest item
+    proposals_by_image: Dict[int, List[Dict]] = field(default_factory=dict)  # MDQ-17c: proposals loaded (still undecided) per image
 
     def new_id(self) -> str:
         return uuid.uuid4().hex
@@ -202,6 +211,8 @@ def save_dataset_session(sess: DatasetSession, strategy: str) -> Path:
         out_txt = labels_dir / f"{img_path.stem}.txt"
         with open(out_txt, "w", encoding="utf-8") as fp:
             for a in anns:
+                if a.proposal or a.decoy:   # MDQ-17c: an undecided proposal / a QA decoy never reaches labels/
+                    continue
                 fp.write(_xyxy_to_yolo(a.class_id, a.x1, a.y1, a.x2, a.y2, w, h) + "\n")
 
     # Delete images and labels marked for deletion (only when overwriting)
@@ -229,6 +240,58 @@ def save_dataset_session(sess: DatasetSession, strategy: str) -> Path:
 
 
 def ann_to_dict(a: DatasetAnnotation) -> Dict:
-    return asdict(a)
+    d = asdict(a)
+    d.pop("decoy", None)   # the browser must not be able to tell a QA decoy from a real proposal
+    return d
+
+
+def add_proposals(sess: DatasetSession, proposals: Dict[str, List[Dict]], decisions: Dict[str, Dict[str, str]],
+                  class_names: List[str]) -> int:
+    """MDQ-17c: put every undecided proposal of the batch on its image as a proposal box. Returns how many.
+    A proposal whose class is not in the model is skipped (it could never be saved)."""
+    n = 0
+    for i, img_path in enumerate(sess.img_files):
+        props = proposals.get(img_path.name) or []
+        done = decisions.get(img_path.name, {})
+        w, h = sess.img_sizes[i]
+        for pr in props:
+            if pr["pid"] in done or pr["class_name"] not in class_names:
+                continue
+            x1, y1, x2, y2 = pr["box"]
+            a = DatasetAnnotation(id=sess.new_id(), image_idx=i, class_id=class_names.index(pr["class_name"]),
+                                  class_name=pr["class_name"],
+                                  x1=clamp(int(x1 * w), 0, w - 1), y1=clamp(int(y1 * h), 0, h - 1),
+                                  x2=clamp(int(x2 * w), 0, w - 1), y2=clamp(int(y2 * h), 0, h - 1),
+                                  proposal=True, proposal_id=pr["pid"], proposal_class=pr["class_name"],
+                                  proposal_conf=pr.get("conf"), proposal_agreement=pr.get("agreement"),
+                                  decoy=bool(pr.get("decoy")))
+            if a.x2 <= a.x1 or a.y2 <= a.y1:
+                continue
+            sess.ann_by_image.setdefault(i, []).append(a)
+            sess.proposals_by_image.setdefault(i, []).append(pr)
+            n += 1
+    return n
+
+
+def proposal_decisions(sess: DatasetSession) -> Dict[str, Dict[str, str]]:
+    """MDQ-17c: what happened to each proposal loaded in this session (still-undecided ones are left out)."""
+    out: Dict[str, Dict[str, str]] = {}
+    for i, props in sess.proposals_by_image.items():
+        anns = {a.proposal_id: a for a in sess.ann_by_image.get(i, []) if a.proposal_id}
+        dec = {}
+        for pr in props:
+            a = anns.get(pr["pid"])
+            if a is None:
+                dec[pr["pid"]] = "rejected"
+            elif not a.proposal:
+                dec[pr["pid"]] = "confirmed" if a.class_name == a.proposal_class else "reclassed"
+        if dec:
+            out[sess.image_name(i)] = dec
+    return out
+
+
+def pending_count(sess: DatasetSession, idx: Optional[int] = None) -> int:
+    images = [idx] if idx is not None else list(sess.ann_by_image.keys())
+    return sum(1 for i in images for a in sess.ann_by_image.get(i, []) if a.proposal)
 
 

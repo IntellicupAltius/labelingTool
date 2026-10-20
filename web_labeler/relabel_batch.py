@@ -232,6 +232,94 @@ def batch_saved_at(batch_dir: Path) -> Optional[str]:
     return doc.get("saved_at") if isinstance(doc, dict) else None
 
 
+# MDQ-17c: model proposals in a relabel batch. ``proposals.json`` (written by a script, never by the tool) holds
+# boxes a fair model suggests; they are NOT in labels/, which stays the exact RAW copy. In the Dataset Fixer
+# each proposal is confirmed, re-classed or deleted; Save records that in ``proposal_decisions.json`` and
+# writes only confirmed boxes to labels/. apply_relabel.py skips an image while any proposal is undecided.
+#   proposals.json  {"format_version": 1, "created_at", "source",
+#                    "items": {item_name: [{"pid", "class_name", "box": [x1, y1, x2, y2] (0-1),
+#                                           "conf"?, "agreement"?, "decoy"?}]}}
+# ``decoy`` = a deliberately wrong proposal (QA: is the batch really reviewed?). Never written to labels/,
+# never shown as different in the tool; the right answer is Delete.
+PROPOSALS = "proposals.json"
+PROPOSAL_DECISIONS = "proposal_decisions.json"
+PROPOSAL_CONFIRMED = "confirmed"
+PROPOSAL_RECLASSED = "reclassed"
+PROPOSAL_REJECTED = "rejected"
+PROPOSAL_DECIDED = (PROPOSAL_CONFIRMED, PROPOSAL_RECLASSED, PROPOSAL_REJECTED)
+
+
+def read_proposals(batch_dir: Path) -> Dict[str, List[dict]]:
+    """``{item_name: [proposal, ...]}`` ({} if the batch has no proposals). Raises on a malformed file."""
+    p = batch_dir / PROPOSALS
+    if not p.is_file():
+        return {}
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise RelabelBatchError(f"{p} is unreadable ({e})") from e
+    items = doc.get("items") if isinstance(doc, dict) else None
+    if not isinstance(items, dict):
+        raise RelabelBatchError(f"{p} has an unsupported format")
+    out: Dict[str, List[dict]] = {}
+    for name, props in items.items():
+        if not isinstance(props, list):
+            raise RelabelBatchError(f"{p}: proposals of {name!r} are not a list")
+        seen = set()
+        for pr in props:
+            box = pr.get("box") if isinstance(pr, dict) else None
+            ok = (isinstance(pr, dict) and isinstance(pr.get("pid"), str) and pr["pid"] and pr["pid"] not in seen
+                  and isinstance(pr.get("class_name"), str) and isinstance(box, list) and len(box) == 4
+                  and all(isinstance(v, (int, float)) and 0.0 <= v <= 1.0 for v in box)
+                  and box[0] < box[2] and box[1] < box[3])
+            if not ok:
+                raise RelabelBatchError(f"{p}: bad proposal for {name!r}: {pr!r}")
+            seen.add(pr["pid"])
+        out[str(name)] = props
+    return out
+
+
+def read_proposal_decisions(batch_dir: Path) -> Dict[str, Dict[str, str]]:
+    """``{item_name: {pid: confirmed | reclassed | rejected}}`` written by the Dataset Fixer's Save ({} if none)."""
+    p = batch_dir / PROPOSAL_DECISIONS
+    if not p.is_file():
+        return {}
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise RelabelBatchError(f"{p} is unreadable ({e})") from e
+    items = doc.get("items") if isinstance(doc, dict) else None
+    if not isinstance(items, dict) or any(not isinstance(v, dict) or any(d not in PROPOSAL_DECIDED for d in v.values())
+                                          for v in items.values()):
+        raise RelabelBatchError(f"{p} has an unsupported format")
+    return {str(k): {str(pid): d for pid, d in v.items()} for k, v in items.items()}
+
+
+def write_proposal_decisions(batch_dir: Path, items: Dict[str, Dict[str, str]]) -> None:
+    if any(d not in PROPOSAL_DECIDED for v in items.values() for d in v.values()):
+        raise RelabelBatchError("proposal decision must be confirmed, reclassed or rejected")
+    doc = {"format_version": 1, "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+           "items": {k: dict(sorted(v.items())) for k, v in sorted(items.items()) if v}}
+    p = batch_dir / PROPOSAL_DECISIONS
+    tmp = p.with_name(f".{p.name}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def pending_proposals(batch_dir: Path) -> Dict[str, int]:
+    """``{item_name: number of proposals nobody decided on yet}`` (only items with at least one)."""
+    props = read_proposals(batch_dir)
+    if not props:
+        return {}
+    dec = read_proposal_decisions(batch_dir)
+    out = {}
+    for name, prs in props.items():
+        n = sum(1 for pr in prs if pr["pid"] not in dec.get(name, {}))
+        if n:
+            out[name] = n
+    return out
+
+
 def _raw_class_names(raw_base: Path, pool: str) -> List[str]:
     y = raw_base / pool / "data.yaml"
     if not y.is_file():

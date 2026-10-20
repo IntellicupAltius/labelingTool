@@ -180,6 +180,16 @@ const api = {
   async updateAnnotation(annId, payload) {
     return _putJson(`/api/annotations/${encodeURIComponent(annId)}`, payload);
   },
+  async confirmDatasetProposal(annId) {   // MDQ-17c
+    return fetch(`/api/datasets/annotations/${encodeURIComponent(annId)}/confirm`, {method: "POST"}).then(async r => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error((typeof data.detail === "string" && data.detail) || "Failed to confirm proposal");
+      return data;
+    });
+  },
+  async nextPendingImage(index, direction) {   // MDQ-17c
+    return fetch(`/api/datasets/next_pending?index=${index}&direction=${direction}`).then(r => r.json());
+  },
   async deleteDatasetAnnotation(annId) {
     return fetch(`/api/datasets/annotations/${encodeURIComponent(annId)}`, {method: "DELETE"}).then(async r => {
       const data = await r.json().catch(() => ({}));
@@ -873,8 +883,10 @@ function drawCanvas() {
     const c1 = imageToCanvas(a.x1, a.y1);
     const c2 = imageToCanvas(a.x2, a.y2);
     const w = c2.x - c1.x, h = c2.y - c1.y;
-    const label = `#${n} ${a.model ? a.model + ":" : ""}${a.class_name}`;
+    const label = `#${n} ${a.proposal ? "P " : ""}${a.model ? a.model + ":" : ""}${a.class_name}`;
     ctx.globalAlpha = (hasFocus && !focused) ? 0.3 : 1;
+    // MDQ-17c: a model proposal is dashed magenta until it is confirmed / re-classed / deleted.
+    ctx.setLineDash(a.proposal ? [10 * dpr, 6 * dpr] : []);
     if (focused) {
       ctx.fillStyle = "rgba(255,214,0,0.22)";
       ctx.fillRect(c1.x, c1.y, w, h);
@@ -893,9 +905,11 @@ function drawCanvas() {
       ctx.strokeStyle = "#00ff88";
       ctx.fillStyle = "#00ff88";
       ctx.font = `${Math.floor(12 * dpr)}px ui-sans-serif`;
+      if (a.proposal) { ctx.strokeStyle = "#ff3dd8"; ctx.fillStyle = "#ff3dd8"; ctx.lineWidth = 3 * dpr; }
       ctx.strokeRect(c1.x, c1.y, w, h);
       ctx.fillText(label, c1.x + 6, c1.y + 16);
     }
+    ctx.setLineDash([]);
     ctx.globalAlpha = 1;
   };
   if (!state.peek) {   // B held: boxes hidden
@@ -1036,7 +1050,30 @@ async function deleteAnn(a) {
   if (state.selectedAnnId === a.id) state.selectedAnnId = null;
   if (state.hoverAnnId === a.id) state.hoverAnnId = null;
   await refreshLists();
+  if (a.proposal) focusNextProposal(true);
   draw();
+}
+
+// MDQ-17c — model proposals in a relabel batch. The first undecided proposal of an image is selected, so
+// A (OK) / C (class) / Del walk through them; N / Shift+N = next / previous image with undecided proposals.
+async function confirmProposal(a) {
+  await api.confirmDatasetProposal(a.id);
+  await refreshLists();
+  focusNextProposal(true);
+}
+
+function focusNextProposal(force) {
+  if (!force && state.selectedAnnId) return;
+  const p = (state.frameAnnotations || []).find(x => x.proposal);
+  if (p) selectAnn(p.id, true);
+  else if (force) selectAnn(null);
+  else draw();
+}
+
+async function gotoPendingImage(direction) {
+  const r = await api.nextPendingImage(state.datasetImageIdx, direction);
+  if (r.index == null) { setStatus("No image with undecided proposals left in this batch."); return; }
+  await renderDatasetImage(r.index);
 }
 
 // Shared by the dataset and video rows: number, hover/click focus, "Class" button.
@@ -1084,6 +1121,8 @@ async function refreshLists() {
       updateFlagBadge();
     } else {
       state.relabelNote = data.relabel_note || null;   // MDQ-15c-2: owner's relabel comment in a relabel batch
+      state.pendingHere = data.pending_here || 0;        // MDQ-17c: undecided model proposals
+      state.pendingTotal = data.pending_total || 0;
       updateFlagBadge();
     }
     let tagsData = {frame_tags: [], bbox_tags: {}, bbox_variations: {}};
@@ -1267,14 +1306,25 @@ async function refreshLists() {
       main.className = "itemMain";
       const title = document.createElement("div");
       title.className = "itemTitle";
-      title.textContent = `${a.class_name}`;
+      title.textContent = a.proposal ? `P · ${a.class_name}` : `${a.class_name}`;
       const sub = document.createElement("div");
       sub.className = "itemSub";
-      sub.textContent = `[${a.x1},${a.y1}] → [${a.x2},${a.y2}]`;
+      sub.textContent = a.proposal
+        ? `model proposal${a.proposal_conf != null ? " · " + Number(a.proposal_conf).toFixed(2) : ""}${a.proposal_agreement === "unsure" ? " · unsure" : ""} — A = OK, C = class, Del = delete`
+        : `[${a.x1},${a.y1}] → [${a.x2},${a.y2}]`;
       main.appendChild(title); main.appendChild(sub);
+      if (a.proposal) li.classList.add("annProposal");
 
       const btns = document.createElement("div");
       btns.className = "itemBtns";
+      if (a.proposal) {
+        const ok = document.createElement("button");
+        ok.className = "btn primary";
+        ok.textContent = "OK";
+        ok.title = "Confirm this proposal as it is (A or Enter)";
+        ok.onclick = async (e) => { e.stopPropagation(); await confirmProposal(a); };
+        btns.appendChild(ok);
+      }
       const del = document.createElement("button");
       del.className = "btn danger";
       del.textContent = "Delete";
@@ -1284,6 +1334,7 @@ async function refreshLists() {
       };
       btns.appendChild(del);
       wireAnnRow(li, title, btns, a);
+      if (a.proposal) btns.insertBefore(btns.querySelector(".btn.primary"), btns.firstChild);   // OK first
       li.appendChild(main);
       li.appendChild(btns);
 
@@ -1613,6 +1664,7 @@ async function renderDatasetImage(idx) {
   await refreshLists();
   if (mySeq !== state.navSeq) return;
   state.zoneName = imageName;
+  focusNextProposal(false);
   draw();
 
   setStatus(`Dataset ${state.datasetName} | ${state.datasetImageIdx + 1}/${state.datasetImageCount} | ${state.datasetImageName}`);
@@ -2013,8 +2065,10 @@ function updateFlagBadge() {
   el.className = "flagBadge";
   const raw = state.mode === "dataset" && state.rawLoaded;
   const rn = (state.mode === "dataset" && !state.rawLoaded && state.datasetLoaded) ? state.relabelNote : null;
+  const pend = (state.mode === "dataset" && !state.rawLoaded && state.datasetLoaded && state.pendingTotal)
+    ? `  ·  P: ${state.pendingHere || 0} here, ${state.pendingTotal} in batch (N = next image)` : "";
   if (rn) {
-    el.textContent = `⚑ RELABEL — ${rn.comment || "(no comment)"}  [${rn.image_key}]`;
+    el.textContent = `⚑ RELABEL — ${rn.comment || "(no comment)"}  [${rn.image_key}]${pend}`;
     el.style.display = "block";
     return;
   }
@@ -3146,6 +3200,15 @@ function installHotkeys() {
       if (e.key === "Escape" && state.selectedAnnId) { e.preventDefault(); selectAnn(null); return; }
       if (sel && (e.key === "Delete" || e.key === "Backspace") && !e.repeat) { e.preventDefault(); await deleteAnn(sel); return; }
       if (sel && (e.key === "c" || e.key === "C") && !e.repeat && canChangeClass()) { e.preventDefault(); openModalForEdit(sel); return; }
+      // MDQ-17c: A / Enter = confirm the selected proposal as it is.
+      if (sel && sel.proposal && state.mode === "dataset" && (e.key === "a" || e.key === "A" || e.key === "Enter") && !e.repeat) {
+        e.preventDefault(); await confirmProposal(sel); return;
+      }
+    }
+    // MDQ-17c: N / Shift+N = next / previous image that still has undecided proposals (relabel batch).
+    if (state.mode === "dataset" && state.datasetLoaded && !state.rawLoaded && (e.key === "n" || e.key === "N")
+        && !e.ctrlKey && !e.metaKey && !e.altKey && !e.repeat && !isTypingTarget(e.target)) {
+      e.preventDefault(); await gotoPendingImage(e.shiftKey ? -1 : 1); return;
     }
 
     if (state.mode === "dataset") {
@@ -3738,7 +3801,9 @@ async function init() {
       if (state.datasetRelabel) {
         const r = await api.saveDataset("overwrite");
         window.alert(`Relabel batch saved (overwrite).\n\nBackground: ${r.background_count}\nDelete (marked): ${r.delete_count}\n` +
-          `Delete (no boxes, nothing chosen): ${r.default_delete_count}\n\nNothing is changed in RAW until apply_relabel.py --apply.`);
+          `Delete (no boxes, nothing chosen): ${r.default_delete_count}\n` +
+          (r.pending_proposals ? `\nUndecided model proposals: ${r.pending_proposals} on ${r.pending_images} image(s) — those images are NOT applied until every proposal is OK'd, re-classed or deleted.\n` : "") +
+          `\nNothing is changed in RAW until apply_relabel.py --apply.`);
         resetWorkspaceUI("Relabel batch saved. Dataset unloaded.");
         setMode("dataset");
         return;

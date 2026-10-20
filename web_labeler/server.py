@@ -45,6 +45,9 @@ from web_labeler.dataset import (
     load_dataset_session,
     save_dataset_session,
     ann_to_dict,
+    add_proposals,
+    proposal_decisions,
+    pending_count,
     _read_image_size,
     _yolo_to_xyxy,
 )
@@ -1493,6 +1496,14 @@ def create_app() -> FastAPI:
                 if d and not dataset_session.ann_by_image.get(i):
                     (dataset_session.background_images if d == _relabel_batch.FIXER_BACKGROUND
                      else dataset_session.deleted_images).add(i)
+            # MDQ-17c: undecided model proposals go on their images as proposal boxes (after the marks:
+            # a mark only ever sits on an image with no box, and proposals are not saved boxes).
+            try:
+                add_proposals(dataset_session, _relabel_batch.read_proposals(ds_path),
+                              _relabel_batch.read_proposal_decisions(ds_path), names)
+            except _relabel_batch.RelabelBatchError as e:
+                dataset_session = None
+                raise HTTPException(status_code=400, detail=str(e))
         test_mode = False
         mismatch = (req.model.lower() not in req.dataset_name.lower())
         return {
@@ -1534,7 +1545,34 @@ def create_app() -> FastAPI:
             "is_deleted": is_deleted,
             "relabel_note": _relabel_note(dataset_session, idx),
             "relabel_batch": bool(dataset_session.relabel_items),
+            "pending_here": pending_count(dataset_session, idx),
+            "pending_total": pending_count(dataset_session),
         }
+
+    # MDQ-17c: confirm a model proposal as it is (it becomes a normal box; saved on Save).
+    @app.post("/api/datasets/annotations/{ann_id}/confirm")
+    def datasets_confirm_proposal(ann_id: str):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        for anns in dataset_session.ann_by_image.values():
+            for a in anns:
+                if a.id == ann_id:
+                    a.proposal = False
+                    return {"ok": True, "annotation": ann_to_dict(a)}
+        raise HTTPException(status_code=404, detail="Annotation not found")
+
+    # MDQ-17c: next/previous image (wrapping) that still has an undecided proposal, or null.
+    @app.get("/api/datasets/next_pending")
+    def datasets_next_pending(index: int = Query(..., ge=0), direction: int = Query(1)):
+        if dataset_session is None:
+            raise HTTPException(status_code=400, detail="No dataset loaded")
+        n = len(dataset_session.img_files)
+        step = -1 if direction < 0 else 1
+        for k in range(1, n + 1):
+            i = (index + step * k) % n
+            if pending_count(dataset_session, i):
+                return {"index": i}
+        return {"index": None}
 
     def _relabel_note(sess: DatasetSession, idx: int) -> Optional[dict]:
         it = sess.relabel_items.get(sess.image_name(idx)) if sess.relabel_items else None
@@ -1585,6 +1623,7 @@ def create_app() -> FastAPI:
                         raise HTTPException(status_code=400, detail="Invalid class")
                     a.class_name = req.class_name
                     a.class_id = names.index(req.class_name)
+                    a.proposal = False   # MDQ-17c: choosing a class for a proposal decides it
                 for k in ("x1", "y1", "x2", "y2"):
                     v = getattr(req, k)
                     if v is not None:
@@ -1629,6 +1668,7 @@ def create_app() -> FastAPI:
             # Marks only count on images that really have no box left.
             decisions: Dict[str, str] = {}
             default_delete = 0
+            pending_images = sum(1 for i in range(len(sess.img_files)) if pending_count(sess, i))
             for i, f in enumerate(sess.img_files):
                 if sess.ann_by_image.get(i):
                     continue
@@ -1638,11 +1678,21 @@ def create_app() -> FastAPI:
                     decisions[f.name] = _relabel_batch.FIXER_DELETE
                 else:
                     default_delete += 1
+            # MDQ-17c: proposal decisions of this session on top of the earlier saves' (labels and decisions
+            # must agree: a confirmed proposal is in labels/ from this Save on, so it is never loaded again).
+            try:
+                prop_dec = _relabel_batch.read_proposal_decisions(sess.dataset_path)
+            except _relabel_batch.RelabelBatchError as e:
+                raise HTTPException(status_code=400, detail=f"Nothing saved: {e}")
+            for name, d in proposal_decisions(sess).items():
+                prop_dec.setdefault(name, {}).update(d)
             save_dataset_session(sess, "overwrite")
             try:
                 _relabel_batch.write_fixer_decisions(sess.dataset_path, decisions)
+                if sess.proposals_by_image or prop_dec:
+                    _relabel_batch.write_proposal_decisions(sess.dataset_path, prop_dec)
             except (OSError, _relabel_batch.RelabelBatchError) as e:
-                raise HTTPException(status_code=500, detail=f"Labels saved, but the Background/Delete marks could not be written: {e}")
+                raise HTTPException(status_code=500, detail=f"Labels saved, but the Background/Delete marks or proposal decisions could not be written: {e}")
             vals = list(decisions.values())
             dataset_session = None
             # No zip: a relabel batch is not sent to labelers, apply_relabel.py reads the folder itself.
@@ -1650,7 +1700,8 @@ def create_app() -> FastAPI:
                     "batch_path": str(sess.dataset_path),
                     "background_count": vals.count(_relabel_batch.FIXER_BACKGROUND),
                     "delete_count": vals.count(_relabel_batch.FIXER_DELETE),
-                    "default_delete_count": default_delete}
+                    "default_delete_count": default_delete,
+                    "pending_proposals": pending_count(sess), "pending_images": pending_images}
         out_path = save_dataset_session(dataset_session, req.strategy)
 
         # Copy data.yaml file to output dataset directory

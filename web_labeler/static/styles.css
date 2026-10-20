@@ -762,6 +762,12 @@ body.peeking #currentList, body.peeking #globalList { opacity: 0.55; cursor: not
 .metricBadge.large    { background: rgba(248, 113, 113, 0.2); color: var(--danger); }
 .classItem .classDesc { opacity: 0.6; font-size: 0.85em; }
 
+/* ── MDQ-17c: model proposal row (dashed pink box on the canvas until OK / class / delete) ── */
+.item.annProposal {
+  border-left: 3px dashed #ff3dd8;
+  background: rgba(255, 61, 216, 0.08);
+}
+
 /* ── Box focus: selected row in "Current … boxes" (its box is yellow on the canvas) ── */
 .item.annSelected,
 .item.annSelected:hover {
