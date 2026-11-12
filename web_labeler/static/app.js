@@ -553,6 +553,7 @@ const state = {
 
   // box focus: hover/click a row in "Current … boxes" (or click a box on the canvas) highlights that box
   hoverAnnId: null,
+  canvasHoverAnnId: null,   // box under the mouse on the canvas → its X (delete) button is drawn
   selectedAnnId: null,
 
   // flag panel (MDQ-3)
@@ -912,16 +913,30 @@ function drawCanvas() {
     ctx.setLineDash([]);
     ctx.globalAlpha = 1;
   };
-  if (!state.peek) {   // B held: boxes hidden
+  // Labelers: while a new box is being dragged the existing boxes are hidden (they got in the way).
+  if (!state.peek && !isDrawingBox()) {   // B held: boxes hidden
     anns.forEach((a, i) => { if (a.id !== focusId) drawAnn(a, i + 1, false); });
     const fi = anns.findIndex(a => a.id === focusId);
     if (fi >= 0) drawAnn(anns[fi], fi + 1, true);
+    const xr = hoverDeleteRect();
+    if (xr) {
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "#dc2626";
+      ctx.fillRect(xr.x, xr.y, xr.s, xr.s);
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 2.5 * dpr;
+      const m = xr.s * 0.28;
+      ctx.beginPath();
+      ctx.moveTo(xr.x + m, xr.y + m); ctx.lineTo(xr.x + xr.s - m, xr.y + xr.s - m);
+      ctx.moveTo(xr.x + xr.s - m, xr.y + m); ctx.lineTo(xr.x + m, xr.y + xr.s - m);
+      ctx.stroke();
+    }
   }
   ctx.lineWidth = 2 * dpr;
 
   // temporary drag rect
-  if (state.dragging && state.dragRect) {
-    const r = state.dragRect;
+  if ((state.dragging && state.dragRect) || (state.modalOpen && state.modalRect)) {
+    const r = state.dragRect || state.modalRect;   // new box stays visible while its class is picked
     const c1 = imageToCanvas(r.x1, r.y1);
     const c2 = imageToCanvas(r.x2, r.y2);
     ctx.strokeStyle = "#60a5fa";
@@ -1040,6 +1055,35 @@ function canChangeClass() {
   return state.mode === "video" ? state.videoLoaded : (state.mode === "dataset" && state.datasetLoaded && !state.rawLoaded);
 }
 
+// A drag counts as "drawing a box" once it is bigger than a click (same 4 px rule as mouseup), and it lasts
+// until the class popup for that new box is saved or cancelled.
+function isDrawingBox() {
+  if (state.modalOpen && state.modalRect) return true;
+  const r = state.dragging && state.dragRect;
+  return !!r && Math.abs(r.x2 - r.x1) >= 4 && Math.abs(r.y2 - r.y1) >= 4;
+}
+
+// X button (canvas px) in the top-right corner of the box under the mouse; null when there is none
+// or boxes cannot be deleted here (RAW browse is read-only, Background mode has no boxes).
+function hoverDeleteRect() {
+  if (!state.canvasHoverAnnId || state.dragging || state.peek || !canChangeClass()) return null;
+  const a = (state.frameAnnotations || []).find(x => x.id === state.canvasHoverAnnId);
+  if (!a) return null;
+  const dpr = window.devicePixelRatio || 1;
+  const s = Math.round(18 * dpr);
+  const c1 = imageToCanvas(a.x1, a.y1), c2 = imageToCanvas(a.x2, a.y2);
+  return {x: c2.x - s, y: c1.y, s, ann: a};
+}
+
+function hitDeleteRect(evt) {
+  const r = hoverDeleteRect();
+  if (!r) return null;
+  const dpr = window.devicePixelRatio || 1;
+  const b = state.canvas.getBoundingClientRect();
+  const x = (evt.clientX - b.left) * dpr, y = (evt.clientY - b.top) * dpr;
+  return (x >= r.x && x <= r.x + r.s && y >= r.y && y <= r.y + r.s) ? r.ann : null;
+}
+
 async function deleteAnn(a) {
   if (state.mode === "dataset") {
     await api.deleteDatasetAnnotation(a.id);
@@ -1049,6 +1093,7 @@ async function deleteAnn(a) {
   }
   if (state.selectedAnnId === a.id) state.selectedAnnId = null;
   if (state.hoverAnnId === a.id) state.hoverAnnId = null;
+  if (state.canvasHoverAnnId === a.id) state.canvasHoverAnnId = null;
   await refreshLists();
   if (a.proposal) focusNextProposal(true);
   draw();
@@ -1102,6 +1147,7 @@ function wireAnnRow(li, title, btns, a) {
 function _pruneAnnFocus() {
   const ids = new Set((state.frameAnnotations || []).map(a => a.id));
   if (!ids.has(state.selectedAnnId)) state.selectedAnnId = null;
+  state.canvasHoverAnnId = null;
   state.hoverAnnId = null;   // rows are rebuilt; the next mouseenter sets it again
 }
 
@@ -1989,6 +2035,8 @@ function installCanvasHandlers() {
     } else {
       if (!state.datasetLoaded && !state.rawLoaded) return;   // RAW browse: click-to-select only, no drawing
     }
+    const xAnn = hitDeleteRect(evt);
+    if (xAnn) { evt.preventDefault(); deleteAnn(xAnn); return; }
     state.dragging = true;
     const p = canvasToImage(evt.clientX, evt.clientY);
     state.dragStart = p;
@@ -1997,8 +2045,20 @@ function installCanvasHandlers() {
   });
 
   // Z zooms in where the mouse is; the wheel only acts while zoomed (otherwise the page scrolls as before).
-  state.canvas.addEventListener("mousemove", (evt) => { state.mouseClient = {x: evt.clientX, y: evt.clientY}; });
-  state.canvas.addEventListener("mouseleave", () => { state.mouseClient = null; });
+  state.canvas.addEventListener("mousemove", (evt) => {
+    state.mouseClient = {x: evt.clientX, y: evt.clientY};
+    if (state.dragging) return;
+    // Hovered box gets an X in its top-right corner (delete without going to the sidebar list).
+    const hit = canChangeClass() ? annAtPoint(canvasToImage(evt.clientX, evt.clientY)) : null;
+    const id = hit ? hit.id : null;
+    if (id !== state.canvasHoverAnnId) { state.canvasHoverAnnId = id; draw(); }
+    state.canvas.style.cursor = hitDeleteRect(evt) ? "pointer" : "";
+  });
+  state.canvas.addEventListener("mouseleave", () => {
+    state.mouseClient = null;
+    state.canvas.style.cursor = "";
+    if (state.canvasHoverAnnId && !state.dragging) { state.canvasHoverAnnId = null; draw(); }
+  });
   state.canvas.addEventListener("wheel", (evt) => { if (state.mouseClient) wheelZoom(evt); }, {passive: false});
 
   state.canvas.addEventListener("mousemove", (evt) => {
