@@ -553,7 +553,7 @@ const state = {
 
   // box focus: hover/click a row in "Current … boxes" (or click a box on the canvas) highlights that box
   hoverAnnId: null,
-  canvasHoverAnnId: null,   // box under the mouse on the canvas → its X (delete) button is drawn
+  canvasHoverAnnId: null,   // box whose top-right corner zone the mouse is in → its X (delete) button is drawn
   selectedAnnId: null,
 
   // flag panel (MDQ-3)
@@ -918,9 +918,14 @@ function drawCanvas() {
     anns.forEach((a, i) => { if (a.id !== focusId) drawAnn(a, i + 1, false); });
     const fi = anns.findIndex(a => a.id === focusId);
     if (fi >= 0) drawAnn(anns[fi], fi + 1, true);
-    const xr = hoverDeleteRect();
-    if (xr) {
+    for (const xr of visibleDeleteRects().reverse()) {   // hovered X drawn last = on top
       ctx.globalAlpha = 1;
+      if (xr.hover) {   // which box this X belongs to
+        const c1 = imageToCanvas(xr.ann.x1, xr.ann.y1), c2 = imageToCanvas(xr.ann.x2, xr.ann.y2);
+        ctx.strokeStyle = "#dc2626";
+        ctx.lineWidth = 3 * dpr;
+        ctx.strokeRect(c1.x, c1.y, c2.x - c1.x, c2.y - c1.y);
+      }
       ctx.fillStyle = "#dc2626";
       ctx.fillRect(xr.x, xr.y, xr.s, xr.s);
       ctx.strokeStyle = "#fff";
@@ -1039,15 +1044,22 @@ function selectedAnn() {
   return (state.frameAnnotations || []).find(a => a.id === state.selectedAnnId) || null;
 }
 
-// Smallest box containing the image point (nested/overlapping boxes: the inner one wins).
-function annAtPoint(p) {
-  let best = null, bestArea = Infinity;
-  for (const a of state.frameAnnotations || []) {
-    if (p.x < a.x1 || p.x > a.x2 || p.y < a.y1 || p.y > a.y2) continue;
-    const area = (a.x2 - a.x1) * (a.y2 - a.y1);
-    if (area < bestArea) { best = a; bestArea = area; }
-  }
-  return best;
+const annArea = a => (a.x2 - a.x1) * (a.y2 - a.y1);
+
+// All boxes containing the image point, smallest first (nested/overlapping boxes: the inner one first).
+function annsAtPoint(p) {
+  return (state.frameAnnotations || [])
+    .filter(a => p.x >= a.x1 && p.x <= a.x2 && p.y >= a.y1 && p.y <= a.y2)
+    .sort((a, b) => annArea(a) - annArea(b));
+}
+
+// Click on overlapping boxes: the first click picks the smallest; clicking again on the same spot while one of
+// them is selected moves on to the next one under the cursor (so a box behind another can be reached).
+function annForClick(p) {
+  const hits = annsAtPoint(p);
+  if (!hits.length) return null;
+  const i = hits.findIndex(a => a.id === state.selectedAnnId);
+  return i < 0 ? hits[0] : hits[(i + 1) % hits.length];
 }
 
 // Class changes only where the box can be saved: video frames and the Dataset Fixer session (not RAW browse).
@@ -1063,25 +1075,51 @@ function isDrawingBox() {
   return !!r && Math.abs(r.x2 - r.x1) >= 4 && Math.abs(r.y2 - r.y1) >= 4;
 }
 
-// X button (canvas px) in the top-right corner of the box under the mouse; null when there is none
-// or boxes cannot be deleted here (RAW browse is read-only, Background mode has no boxes).
-function hoverDeleteRect() {
-  if (!state.canvasHoverAnnId || state.dragging || state.peek || !canChangeClass()) return null;
-  const a = (state.frameAnnotations || []).find(x => x.id === state.canvasHoverAnnId);
-  if (!a) return null;
+// ---- X (delete) button on the canvas ----
+// The X of a box shows only when the mouse is in that box's top-right corner zone (20% of the box, at least
+// ~28 px), not anywhere inside it — otherwise a smaller box overlapping the corner steals it. The selected box
+// (click) keeps its X too. Not where boxes cannot be deleted (RAW browse is read-only, Background has no boxes).
+function evtToCanvasPx(evt) {
   const dpr = window.devicePixelRatio || 1;
-  const s = Math.round(18 * dpr);
+  const b = state.canvas.getBoundingClientRect();
+  return {x: (evt.clientX - b.left) * dpr, y: (evt.clientY - b.top) * dpr};
+}
+
+function deleteRectFor(a) {
+  const s = Math.round(18 * (window.devicePixelRatio || 1));
   const c1 = imageToCanvas(a.x1, a.y1), c2 = imageToCanvas(a.x2, a.y2);
   return {x: c2.x - s, y: c1.y, s, ann: a};
 }
 
+function annAtCornerZone(cp) {
+  const minZone = 28 * (window.devicePixelRatio || 1);
+  let best = null;
+  for (const a of state.frameAnnotations || []) {
+    const c1 = imageToCanvas(a.x1, a.y1), c2 = imageToCanvas(a.x2, a.y2);
+    const w = c2.x - c1.x, h = c2.y - c1.y;
+    const zw = Math.min(w, Math.max(0.2 * w, minZone)), zh = Math.min(h, Math.max(0.2 * h, minZone));
+    if (cp.x < c2.x - zw || cp.x > c2.x || cp.y < c1.y || cp.y > c1.y + zh) continue;
+    if (!best || annArea(a) < annArea(best)) best = a;
+  }
+  return best;
+}
+
+// Hovered (corner-zone) box first, then the selected box.
+function visibleDeleteRects() {
+  if (state.dragging || state.peek || !canChangeClass()) return [];
+  const anns = state.frameAnnotations || [];
+  const out = [];
+  const hov = anns.find(a => a.id === state.canvasHoverAnnId);
+  if (hov) out.push({...deleteRectFor(hov), hover: true});
+  const sel = anns.find(a => a.id === state.selectedAnnId);
+  if (sel && sel !== hov) out.push(deleteRectFor(sel));
+  return out;
+}
+
 function hitDeleteRect(evt) {
-  const r = hoverDeleteRect();
-  if (!r) return null;
-  const dpr = window.devicePixelRatio || 1;
-  const b = state.canvas.getBoundingClientRect();
-  const x = (evt.clientX - b.left) * dpr, y = (evt.clientY - b.top) * dpr;
-  return (x >= r.x && x <= r.x + r.s && y >= r.y && y <= r.y + r.s) ? r.ann : null;
+  const cp = evtToCanvasPx(evt);
+  const r = visibleDeleteRects().find(r => cp.x >= r.x && cp.x <= r.x + r.s && cp.y >= r.y && cp.y <= r.y + r.s);
+  return r ? r.ann : null;
 }
 
 async function deleteAnn(a) {
@@ -2048,8 +2086,8 @@ function installCanvasHandlers() {
   state.canvas.addEventListener("mousemove", (evt) => {
     state.mouseClient = {x: evt.clientX, y: evt.clientY};
     if (state.dragging) return;
-    // Hovered box gets an X in its top-right corner (delete without going to the sidebar list).
-    const hit = canChangeClass() ? annAtPoint(canvasToImage(evt.clientX, evt.clientY)) : null;
+    // Mouse in a box's top-right corner zone → that box gets an X (delete without going to the sidebar list).
+    const hit = canChangeClass() ? annAtCornerZone(evtToCanvasPx(evt)) : null;
     const id = hit ? hit.id : null;
     if (id !== state.canvasHoverAnnId) { state.canvasHoverAnnId = id; draw(); }
     state.canvas.style.cursor = hitDeleteRect(evt) ? "pointer" : "";
@@ -2079,8 +2117,9 @@ function installCanvasHandlers() {
     if (y2 < y1) [y1, y2] = [y2, y1];
     state.dragRect = null;
     if ((x2 - x1) < 4 || (y2 - y1) < 4) {
-      // A click (no drag) inside a box selects it (smallest box under the cursor); on empty space it clears.
-      const hit = annAtPoint(p);
+      // A click (no drag) inside a box selects it (smallest first, clicking again cycles through the overlapping
+      // boxes under the cursor); on empty space it clears.
+      const hit = annForClick(p);
       selectAnn(hit ? hit.id : null, true);
       return;
     }
