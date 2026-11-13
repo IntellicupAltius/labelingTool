@@ -315,7 +315,11 @@ def create_app() -> FastAPI:
 
             # allow overriding only some keys
             merged = dict(default_cfg)
-            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir", "existing_datasets_dir", "raw_base_path", "raw_review_dir", "relabel_batches_dir"):
+            # Every key read later via cfg.get() must be listed here, or it is silently dropped
+            # (INFRA-1, 2026-11-13: analyzer_models_python / metrics_python were read but never passed).
+            for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir", "existing_datasets_dir",
+                      "raw_base_path", "raw_review_dir", "relabel_batches_dir", "article_map_path",
+                      "analyzer_models_root", "analyzer_raw_root", "analyzer_models_python", "metrics_python"):
                 if isinstance(cfg.get(k), str) and cfg.get(k).strip():
                     merged[k] = cfg[k].strip()
             if isinstance(cfg.get("bar_counter_options"), list) and cfg.get("bar_counter_options"):
