@@ -232,6 +232,38 @@ def batch_saved_at(batch_dir: Path) -> Optional[str]:
     return doc.get("saved_at") if isinstance(doc, dict) else None
 
 
+# Pace tracking: every Dataset Fixer Save appends one line here (fixer_decisions.json only keeps the LAST
+# saved_at). Read-only for apply_relabel.py; never needed to apply a batch.
+SAVE_HISTORY = "save_history.jsonl"
+
+
+def append_save_history(batch_dir: Path, *, loaded_at: Optional[str], images_total: int,
+                        proposal_decisions: Dict[str, Dict[str, str]], decided_this_session: int,
+                        marks: int) -> Dict:
+    """Append one Save record to ``<batch>/save_history.jsonl`` and return it. Batch-wide counts come from
+    ``proposals.json`` + the merged decisions; an image is done when every real (and decoy) proposal on it
+    is decided. Batches without proposals get ``images_done = None`` (nothing per image to count)."""
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    try:
+        props = read_proposals(batch_dir)
+    except RelabelBatchError:
+        props = {}
+    with_props = {n: ps for n, ps in props.items() if ps}
+    p_total = sum(len(ps) for ps in with_props.values())
+    p_decided = sum(1 for n, ps in with_props.items() for pr in ps
+                    if proposal_decisions.get(n, {}).get(pr["pid"]) in PROPOSAL_DECIDED)
+    done = (sum(1 for n, ps in with_props.items()
+                if all(proposal_decisions.get(n, {}).get(pr["pid"]) in PROPOSAL_DECIDED for pr in ps))
+            if with_props else None)
+    rec = {"saved_at": now, "loaded_at": loaded_at, "images_total": images_total,
+           "images_with_proposals": len(with_props), "images_done": done,
+           "proposals_total": p_total, "proposals_decided": p_decided,
+           "decided_this_session": decided_this_session, "marks": marks}
+    with open(batch_dir / SAVE_HISTORY, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return rec
+
+
 # MDQ-17c: model proposals in a relabel batch. ``proposals.json`` (written by a script, never by the tool) holds
 # boxes a fair model suggests; they are NOT in labels/, which stays the exact RAW copy. In the Dataset Fixer
 # each proposal is confirmed, re-classed or deleted; Save records that in ``proposal_decisions.json`` and

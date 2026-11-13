@@ -1493,6 +1493,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=400, detail=str(e))
         dataset_session = load_dataset_session(ds_path, model=req.model, class_names=names)
         dataset_session.relabel_items = relabel_items
+        dataset_session.loaded_at = datetime.now().astimezone().isoformat(timespec="seconds")
         if relabel_items:
             # Restore the Background / Delete marks of an earlier Save (only on images still without boxes).
             for i, f in enumerate(dataset_session.img_files):
@@ -1688,7 +1689,8 @@ def create_app() -> FastAPI:
                 prop_dec = _relabel_batch.read_proposal_decisions(sess.dataset_path)
             except _relabel_batch.RelabelBatchError as e:
                 raise HTTPException(status_code=400, detail=f"Nothing saved: {e}")
-            for name, d in proposal_decisions(sess).items():
+            session_dec = proposal_decisions(sess)
+            for name, d in session_dec.items():
                 prop_dec.setdefault(name, {}).update(d)
             save_dataset_session(sess, "overwrite")
             try:
@@ -1697,6 +1699,14 @@ def create_app() -> FastAPI:
                     _relabel_batch.write_proposal_decisions(sess.dataset_path, prop_dec)
             except (OSError, _relabel_batch.RelabelBatchError) as e:
                 raise HTTPException(status_code=500, detail=f"Labels saved, but the Background/Delete marks or proposal decisions could not be written: {e}")
+            try:  # pace tracking only: a failure here must never fail the Save
+                rec = _relabel_batch.append_save_history(
+                    sess.dataset_path, loaded_at=sess.loaded_at, images_total=len(sess.img_files),
+                    proposal_decisions=prop_dec, decided_this_session=sum(len(d) for d in session_dec.values()),
+                    marks=len(decisions))
+                logger.info("Relabel save %s: %s", sess.dataset_path.name, rec)
+            except Exception as e:
+                logger.warning("save_history.jsonl not written for %s: %s", sess.dataset_path, e)
             vals = list(decisions.values())
             dataset_session = None
             # No zip: a relabel batch is not sent to labelers, apply_relabel.py reads the folder itself.

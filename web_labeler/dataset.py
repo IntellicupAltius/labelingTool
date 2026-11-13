@@ -49,6 +49,7 @@ class DatasetSession:
     image_tags: Dict[int, Dict] = field(default_factory=dict)  # image idx → {frame_tags: [], bbox_tags: {ann_id: []}}
     relabel_items: Dict[str, Dict] = field(default_factory=dict)  # MDQ-15c-2 relabel batch: image file name → manifest item
     proposals_by_image: Dict[int, List[Dict]] = field(default_factory=dict)  # MDQ-17c: proposals loaded (still undecided) per image
+    loaded_at: Optional[str] = None  # when the Fixer loaded this session (relabel batch save_history.jsonl: sitting length)
 
     def new_id(self) -> str:
         return uuid.uuid4().hex
