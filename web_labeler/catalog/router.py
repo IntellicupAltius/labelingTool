@@ -42,6 +42,22 @@ def build_catalog_router(settings: CatalogSettings) -> APIRouter:
         except CatalogUnavailable as e:
             raise HTTPException(status_code=503, detail=str(e))
 
+    @router.get("/models/{model}/classes/{class_name}/details")
+    def catalog_class_detail(model: str, class_name: str) -> Dict[str, Any]:
+        try:
+            return store.class_detail(settings, model, class_name)
+        except UnknownModel:
+            raise HTTPException(status_code=404, detail="Ta klasa ne postoji u Katalogu.")
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/source-report")
+    def catalog_source_report() -> Dict[str, Any]:
+        try:
+            return store.source_report(settings)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
     @router.get("/unclassified")
     def catalog_unclassified() -> Dict[str, Any]:
         try:

@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from web_labeler.catalog import assortment as _assortment
+from web_labeler.catalog import class_rules as _rules
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
-           "map_keys", "class_links"}
+           "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings"}
 
 _SCHEMA = """
 CREATE TABLE venues (
@@ -104,6 +105,38 @@ CREATE TABLE class_links (
 CREATE INDEX class_links_class ON class_links (model_key, class_name);
 """
 
+_SCHEMA_V3 = """
+CREATE TABLE class_training (
+    venue_id     TEXT NOT NULL,
+    model_key    TEXT NOT NULL,
+    class_id     INTEGER NOT NULL,
+    trained_name TEXT,
+    state        TEXT NOT NULL CHECK (state IN ('trained', 'excluded', 'not_in_model', 'unknown')),
+    PRIMARY KEY (venue_id, model_key, class_id),
+    FOREIGN KEY (venue_id, model_key, class_id) REFERENCES classes(venue_id, model_key, class_id)
+);
+CREATE TABLE class_rule_texts (
+    venue_id   TEXT NOT NULL,
+    model_key  TEXT NOT NULL,
+    class_name TEXT NOT NULL,
+    position   INTEGER NOT NULL,
+    source     TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    PRIMARY KEY (venue_id, model_key, class_name, source, position)
+);
+CREATE TABLE source_findings (
+    finding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id   TEXT NOT NULL,
+    model_key  TEXT,
+    class_name TEXT,
+    severity   TEXT NOT NULL CHECK (severity IN ('high', 'medium', 'info')),
+    title      TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    sources    TEXT NOT NULL
+);
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -135,6 +168,7 @@ class CatalogSettings:
     blacklist_path: Optional[Path] = None
     active_days: int = 30
     import_baseline: Optional[Mapping[str, Any]] = None
+    rule_sources: Optional[_rules.RuleSources] = None
 
     @classmethod
     def from_config(cls, cfg: Mapping[str, Any], models_dir: Path,
@@ -155,13 +189,27 @@ class CatalogSettings:
 
         def optional_path(key: str) -> Optional[Path]:
             value = str(cfg.get(key) or "").strip()
-            return Path(value).expanduser().resolve() if value else None
+            if not value:
+                return None
+            path = Path(value).expanduser()
+            return (path if path.is_absolute() else Path(__file__).resolve().parents[2] / path).resolve()
 
         baseline = cfg.get("catalog_import_baseline")
+        rule_sources = None
+        training_dir = optional_path("catalog_training_config_dir")
+        if training_dir:
+            files = cfg.get("catalog_rule_files")
+            rule_files = {str(m): (str(v["label"]), Path(str(v["path"])).expanduser().resolve())
+                          for m, v in files.items()} if isinstance(files, dict) else {}
+            rule_sources = _rules.RuleSources(
+                training_dir, optional_path("catalog_documented_classes_dir"), optional_path("catalog_cards_dir"),
+                optional_path("catalog_word_exports_dir"), optional_path("catalog_live_models_dir"), rule_files,
+                optional_path("catalog_known_conflicts_path"))
         return cls(db_path, venue_id, venue_name, Path(models_dir).resolve(), tuple(roots),
                    optional_path("catalog_pos_dir"), str(cfg.get("catalog_pos_adapter") or "").strip() or None,
                    optional_path("article_map_path"), optional_path("catalog_blacklist_path"),
-                   int(cfg.get("catalog_active_days") or 30), baseline if isinstance(baseline, dict) else None)
+                   int(cfg.get("catalog_active_days") or 30), baseline if isinstance(baseline, dict) else None,
+                   rule_sources)
 
     @classmethod
     def from_config_file(cls, config_path: Path) -> "CatalogSettings":
@@ -223,9 +271,11 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version == 1:
-            conn.executescript(f"BEGIN;{_SCHEMA_V2}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+            conn.executescript(f"BEGIN;{_SCHEMA_V2}{_SCHEMA_V3}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        elif version == 2:
+            conn.executescript(f"BEGIN;{_SCHEMA_V3}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version != SCHEMA_VERSION:
             raise CatalogError(f"Unsupported Catalog database version: {version}")
     except sqlite3.Error as e:
@@ -356,16 +406,44 @@ def _apply_assortment(conn: sqlite3.Connection, venue: str, plan: _assortment.As
     plan.report["needs_review"] = needs_review
 
 
+def _apply_rules(conn: sqlite3.Connection, venue: str, plan: _rules.RulesPlan) -> None:
+    for table in ("class_training", "class_rule_texts", "source_findings"):
+        conn.execute(f"DELETE FROM {table} WHERE venue_id = ?", (venue,))
+    conn.executemany("INSERT INTO class_training (venue_id, model_key, class_id, trained_name, state) VALUES (?, ?, ?, ?, ?)",
+                     [(venue, model, row["class_id"], row["trained_name"], row["state"])
+                      for model, rows in plan.classes.items() for row in rows.values()])
+    conn.executemany("INSERT INTO class_rule_texts (venue_id, model_key, class_name, position, source, kind, text) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     [(venue, t["model"], t["class"], t["position"], t["source"], t["kind"], t["text"]) for t in plan.texts])
+    conn.executemany("INSERT INTO source_findings (venue_id, model_key, class_name, severity, title, text, sources) "
+                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     [(venue, f["model"], f["class"], f["severity"], f["title"], f["text"],
+                       json.dumps(f["sources"], ensure_ascii=False)) for f in plan.findings])
+
+
 def import_catalog(settings: CatalogSettings) -> Dict[str, Any]:
     """Full import: class lists, then articles and their POS history, in one all-or-nothing step."""
-    return _import(settings, _build_assortment_plan(settings))
+    plan = _build_assortment_plan(settings)
+    rules = None
+    if settings.rule_sources is not None:
+        sold_names = {_assortment.normalize_name(n) for _, n in plan.stats}
+        map_classes: Dict[str, Dict[str, bool]] = {}
+        for entry in plan.entries:
+            if entry.status != "skip":
+                sold = any(k in sold_names for k in entry.keys)
+                for link in entry.links:
+                    model_classes = map_classes.setdefault(link["model"], {})
+                    model_classes[link["class"]] = model_classes.get(link["class"], False) or sold
+        rules = _rules.build_rules_plan(settings.rule_sources, _read_sources(settings), map_classes)
+    return _import(settings, plan, rules)
 
 
 def import_class_lists(settings: CatalogSettings) -> Dict[str, Any]:
     return _import(settings, None)
 
 
-def _import(settings: CatalogSettings, plan: Optional[_assortment.AssortmentPlan]) -> Dict[str, Any]:
+def _import(settings: CatalogSettings, plan: Optional[_assortment.AssortmentPlan],
+            rules: Optional[_rules.RulesPlan] = None) -> Dict[str, Any]:
     """Bring the tool's class lists into the Catalog, all or nothing.
 
     Safe to repeat: existing numbers never change and new classes are only appended. If a source
@@ -402,6 +480,9 @@ def _import(settings: CatalogSettings, plan: Optional[_assortment.AssortmentPlan
         if plan is not None:
             _apply_assortment(conn, venue, plan, at)
             report["assortment"] = plan.report
+        if rules is not None:
+            _apply_rules(conn, venue, rules)
+            report["class_rules"] = rules.report
         if report["added"] or plan is not None:
             conn.execute("INSERT INTO import_runs (venue_id, at, summary_json) VALUES (?, ?, ?)",
                          (venue, at, json.dumps(report, ensure_ascii=False, sort_keys=True)))
@@ -479,20 +560,52 @@ def _variation(row: Sequence[Any], classes: Optional[List[str]] = None) -> Dict[
             "provisional_reason": provisional, "mapping_mode": mode, "classes": classes or []}
 
 
+TRAINING_LABELS = {"trained": "U modelu", "excluded": "Izbačena iz treninga", "not_in_model": "Nije u živom modelu",
+                   "unknown": "Nepoznato"}
+RULE_KIND_LABELS = {"rule": "Važeće pravilo", "recognize": "Kako se prepoznaje", "examples": "Primeri",
+                    "confused": "Česte greške", "note": "Napomene"}
+_LINKED_IDENTITIES = (
+    "FROM class_links l JOIN map_entries e ON e.entry_id = l.entry_id AND e.venue_id = ? AND e.status != 'skip' "
+    "JOIN map_keys k ON k.entry_id = e.entry_id "
+    "JOIN pos_identities i ON i.venue_id = k.venue_id AND i.norm_name = k.norm_name ")
+
+
+def _training_rows(conn: sqlite3.Connection, venue: str, model: str) -> Dict[str, Dict[str, Any]]:
+    rows = conn.execute("SELECT c.name, t.trained_name, t.state FROM classes c LEFT JOIN class_training t "
+                        "ON t.venue_id = c.venue_id AND t.model_key = c.model_key AND t.class_id = c.class_id "
+                        "WHERE c.venue_id = ? AND c.model_key = ? ORDER BY c.class_id", (venue, model)).fetchall()
+    return {name: {"trained_name": trained, "state": state or "unknown"} for name, trained, state in rows}
+
+
+def _class_scope(name: str, training: Mapping[str, Dict[str, Any]]) -> List[str]:
+    trained = training.get(name, {}).get("trained_name")
+    return sorted({name, trained} - {None})
+
+
+def _identity_ids(conn: sqlite3.Connection, venue: str, model: str, names: Sequence[str]) -> set:
+    marks = ",".join("?" for _ in names)
+    return {r[0] for r in conn.execute(f"SELECT i.identity_id {_LINKED_IDENTITIES}"
+                                       f"WHERE l.model_key = ? AND l.class_name IN ({marks})",
+                                       (venue, model.lower(), *names))}
+
+
 def list_model_view(settings: CatalogSettings, model: str) -> Dict[str, Any]:
-    """Classes of a model with variation counts, plus map classes not on the tool's list."""
+    """Classes as labelers draw them, how training treats them, and map classes with no home."""
     classes = list_classes(settings, model)
+    venue = settings.venue_id
     with _open_for_read(settings) as conn:
-        counts = dict(conn.execute(
-            "SELECT l.class_name, COUNT(DISTINCT i.identity_id) FROM class_links l "
-            "JOIN map_entries e ON e.entry_id = l.entry_id AND e.venue_id = ? AND e.status != 'skip' "
-            "JOIN map_keys k ON k.entry_id = e.entry_id "
-            "JOIN pos_identities i ON i.venue_id = k.venue_id AND i.norm_name = k.norm_name "
-            "WHERE l.model_key = ? GROUP BY l.class_name", (settings.venue_id, model.lower())).fetchall())
-    for item in classes:
-        item["variation_count"] = counts.get(item["name"], 0)
-    listed = {c["name"] for c in classes}
-    others = [{"name": n, "variation_count": c} for n, c in sorted(counts.items()) if n not in listed]
+        training = _training_rows(conn, venue, model)
+        for item in classes:
+            info = training[item["name"]]
+            item["variation_count"] = len(_identity_ids(conn, venue, model, _class_scope(item["name"], training)))
+            item["trained_name"] = info["trained_name"]
+            item["training_state"] = info["state"]
+            item["training_label"] = TRAINING_LABELS[info["state"]]
+        known = set(training) | {i["trained_name"] for i in training.values() if i["trained_name"]}
+        linked = [r[0] for r in conn.execute(f"SELECT DISTINCT l.class_name {_LINKED_IDENTITIES}WHERE l.model_key = ? "
+                                             "ORDER BY l.class_name", (venue, model.lower()))]
+        others = [{"name": n, "variation_count": len(_identity_ids(conn, venue, model, [n]))}
+                  for n in linked if n not in known]
     return {"model": model, "classes": classes, "map_only_classes": others}
 
 
@@ -500,21 +613,61 @@ def list_variations(settings: CatalogSettings, model: str, class_name: str) -> L
     view = list_model_view(settings, model)
     if class_name not in {c["name"] for c in view["classes"]} | {c["name"] for c in view["map_only_classes"]}:
         raise UnknownModel(f"{model}.{class_name}")
+    venue = settings.venue_id
     with _open_for_read(settings) as conn:
+        scope = _class_scope(class_name, _training_rows(conn, venue, model))
+        marks = ",".join("?" for _ in scope)
         rows = conn.execute(
-            "SELECT DISTINCT i.article_id, i.code, i.name, i.state, i.sold_qty, i.last_sale, i.not_verified, "
-            "e.provisional, e.mapping_mode, e.entry_id FROM class_links l "
-            "JOIN map_entries e ON e.entry_id = l.entry_id AND e.venue_id = ? AND e.status != 'skip' "
-            "JOIN map_keys k ON k.entry_id = e.entry_id "
-            "JOIN pos_identities i ON i.venue_id = k.venue_id AND i.norm_name = k.norm_name "
-            "WHERE l.model_key = ? AND l.class_name = ? ORDER BY i.sold_qty DESC, i.name, i.code",
-            (settings.venue_id, model.lower(), class_name)).fetchall()
+            "SELECT DISTINCT i.identity_id, i.article_id, i.code, i.name, i.state, i.sold_qty, i.last_sale, i.not_verified, "
+            f"e.provisional, e.mapping_mode, e.entry_id {_LINKED_IDENTITIES}"
+            f"WHERE l.model_key = ? AND l.class_name IN ({marks}) ORDER BY i.sold_qty DESC, i.name, i.code",
+            (venue, model.lower(), *scope)).fetchall()
         result = []
         for row in rows:
             links = conn.execute("SELECT model_key, class_name FROM class_links WHERE entry_id = ? ORDER BY position",
-                                 (row[9],)).fetchall()
-            result.append(_variation(row[:9], [f"{m}.{c}" for m, c in links]))
+                                 (row[10],)).fetchall()
+            item = _variation(row[1:10], [f"{m}.{c}" for m, c in links])
+            own = {c for m, c in links if m == model.lower()}
+            item["via_class"] = None if class_name in own else next((n for n in scope if n in own), None)
+            result.append(item)
     return result
+
+
+def class_detail(settings: CatalogSettings, model: str, class_name: str) -> Dict[str, Any]:
+    variations = list_variations(settings, model, class_name)
+    venue = settings.venue_id
+    with _open_for_read(settings) as conn:
+        training = _training_rows(conn, venue, model)
+        info = training.get(class_name, {"trained_name": None, "state": "unknown"})
+        trained = info["trained_name"]
+        drawn = [n for n, t in training.items() if trained and t["trained_name"] == trained]
+        names = _class_scope(class_name, training)
+        marks = ",".join("?" for _ in names)
+        rows = conn.execute(f"SELECT class_name, kind, text, source FROM class_rule_texts WHERE venue_id = ? AND model_key = ? "
+                            f"AND class_name IN ({marks}) ORDER BY class_name != ?, position",
+                            (venue, model, *names, class_name)).fetchall()
+        findings = conn.execute("SELECT severity, title, text, sources FROM source_findings WHERE venue_id = ? "
+                                "AND model_key = ? AND class_name = ? ORDER BY finding_id",
+                                (venue, model.lower(), class_name)).fetchall()
+    sections = []
+    for kind, label in RULE_KIND_LABELS.items():
+        items = [{"text": text, "source": source, "from_class": None if owner == class_name else owner}
+                 for owner, row_kind, text, source in rows if row_kind == kind]
+        if items:
+            sections.append({"kind": kind, "label": label, "items": items})
+    return {"model": model, "class": class_name, "trained_name": trained, "training_state": info["state"],
+            "training_label": TRAINING_LABELS[info["state"]], "drawn_as": drawn, "united": len(drawn) > 1,
+            "rules": sections, "has_description": bool(sections), "variations": variations,
+            "findings": [{"severity": s, "title": t, "text": x, "sources": json.loads(src)} for s, t, x, src in findings]}
+
+
+def source_report(settings: CatalogSettings) -> Dict[str, Any]:
+    with _open_for_read(settings) as conn:
+        rows = conn.execute("SELECT model_key, class_name, severity, title, text, sources FROM source_findings "
+                            "WHERE venue_id = ? ORDER BY finding_id", (settings.venue_id,)).fetchall()
+    findings = [{"model": m, "class": c, "severity": s, "title": t, "text": x, "sources": json.loads(src)}
+                for m, c, s, t, x, src in rows]
+    return {"findings": findings, "counts": {k: sum(f["severity"] == k for f in findings) for k in ("high", "medium", "info")}}
 
 
 def list_unclassified(settings: CatalogSettings) -> Dict[str, Any]:

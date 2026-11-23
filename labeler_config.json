@@ -25,5 +25,17 @@
       "pending": 14,
       "dormant": 26
     }
-  }
+  },
+  "catalog_training_config_dir": "~/Projects/IntelliCup/training_pipeline/config/tenants/blaznavac",
+  "catalog_documented_classes_dir": "~/Projects/IntelliCup/training_pipeline/config/documented_classes",
+  "catalog_cards_dir": "~/Projects/docs/labeling",
+  "catalog_word_exports_dir": "~/Projects/docs/labeling/sources",
+  "catalog_live_models_dir": "/opt/intellicup/models",
+  "catalog_rule_files": {
+    "glasses": {
+      "label": "Pravila za čaše v2 (30.10.2026)",
+      "path": "~/Projects/docs/labeling/glasses_pravila_v2_20261030.md"
+    }
+  },
+  "catalog_known_conflicts_path": "web_labeler/catalog/venues/blaznavac/known_conflicts.yaml"
 }

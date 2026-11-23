@@ -337,5 +337,174 @@ class AssortmentImportTests(unittest.TestCase):
         self.assertEqual(self.variation("Glasses", "CASA", "drink")["code"], "0706")
 
 
+class ClassRulesTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        for name in ("Models", "pos", "training", "documented", "cards", "live/glasses", "word/2026-09-25/text"):
+            (self.tmp / name).mkdir(parents=True)
+        (self.tmp / "Models" / "Glasses.yaml").write_text(json.dumps(
+            {"names": ["NISKA_BELO", "NISKA_ZUTO", "LEGACY_OLD", "BAZA", "BEZ_OPISA", "NEMA_SLIKA"]}), encoding="utf-8")
+        self.write_training(exclude=["BAZA"])
+        self.write_live(["NISKA_BELO_ZUTO", "BEZ_OPISA", "background"])
+        self.write_documented({"excluded": [{"class": "BAZA", "reason": "van menija"}],
+                               "unite": [{"into": "NISKA_BELO_ZUTO", "classes": ["NISKA_BELO", "NISKA_ZUTO"]}]})
+        (self.tmp / "cards" / "kartice_glasses_v1.md").write_text(
+            "Status: NACRT\n\n### OSTALO\n\n### NISKA_ZUTO\n- **Prepoznaje se:** niska zuta (DATA-4 test)\n"
+            "  casa.\n- **Meša se sa:** NISKA_BELO.\n- Slika: `img/x.jpg`\n\n### NISKA_BELO\n"
+            "- **Prepoznaje se:** bela.\n\n### NEMA_SLIKA\n- **Prepoznaje se:** retka.\n", encoding="utf-8")
+        (self.tmp / "word" / "2026-09-25" / "text" / "overview_Glasses.txt").write_text(
+            "NISKA BELO NISKA ZUTO LEGACY OLD BAZA NEMA SLIKA Word kaze drugacije", encoding="utf-8")
+        (self.tmp / "rules.md").write_text("| Klasa | Kada |\n|---|---|\n| NISKA_ZUTO | jarko zuto |\n", encoding="utf-8")
+        row = pos_row("0100", "SOLD DRINK", "2026.11.20 10:00")
+        with open(self.tmp / "pos" / "a.csv", "w", encoding="utf-8", newline="") as f:
+            csv.writer(f).writerow(row)
+        (self.tmp / "blacklist.txt").write_text("", encoding="utf-8")
+        self.write_map("NISKA_BELO_ZUTO")
+        self.settings = self.make_settings()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write_training(self, exclude):
+        (self.tmp / "training" / "glasses.yaml").write_text(json.dumps({"classes": {
+            "exclude": exclude, "exclude_prefixes": ["LEGACY_"],
+            "unite": [{"classes": ["NISKA_BELO", "NISKA_ZUTO"], "as": "NISKA_BELO_ZUTO"}]}}), encoding="utf-8")
+
+    def write_live(self, names):
+        (self.tmp / "live" / "glasses" / "active_classes.yaml").write_text(json.dumps({"names": names}), encoding="utf-8")
+
+    def write_documented(self, data):
+        (self.tmp / "documented" / "glasses.yaml").write_text(json.dumps(data), encoding="utf-8")
+
+    def write_map(self, cls):
+        (self.tmp / "map.yaml").write_text(json.dumps({"articles": [
+            {"pos_name": "SOLD DRINK", "status": "incl", "mapping_mode": "fallback",
+             "mappings": [{"model": "glasses", "class": cls, "priority": 1}]}]}), encoding="utf-8")
+
+    def make_settings(self, **extra):
+        t = self.tmp
+        cfg = {"catalog_venue_id": "venue_a", "catalog_db_path": str(t / "db" / "catalog.db"),
+               "catalog_pos_dir": str(t / "pos"), "catalog_pos_adapter": "blaznavac_csv",
+               "article_map_path": str(t / "map.yaml"), "catalog_blacklist_path": str(t / "blacklist.txt"),
+               "catalog_training_config_dir": str(t / "training"), "catalog_documented_classes_dir": str(t / "documented"),
+               "catalog_cards_dir": str(t / "cards"), "catalog_word_exports_dir": str(t / "word"),
+               "catalog_live_models_dir": str(t / "live"),
+               "catalog_rule_files": {"glasses": {"label": "Pravila v2", "path": str(t / "rules.md")}}}
+        cfg.update(extra)
+        return catalog.CatalogSettings.from_config(cfg, t / "Models", t / "raw")
+
+    def titles(self, settings=None):
+        return [f["title"] for f in catalog.source_report(settings or self.settings)["findings"]]
+
+    def test_united_class_shows_drawn_and_model_names_and_pos_articles(self):
+        catalog.import_catalog(self.settings)
+        detail = catalog.class_detail(self.settings, "Glasses", "NISKA_ZUTO")
+        self.assertEqual(detail["trained_name"], "NISKA_BELO_ZUTO")
+        self.assertEqual(detail["drawn_as"], ["NISKA_BELO", "NISKA_ZUTO"])
+        self.assertEqual([v["name"] for v in detail["variations"]], ["SOLD DRINK"])
+        self.assertEqual(detail["variations"][0]["via_class"], "NISKA_BELO_ZUTO")
+        self.assertEqual(catalog.list_model_view(self.settings, "Glasses")["map_only_classes"], [])
+
+    def test_excluded_classes_by_name_and_prefix(self):
+        catalog.import_catalog(self.settings)
+        by_name = {c["name"]: c for c in catalog.list_model_view(self.settings, "Glasses")["classes"]}
+        for name in ("BAZA", "LEGACY_OLD"):
+            self.assertEqual(by_name[name]["training_state"], "excluded")
+            self.assertIsNone(by_name[name]["trained_name"])
+
+    def test_class_not_excluded_but_missing_from_live_model(self):
+        catalog.import_catalog(self.settings)
+        by_name = {c["name"]: c for c in catalog.list_model_view(self.settings, "Glasses")["classes"]}
+        self.assertEqual(by_name["NEMA_SLIKA"]["training_state"], "not_in_model")
+        self.assertIn("NEMA_SLIKA: nije izbačena, a model je nema", self.titles())
+
+    def test_cards_are_read_per_class_and_win_over_word(self):
+        catalog.import_catalog(self.settings)
+        detail = catalog.class_detail(self.settings, "Glasses", "NISKA_ZUTO")
+        sections = {s["kind"]: s["items"] for s in detail["rules"]}
+        self.assertEqual(sections["rule"][0]["text"], "jarko zuto")
+        self.assertEqual(sections["recognize"][0]["text"], "niska zuta casa.")
+        self.assertEqual(sections["recognize"][0]["source"], "Kartica Glasses (nacrt)")
+        self.assertEqual(sections["confused"][0]["text"], "NISKA_BELO.")
+        self.assertNotIn("Word kaze", json.dumps(detail, ensure_ascii=False))
+        self.assertNotIn("img/", json.dumps(detail, ensure_ascii=False))
+
+    def test_class_without_description_says_so(self):
+        catalog.import_catalog(self.settings)
+        self.assertFalse(catalog.class_detail(self.settings, "Glasses", "BEZ_OPISA")["has_description"])
+        self.assertIn("BEZ_OPISA: nema kartice", self.titles())
+        self.assertIn("BEZ_OPISA: Word je ne pominje", self.titles())
+
+    def test_section_heading_is_not_reported_as_a_card(self):
+        catalog.import_catalog(self.settings)
+        self.assertFalse(any("OSTALO" in t for t in self.titles()))
+
+    def test_sources_that_disagree_are_reported_with_each_source(self):
+        self.write_training(exclude=[])
+        self.write_documented({"excluded": [{"class": "BAZA", "reason": "van menija"}],
+                               "unite": [{"into": "DRUGO_IME", "classes": ["NISKA_BELO", "NISKA_ZUTO"]}]})
+        catalog.import_catalog(self.settings)
+        findings = {f["title"]: f for f in catalog.source_report(self.settings)["findings"]}
+        excluded = findings["BAZA: dokumentacija je izbacuje, trening ne"]
+        self.assertEqual({s["says"] for s in excluded["sources"]}, {"van menija", "ulazi u trening"})
+        unite = findings["Spajanje u NISKA_BELO_ZUTO nije isto zapisano"]
+        self.assertTrue(any("DRUGO_IME" in s["says"] for s in unite["sources"]))
+
+    def test_matching_sources_report_no_merge_difference(self):
+        catalog.import_catalog(self.settings)
+        self.assertFalse(any(t.startswith("Spajanje") for t in self.titles()))
+        self.assertFalse(any(t.startswith("BAZA:") for t in self.titles()))
+
+    def test_map_class_missing_from_model_is_important_only_when_sold(self):
+        self.write_map("STARA_KLASA")
+        catalog.import_catalog(self.settings)
+        finding = next(f for f in catalog.source_report(self.settings)["findings"] if "STARA_KLASA" in f["title"])
+        self.assertEqual(finding["severity"], "high")
+        (self.tmp / "map.yaml").write_text(json.dumps({"articles": [
+            {"pos_name": "NEVER SOLD", "status": "miss", "mappings": [{"model": "glasses", "class": "STARA_KLASA"}]}]}))
+        catalog.import_catalog(self.settings)
+        finding = next(f for f in catalog.source_report(self.settings)["findings"] if "STARA_KLASA" in f["title"])
+        self.assertEqual(finding["severity"], "info")
+
+    def test_known_conflict_is_reported_and_flags_a_changed_source(self):
+        evidence = self.tmp / "rule.txt"
+        evidence.write_text("flase u kibli se nikad ne oznacavaju", encoding="utf-8")
+        known = self.tmp / "known.yaml"
+        known.write_text(json.dumps({"conflicts": [{"model": "glasses", "class": "BAZA", "title": "Kibla", "text": "Protivrecno.",
+            "sources": [{"label": "Odluka", "says": "da"},
+                        {"label": "Kartica", "says": "ne", "file": str(evidence), "phrase": "nikad ne oznacavaju"}]}]}))
+        settings = self.make_settings(catalog_known_conflicts_path=str(known))
+        catalog.import_catalog(settings)
+        finding = next(f for f in catalog.source_report(settings)["findings"] if f["title"] == "Kibla")
+        self.assertEqual((finding["severity"], finding["text"]), ("high", "Protivrecno."))
+        self.assertEqual([s["label"] for s in finding["sources"]], ["Odluka", "Kartica"])
+        evidence.write_text("sada se oznacavaju", encoding="utf-8")
+        catalog.import_catalog(settings)
+        finding = next(f for f in catalog.source_report(settings)["findings"] if f["title"] == "Kibla")
+        self.assertIn("promenio u izvoru: Kartica", finding["text"])
+
+    def test_repeat_import_does_not_duplicate_rules_or_findings(self):
+        catalog.import_catalog(self.settings)
+        before = catalog.source_report(self.settings), catalog.class_detail(self.settings, "Glasses", "NISKA_ZUTO")
+        catalog.import_catalog(self.settings)
+        self.assertEqual((catalog.source_report(self.settings), catalog.class_detail(self.settings, "Glasses", "NISKA_ZUTO")), before)
+
+    def test_import_only_reads_rule_sources(self):
+        paths = [p for p in self.tmp.rglob("*") if p.is_file()]
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths}
+        catalog.import_catalog(self.settings)
+        self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in paths}, before)
+
+    def test_second_version_database_is_upgraded(self):
+        db = self.tmp / "db" / "catalog.db"
+        db.parent.mkdir()
+        conn = sqlite3.connect(str(db))
+        conn.executescript(store._SCHEMA + store._SCHEMA_V2 + "PRAGMA user_version = 2;")
+        conn.close()
+        catalog.import_catalog(self.settings)
+        self.assertEqual(catalog.class_detail(self.settings, "Glasses", "NISKA_ZUTO")["trained_name"], "NISKA_BELO_ZUTO")
+
+
 if __name__ == "__main__":
     unittest.main()

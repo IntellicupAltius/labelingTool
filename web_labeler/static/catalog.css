@@ -30,3 +30,20 @@
 .catalogTag.warn { color: #fbbf24; border-color: #78591a; }
 .catalogGroup { margin-bottom: 12px; }
 .catalogGroup > summary { padding: 8px 0; font-size: 14px; font-weight: 700; cursor: pointer; }
+.catalogClassName small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+.catalogClassName small.warn { color: #fbbf24; }
+.catalogFacts { display: flex; flex-wrap: wrap; margin-bottom: 12px; }
+.catalogRules { display: grid; gap: 10px; margin-bottom: 16px; }
+.catalogRule h3, .catalogVarHead { margin: 0 0 5px; color: var(--accent); font-size: 12px; }
+.catalogVarHead { margin-top: 16px; }
+.catalogRule p { margin: 0 0 6px; max-width: 900px; line-height: 1.45; }
+.catalogSource { display: block; color: var(--muted); font-size: 11px; }
+.catalogNoDesc { padding: 10px 12px; color: #fbbf24; background: var(--surface); border: 1px solid #78591a; border-radius: 6px; }
+.catalogFinding { max-width: 980px; margin: 0 0 8px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--border2); border-radius: 6px; }
+.catalogFinding.high { border-left-color: var(--danger); }
+.catalogFinding.medium { border-left-color: #fbbf24; }
+.catalogFindingTitle { font-weight: 700; margin-bottom: 3px; }
+.catalogFindingModel { color: var(--muted); font-size: 11px; text-transform: capitalize; }
+.catalogFinding p { margin: 0 0 5px; line-height: 1.45; }
+.catalogFinding ul { margin: 0; padding-left: 17px; color: var(--muted); line-height: 1.5; }
+.catalogFinding strong { color: var(--text); font-weight: 600; }

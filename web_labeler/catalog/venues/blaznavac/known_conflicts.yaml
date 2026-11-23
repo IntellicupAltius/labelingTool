@@ -1,0 +1,26 @@
+# Contradictions the owner already knows about. The import re-checks each quoted phrase, so a
+# conflict that was fixed in its source shows up as "proveriti" instead of staying silently.
+conflicts:
+  - model: bottles
+    class: VINO_KIBLA
+    title: "Da li se flaša u kibli označava?"
+    text: "Odluka od 12.10. uvodi klasu VINO_KIBLA (cela kibla sa flašom), a pravila i kartica 3.3 i dalje kažu da se flaše u kibli nikad ne označavaju. Labeleri zato mogu da dobiju suprotno uputstvo. Vlasnik još proverava sa labelerima."
+    sources:
+      - label: "Odluka vlasnika, 12.10.2026"
+        says: "Sve vino osim crvenog ide u kibli, klasa je cela kibla sa flašom."
+      - label: "Beleška vlasnika, 22.11.2026"
+        says: "VINO_KIBLA je cela kibla sa flašom i tako ostaje za sada."
+        file: "~/intellicup_storage/model_history/notes.jsonl"
+        phrase: "VINO_KIBLA je označena kao cela kibla sa flašom"
+      - label: "Kartica Bottles"
+        says: "Flaše u kibli se nikad ne označavaju."
+        file: "~/Projects/docs/labeling/kartice_bottles_v1.md"
+        phrase: "Flaše u kibli (ledu) se NIKAD ne označavaju"
+      - label: "Word pravila, deo 3.3 (izvoz 12.10.2026)"
+        says: "Flaše u kibli se nikad ne označavaju."
+        file: "~/Projects/docs/labeling/sources/2026-10-12/text/Labeling_pravila_v1_svi_modeli.txt"
+        phrase: "Flaše u kibli (ledu) se NIKAD ne označavaju"
+      - label: "Pravila označavanja v1"
+        says: "Flaše u kibli spadaju u ono što se nikad ne označava."
+        file: "~/Projects/docs/labeling/labeling_pravila_v1.md"
+        phrase: "flaše u KIBLI (ledu)"

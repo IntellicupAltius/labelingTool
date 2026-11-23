@@ -10,6 +10,7 @@
   const body = document.getElementById("catalogBody");
   const viewClasses = document.getElementById("catalogViewClasses");
   const viewUnclassified = document.getElementById("catalogViewUnclassified");
+  const viewReport = document.getElementById("catalogViewReport");
   let requestNo = 0;
   let view = "classes";
   let selectedClass = null;
@@ -79,6 +80,62 @@
     return table;
   }
 
+  function renderRuleSections(detail) {
+    const box = el("div", "catalogRules");
+    if (!detail.has_description) {
+      box.append(el("div", "catalogNoDesc", "Ova klasa još nema opis kako se prepoznaje."));
+      return box;
+    }
+    for (const section of detail.rules) {
+      const part = el("div", "catalogRule");
+      part.append(el("h3", "", section.label));
+      for (const item of section.items) {
+        const row = el("p", "", item.text);
+        const origin = item.from_class ? `${item.source}, klasa ${item.from_class}` : item.source;
+        row.append(el("span", "catalogSource", origin));
+        part.append(row);
+      }
+      box.append(part);
+    }
+    return box;
+  }
+
+  function findingCard(f) {
+    const card = el("div", `catalogFinding ${f.severity}`);
+    card.append(el("div", "catalogFindingTitle", f.title), el("p", "", f.text));
+    const list = el("ul");
+    for (const source of f.sources) {
+      const item = el("li");
+      item.append(el("strong", "", `${source.label}: `), document.createTextNode(source.says));
+      list.append(item);
+    }
+    card.append(list);
+    return card;
+  }
+
+  function renderDetail(data, target) {
+    const title = el("h2", "catalogTitle", data.class);
+    const facts = el("div", "catalogFacts");
+    facts.append(el("span", data.training_state === "trained" ? "catalogTag" : "catalogTag warn", data.training_label));
+    if (data.trained_name && data.trained_name !== data.class) {
+      facts.append(el("span", "catalogTag", `U modelu: ${data.trained_name}`));
+    }
+    if (data.united) facts.append(el("span", "catalogTag", `Labeleri crtaju posebno: ${data.drawn_as.join(", ")}`));
+    const parts = [title, facts, renderRuleSections(data)];
+    if (roleSelect.value === "admin" && data.findings.length) {
+      const box = el("div", "catalogRule");
+      box.append(el("h3", "", "Neslaganja izvora"));
+      data.findings.forEach((f) => box.append(findingCard(f)));
+      parts.push(box);
+    }
+    const heading = el("h3", "catalogVarHead", `POS varijacije (${data.variations.length})`);
+    parts.push(heading);
+    if (data.united) parts.push(el("div", "catalogSubhead", "Spisak važi za celu spojenu klasu, pa ne znači da je svaki artikal baš ova varijanta."));
+    parts.push(data.variations.length ? variationsTable(data.variations, false)
+      : el("div", "catalogHint", "Nijedan POS artikal nije vezan za ovu klasu."));
+    target.replaceChildren(...parts);
+  }
+
   async function showVariations(model, className, detail, button) {
     const no = ++requestNo;
     body.querySelectorAll(".catalogList .selected").forEach((b) => b.classList.remove("selected"));
@@ -86,14 +143,9 @@
     selectedClass = className;
     detail.replaceChildren(el("div", "catalogHint", "Učitavam…"));
     try {
-      const url = `/api/catalog/models/${encodeURIComponent(model)}/classes/${encodeURIComponent(className)}/variations`;
+      const url = `/api/catalog/models/${encodeURIComponent(model)}/classes/${encodeURIComponent(className)}/details`;
       const data = await getJson(url);
-      if (no !== requestNo) return;
-      const title = el("h2", "catalogTitle", `${className} `);
-      title.append(el("span", "catalogCount", `${data.variations.length} POS varijacija`));
-      detail.replaceChildren(title, data.variations.length
-        ? variationsTable(data.variations, false)
-        : el("div", "catalogHint", "Nijedan POS artikal nije vezan za ovu klasu."));
+      if (no === requestNo) renderDetail(data, detail);
     } catch (e) {
       if (no === requestNo) detail.replaceChildren(el("div", "catalogHint", e.message));
     }
@@ -102,7 +154,13 @@
   function classButton(model, c, detail) {
     const button = el("button", "catalogClass");
     if (c.id !== undefined) button.append(el("span", "catalogClassId", c.id));
-    button.append(el("span", "catalogClassName", c.name), el("span", "catalogVarCount", c.variation_count));
+    const label = el("span", "catalogClassName", c.name);
+    if (c.training_state === "excluded" || c.training_state === "not_in_model") {
+      label.append(el("small", "warn", c.training_label));
+    } else if (c.trained_name && c.trained_name !== c.name) {
+      label.append(el("small", "", `u modelu ${c.trained_name}`));
+    }
+    button.append(label, el("span", "catalogVarCount", c.variation_count));
     button.onclick = () => showVariations(model, c.name, detail, button);
     return button;
   }
@@ -135,6 +193,27 @@
     else detail.append(el("div", "catalogHint", "Izaberi klasu da vidiš njene POS varijacije."));
   }
 
+  function renderReport(data) {
+    const title = el("h2", "catalogTitle", "Razlike izvora ");
+    title.append(el("span", "catalogCount",
+      `${data.counts.high} važno, ${data.counts.medium} za proveru, ${data.counts.info} informacija`));
+    const nodes = [title];
+    for (const [severity, label] of [["high", "Važno"], ["medium", "Za proveru"], ["info", "Informacije"]]) {
+      const items = data.findings.filter((f) => f.severity === severity);
+      if (!items.length) continue;
+      const section = el("details", "catalogGroup");
+      section.open = severity === "high";
+      section.append(el("summary", "", `${label} (${items.length})`));
+      for (const f of items) {
+        const card = findingCard(f);
+        if (f.model) card.prepend(el("div", "catalogFindingModel", f.model));
+        section.append(card);
+      }
+      nodes.push(section);
+    }
+    body.replaceChildren(...nodes);
+  }
+
   function renderUnclassified(data) {
     const nodes = [];
     for (const group of data.groups) {
@@ -155,6 +234,11 @@
         if (no === requestNo) renderUnclassified(data);
         return;
       }
+      if (view === "report") {
+        const data = await getJson("/api/catalog/source-report");
+        if (no === requestNo) renderReport(data);
+        return;
+      }
       const model = modelSelect.value;
       if (!model) return;
       const data = await getJson(`/api/catalog/models/${encodeURIComponent(model)}/classes`);
@@ -168,6 +252,7 @@
     view = next;
     viewClasses.classList.toggle("primary", view === "classes");
     viewUnclassified.classList.toggle("primary", view === "unclassified");
+    viewReport.classList.toggle("primary", view === "report");
     modelSelect.closest("label").classList.toggle("hidden", view !== "classes");
     loadClasses();
   }
@@ -201,9 +286,18 @@
   fetch("/api/catalog/status").then((r) => { tab.hidden = !r.ok; }).catch(() => {});
 
   roleSelect.value = readRole();
+  function applyRole() {
+    const admin = roleSelect.value === "admin";
+    viewReport.classList.toggle("hidden", !admin);
+    if (!admin && view === "report") setView("classes");
+    else if (!panel.classList.contains("hidden")) loadClasses();
+  }
   roleSelect.onchange = () => {
     try { localStorage.setItem(ROLE_KEY, roleSelect.value); } catch (_) { /* private mode */ }
+    applyRole();
   };
+  viewReport.classList.toggle("hidden", roleSelect.value !== "admin");
+  viewReport.onclick = () => setView("report");
   modelSelect.onchange = () => { selectedClass = null; loadClasses(); };
   viewClasses.onclick = () => setView("classes");
   viewUnclassified.onclick = () => setView("unclassified");
