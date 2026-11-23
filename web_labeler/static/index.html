@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Labeling Tool</title>
   <link rel="stylesheet" href="/static/styles.css"/>
+  <link rel="stylesheet" href="/static/catalog.css"/>
 </head>
 <body>
   <div class="app">
@@ -17,6 +18,7 @@
         <button id="tabDataset"  class="tabBtn">Dataset Fixer</button>
         <button id="tabBg"       class="tabBtn">Background Labeler</button>
         <button id="tabAnalyzer" class="tabBtn">Analyzer</button>
+        <button id="tabClasses"  class="tabBtn" hidden>Klase</button>
       </div>
       <div id="status" class="status">Starting…</div>
     </header>
@@ -407,6 +409,17 @@
     </div>
   </div>
 
+  <section id="catalogPanel" class="catalogPanel hidden">
+    <div class="catalogBar">
+      <label class="field"><div class="label">Model</div><select id="catalogModelSelect"></select></label>
+      <label class="field catalogRole"><div class="label">Radim kao</div>
+        <select id="catalogRoleSelect"><option value="labeler">Labeler</option><option value="admin">Admin</option></select>
+      </label>
+    </div>
+    <div id="catalogBody" class="catalogBody"></div>
+  </section>
+
   <script src="/static/app.js"></script>
+  <script src="/static/catalog.js"></script>
 </body>
 </html>

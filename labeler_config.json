@@ -9,5 +9,8 @@
   "article_map_path": "~/Projects/IntelliCup/utils/blaznavac_article_map.yaml",
   "raw_base_path": "/opt/intellicup/datasets/raw/blaznavac",
   "analyzer_models_python": "/opt/interpreters/INTELLICUP_TRACKING_V2/bin/python",
-  "metrics_python": "/opt/interpreters/INTELLICUP_TRACKING_V2/bin/python"
+  "metrics_python": "/opt/interpreters/INTELLICUP_TRACKING_V2/bin/python",
+  "catalog_venue_id": "blaznavac",
+  "catalog_venue_name": "Blaznavac",
+  "catalog_db_path": "~/LabelingToolData/catalog/catalog.db"
 }

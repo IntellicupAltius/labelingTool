@@ -66,6 +66,8 @@ from web_labeler import relabel_batch as _relabel_batch
 from web_labeler import flag_store as _flags
 from web_labeler import image_metrics as _metrics
 from web_labeler import camera_roi as _camroi
+from web_labeler.catalog import CatalogSettings
+from web_labeler.catalog.router import build_catalog_router
 from web_labeler.flag_store import FlagConflict, FlagError, FlagStore, FlagUnavailable, FlagValidationError, normalize_pool, validate_image_key
 
 
@@ -319,7 +321,8 @@ def create_app() -> FastAPI:
             # (INFRA-1, 2026-11-13: analyzer_models_python / metrics_python were read but never passed).
             for k in ("data_root", "models_dir", "videos_dir", "output_dir", "datasets_dir", "existing_datasets_dir",
                       "raw_base_path", "raw_review_dir", "relabel_batches_dir", "article_map_path",
-                      "analyzer_models_root", "analyzer_raw_root", "analyzer_models_python", "metrics_python"):
+                      "analyzer_models_root", "analyzer_raw_root", "analyzer_models_python", "metrics_python",
+                      "catalog_db_path", "catalog_venue_id", "catalog_venue_name"):
                 if isinstance(cfg.get(k), str) and cfg.get(k).strip():
                     merged[k] = cfg[k].strip()
             if isinstance(cfg.get("bar_counter_options"), list) and cfg.get("bar_counter_options"):
@@ -496,6 +499,7 @@ def create_app() -> FastAPI:
         return resp
 
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    app.include_router(build_catalog_router(CatalogSettings.from_config(cfg, models_dir, raw_base_path)))
 
     @app.get("/")
     def root():
