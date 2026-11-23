@@ -9,12 +9,17 @@ from web_labeler.catalog.store import (
     CatalogUnavailable,
     UnknownModel,
     catalog_status,
+    import_catalog,
     import_class_lists,
     list_classes,
+    list_model_view,
     list_models,
+    list_unclassified,
+    list_variations,
 )
 
 __all__ = [
     "CatalogError", "CatalogSettings", "CatalogUnavailable", "UnknownModel",
-    "catalog_status", "import_class_lists", "list_classes", "list_models",
+    "catalog_status", "import_catalog", "import_class_lists", "list_classes", "list_model_view",
+    "list_models", "list_unclassified", "list_variations",
 ]

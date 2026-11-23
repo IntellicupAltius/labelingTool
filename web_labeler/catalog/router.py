@@ -26,9 +26,26 @@ def build_catalog_router(settings: CatalogSettings) -> APIRouter:
     @router.get("/models/{model}/classes")
     def catalog_classes(model: str) -> Dict[str, Any]:
         try:
-            return {"model": model, "classes": store.list_classes(settings, model)}
+            return store.list_model_view(settings, model)
         except UnknownModel:
             raise HTTPException(status_code=404, detail="Taj model ne postoji u Katalogu.")
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/models/{model}/classes/{class_name}/variations")
+    def catalog_variations(model: str, class_name: str) -> Dict[str, Any]:
+        try:
+            return {"model": model, "class": class_name,
+                    "variations": store.list_variations(settings, model, class_name)}
+        except UnknownModel:
+            raise HTTPException(status_code=404, detail="Ta klasa ne postoji u Katalogu.")
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/unclassified")
+    def catalog_unclassified() -> Dict[str, Any]:
+        try:
+            return store.list_unclassified(settings)
         except CatalogUnavailable as e:
             raise HTTPException(status_code=503, detail=str(e))
 

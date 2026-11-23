@@ -12,5 +12,18 @@
   "metrics_python": "/opt/interpreters/INTELLICUP_TRACKING_V2/bin/python",
   "catalog_venue_id": "blaznavac",
   "catalog_venue_name": "Blaznavac",
-  "catalog_db_path": "~/LabelingToolData/catalog/catalog.db"
+  "catalog_db_path": "~/LabelingToolData/catalog/catalog.db",
+  "catalog_pos_dir": "/srv/intellicup/drops/pos_reports",
+  "catalog_pos_adapter": "blaznavac_csv",
+  "catalog_blacklist_path": "~/Projects/intellicup_deep_sort/mapping/blacklist_items.txt",
+  "catalog_active_days": 30,
+  "catalog_import_baseline": {
+    "latest_sale": "2026-11-21",
+    "counts": {
+      "tracked": 325,
+      "ignored": 114,
+      "pending": 14,
+      "dormant": 26
+    }
+  }
 }

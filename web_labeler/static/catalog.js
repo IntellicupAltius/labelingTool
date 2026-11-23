@@ -8,7 +8,11 @@
   const modelSelect = document.getElementById("catalogModelSelect");
   const roleSelect = document.getElementById("catalogRoleSelect");
   const body = document.getElementById("catalogBody");
+  const viewClasses = document.getElementById("catalogViewClasses");
+  const viewUnclassified = document.getElementById("catalogViewUnclassified");
   let requestNo = 0;
+  let view = "classes";
+  let selectedClass = null;
 
   function readRole() {
     try { return localStorage.getItem(ROLE_KEY) === "admin" ? "admin" : "labeler"; }
@@ -31,41 +35,141 @@
     return data;
   }
 
-  function renderClasses(model, classes) {
-    const title = document.createElement("h2");
-    title.className = "catalogTitle";
-    title.textContent = model + " ";
-    const count = document.createElement("span");
-    count.className = "catalogCount";
-    count.textContent = `${classes.length} klasa`;
-    title.append(count);
-    const grid = document.createElement("div");
-    grid.className = "catalogGrid";
-    for (const c of classes) {
-      const row = document.createElement("div");
-      row.className = "catalogClass";
-      const id = document.createElement("span");
-      id.className = "catalogClassId";
-      id.textContent = c.id;
-      const name = document.createElement("span");
-      name.className = "catalogClassName";
-      name.textContent = c.name;
-      row.append(id, name);
-      grid.append(row);
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+
+  function formatDate(value) {
+    if (!value) return "nema";
+    const [y, m, d] = value.slice(0, 10).split("-");
+    return `${d}.${m}.${y}.`;
+  }
+
+  function formatQty(value) {
+    return Number(value || 0).toLocaleString("sr-RS", { maximumFractionDigits: 2 });
+  }
+
+  function variationsTable(items, withState) {
+    const table = el("table", "catalogTable");
+    const head = el("tr");
+    for (const title of ["Artikal", "Šifra", "Prodato", "Poslednja prodaja", withState ? "Stanje" : "Oznake"]) {
+      const th = el("th", title === "Prodato" ? "num" : "", title);
+      head.append(th);
     }
-    body.replaceChildren(title, grid);
+    const thead = el("thead");
+    thead.append(head);
+    const tbody = el("tbody");
+    for (const v of items) {
+      const row = el("tr");
+      const tags = el("td");
+      if (withState) tags.append(el("span", "catalogTag", v.state_label));
+      for (const tag of v.tags) {
+        const chip = el("span", tag === "privremeno" ? "catalogTag warn" : "catalogTag", tag);
+        if (tag === "privremeno" && v.provisional_reason) chip.title = v.provisional_reason;
+        tags.append(chip);
+      }
+      row.append(el("td", "", v.name), el("td", "", v.code || "nema"),
+        el("td", "num", v.code ? formatQty(v.sold) : "nema"), el("td", "", formatDate(v.last_sale)), tags);
+      tbody.append(row);
+    }
+    table.append(thead, tbody);
+    return table;
+  }
+
+  async function showVariations(model, className, detail, button) {
+    const no = ++requestNo;
+    body.querySelectorAll(".catalogList .selected").forEach((b) => b.classList.remove("selected"));
+    button.classList.add("selected");
+    selectedClass = className;
+    detail.replaceChildren(el("div", "catalogHint", "Učitavam…"));
+    try {
+      const url = `/api/catalog/models/${encodeURIComponent(model)}/classes/${encodeURIComponent(className)}/variations`;
+      const data = await getJson(url);
+      if (no !== requestNo) return;
+      const title = el("h2", "catalogTitle", `${className} `);
+      title.append(el("span", "catalogCount", `${data.variations.length} POS varijacija`));
+      detail.replaceChildren(title, data.variations.length
+        ? variationsTable(data.variations, false)
+        : el("div", "catalogHint", "Nijedan POS artikal nije vezan za ovu klasu."));
+    } catch (e) {
+      if (no === requestNo) detail.replaceChildren(el("div", "catalogHint", e.message));
+    }
+  }
+
+  function classButton(model, c, detail) {
+    const button = el("button", "catalogClass");
+    if (c.id !== undefined) button.append(el("span", "catalogClassId", c.id));
+    button.append(el("span", "catalogClassName", c.name), el("span", "catalogVarCount", c.variation_count));
+    button.onclick = () => showVariations(model, c.name, detail, button);
+    return button;
+  }
+
+  function renderClasses(model, data) {
+    const list = el("div", "catalogList");
+    const detail = el("div", "catalogDetail");
+    const title = el("h2", "catalogTitle", `${model} `);
+    title.append(el("span", "catalogCount", `${data.classes.length} klasa`));
+    list.append(title);
+    const buttons = new Map();
+    for (const c of data.classes) {
+      const button = classButton(model, c, detail);
+      buttons.set(c.name, button);
+      list.append(button);
+    }
+    if (data.map_only_classes.length) {
+      list.append(el("div", "catalogSubhead", "Klase iz POS mape koje još nisu povezane sa listom"));
+      for (const c of data.map_only_classes) {
+        const button = classButton(model, c, detail);
+        buttons.set(c.name, button);
+        list.append(button);
+      }
+    }
+    const split = el("div", "catalogSplit");
+    split.append(list, detail);
+    body.replaceChildren(split);
+    const again = buttons.get(selectedClass);
+    if (again) showVariations(model, selectedClass, detail, again);
+    else detail.append(el("div", "catalogHint", "Izaberi klasu da vidiš njene POS varijacije."));
+  }
+
+  function renderUnclassified(data) {
+    const nodes = [];
+    for (const group of data.groups) {
+      const section = el("details", "catalogGroup");
+      section.open = group.state === "pending";
+      section.append(el("summary", "", `${group.label} (${group.items.length})`));
+      section.append(group.items.length ? variationsTable(group.items, true) : el("div", "catalogHint", "Nema artikala."));
+      nodes.push(section);
+    }
+    body.replaceChildren(...nodes);
   }
 
   async function loadClasses() {
-    const model = modelSelect.value;
-    if (!model) return;
     const no = ++requestNo;
     try {
+      if (view === "unclassified") {
+        const data = await getJson("/api/catalog/unclassified");
+        if (no === requestNo) renderUnclassified(data);
+        return;
+      }
+      const model = modelSelect.value;
+      if (!model) return;
       const data = await getJson(`/api/catalog/models/${encodeURIComponent(model)}/classes`);
-      if (no === requestNo) renderClasses(model, data.classes);
+      if (no === requestNo) renderClasses(model, data);
     } catch (e) {
       if (no === requestNo) showMessage(e.message);
     }
+  }
+
+  function setView(next) {
+    view = next;
+    viewClasses.classList.toggle("primary", view === "classes");
+    viewUnclassified.classList.toggle("primary", view === "unclassified");
+    modelSelect.closest("label").classList.toggle("hidden", view !== "classes");
+    loadClasses();
   }
 
   async function refresh() {
@@ -100,7 +204,9 @@
   roleSelect.onchange = () => {
     try { localStorage.setItem(ROLE_KEY, roleSelect.value); } catch (_) { /* private mode */ }
   };
-  modelSelect.onchange = loadClasses;
+  modelSelect.onchange = () => { selectedClass = null; loadClasses(); };
+  viewClasses.onclick = () => setView("classes");
+  viewUnclassified.onclick = () => setView("unclassified");
   tab.onclick = () => { setOpen(true); refresh(); };
   tabs.addEventListener("click", (e) => {
     const button = e.target.closest(".tabBtn");

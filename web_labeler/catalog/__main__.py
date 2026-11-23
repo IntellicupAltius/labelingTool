@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from web_labeler.catalog.store import CatalogError, CatalogSettings, import_class_lists
+from web_labeler.catalog.store import CatalogError, CatalogSettings, import_catalog
 
 
 def main() -> int:
@@ -17,7 +17,7 @@ def main() -> int:
     default_cfg = Path(__file__).resolve().parents[2] / "labeler_config.json"
     config_path = Path(os.getenv("LABELER_CONFIG_PATH") or default_cfg)
     try:
-        report = import_class_lists(CatalogSettings.from_config_file(config_path))
+        report = import_catalog(CatalogSettings.from_config_file(config_path))
     except (CatalogError, OSError, ValueError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

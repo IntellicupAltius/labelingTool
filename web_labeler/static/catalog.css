@@ -12,3 +12,21 @@
 .catalogClassId { flex: 0 0 34px; text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 700; }
 .catalogClassName { overflow-wrap: anywhere; }
 .tabs.catalogOpen .tabBtn.tabActive:not(#tabClasses) { background: transparent; color: var(--muted); border-color: transparent; box-shadow: none; }
+.catalogViews { display: flex; gap: 6px; }
+.catalogSplit { display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); gap: 16px; height: 100%; min-height: 0; }
+.catalogList, .catalogDetail { min-height: 0; overflow-y: auto; }
+.catalogList { display: flex; flex-direction: column; gap: 4px; padding-right: 6px; }
+.catalogList .catalogClass { width: 100%; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.catalogList .catalogClass:hover { border-color: var(--border2); background: var(--panel); }
+.catalogList .catalogClass.selected { border-color: var(--accent); background: var(--panel); }
+.catalogVarCount { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.catalogSubhead { margin: 14px 0 4px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.catalogHint { color: var(--muted); padding: 40px 0; text-align: center; }
+.catalogTable { width: 100%; border-collapse: collapse; }
+.catalogTable th { position: sticky; top: 0; padding: 7px 8px; text-align: left; color: var(--muted); font-size: 11px; font-weight: 600; background: var(--bg); border-bottom: 1px solid var(--border2); }
+.catalogTable td { padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.catalogTable .num { text-align: right; font-variant-numeric: tabular-nums; }
+.catalogTag { display: inline-block; margin: 0 4px 3px 0; padding: 1px 6px; border: 1px solid var(--border2); border-radius: 4px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.catalogTag.warn { color: #fbbf24; border-color: #78591a; }
+.catalogGroup { margin-bottom: 12px; }
+.catalogGroup > summary { padding: 8px 0; font-size: 14px; font-weight: 700; cursor: pointer; }

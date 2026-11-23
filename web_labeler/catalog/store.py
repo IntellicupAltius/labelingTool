@@ -8,12 +8,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+from web_labeler.catalog import assortment as _assortment
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 1
-_TABLES = {"venues", "models", "classes", "import_runs"}
+SCHEMA_VERSION = 2
+_TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
+           "map_keys", "class_links"}
 
 _SCHEMA = """
 CREATE TABLE venues (
@@ -49,6 +51,59 @@ CREATE TRIGGER classes_keep_identity BEFORE UPDATE OF venue_id, model_key, class
 BEGIN SELECT RAISE(ABORT, 'catalog class numbers never change'); END;
 """
 
+_SCHEMA_V2 = """
+CREATE TABLE articles (
+    article_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id     TEXT NOT NULL REFERENCES venues(venue_id),
+    display_name TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+CREATE TABLE pos_identities (
+    identity_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id     TEXT NOT NULL REFERENCES venues(venue_id),
+    article_id   INTEGER NOT NULL REFERENCES articles(article_id),
+    code         TEXT,
+    name         TEXT NOT NULL,
+    norm_name    TEXT NOT NULL,
+    state        TEXT NOT NULL CHECK (state IN ('tracked', 'ignored', 'pending', 'dormant')),
+    not_verified INTEGER NOT NULL DEFAULT 0 CHECK (not_verified IN (0, 1)),
+    first_seen   TEXT,
+    last_seen    TEXT,
+    last_sale    TEXT,
+    sold_qty     REAL NOT NULL DEFAULT 0,
+    sale_rows    INTEGER NOT NULL DEFAULT 0,
+    last_price   REAL
+);
+CREATE UNIQUE INDEX pos_identity_pair ON pos_identities (venue_id, IFNULL(code, ''), name);
+CREATE INDEX pos_identity_norm ON pos_identities (venue_id, norm_name);
+CREATE TABLE map_entries (
+    entry_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id     TEXT NOT NULL REFERENCES venues(venue_id),
+    pos_name     TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    mapping_mode TEXT,
+    provisional  TEXT,
+    price        REAL,
+    notes        TEXT
+);
+CREATE TABLE map_keys (
+    venue_id  TEXT NOT NULL,
+    norm_name TEXT NOT NULL,
+    entry_id  INTEGER NOT NULL REFERENCES map_entries(entry_id),
+    PRIMARY KEY (venue_id, norm_name)
+);
+CREATE TABLE class_links (
+    entry_id   INTEGER NOT NULL REFERENCES map_entries(entry_id),
+    position   INTEGER NOT NULL,
+    model_key  TEXT NOT NULL,
+    class_name TEXT NOT NULL,
+    priority   INTEGER,
+    note       TEXT,
+    PRIMARY KEY (entry_id, position)
+);
+CREATE INDEX class_links_class ON class_links (model_key, class_name);
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -74,6 +129,12 @@ class CatalogSettings:
     venue_name: Optional[str]
     source_models_dir: Path
     forbidden_roots: Tuple[Path, ...] = ()
+    pos_dir: Optional[Path] = None
+    pos_adapter: Optional[str] = None
+    article_map_path: Optional[Path] = None
+    blacklist_path: Optional[Path] = None
+    active_days: int = 30
+    import_baseline: Optional[Mapping[str, Any]] = None
 
     @classmethod
     def from_config(cls, cfg: Mapping[str, Any], models_dir: Path,
@@ -91,7 +152,16 @@ class CatalogSettings:
         roots = [Path(models_dir).resolve()]
         if raw_base_path is not None:
             roots.append(Path(raw_base_path).resolve())
-        return cls(db_path, venue_id, venue_name, Path(models_dir).resolve(), tuple(roots))
+
+        def optional_path(key: str) -> Optional[Path]:
+            value = str(cfg.get(key) or "").strip()
+            return Path(value).expanduser().resolve() if value else None
+
+        baseline = cfg.get("catalog_import_baseline")
+        return cls(db_path, venue_id, venue_name, Path(models_dir).resolve(), tuple(roots),
+                   optional_path("catalog_pos_dir"), str(cfg.get("catalog_pos_adapter") or "").strip() or None,
+                   optional_path("article_map_path"), optional_path("catalog_blacklist_path"),
+                   int(cfg.get("catalog_active_days") or 30), baseline if isinstance(baseline, dict) else None)
 
     @classmethod
     def from_config_file(cls, config_path: Path) -> "CatalogSettings":
@@ -153,7 +223,9 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        elif version == 1:
+            conn.executescript(f"BEGIN;{_SCHEMA_V2}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version != SCHEMA_VERSION:
             raise CatalogError(f"Unsupported Catalog database version: {version}")
     except sqlite3.Error as e:
@@ -165,7 +237,135 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
     return conn
 
 
+def _build_assortment_plan(settings: CatalogSettings) -> _assortment.AssortmentPlan:
+    missing = [label for label, value in (("catalog_pos_dir", settings.pos_dir),
+                                          ("catalog_pos_adapter", settings.pos_adapter),
+                                          ("article_map_path", settings.article_map_path),
+                                          ("catalog_blacklist_path", settings.blacklist_path)) if not value]
+    if missing:
+        raise CatalogError("Catalog import is not configured: " + ", ".join(missing))
+    try:
+        return _assortment.build_plan(settings.pos_dir, settings.pos_adapter, settings.article_map_path,
+                                      settings.blacklist_path, settings.active_days,
+                                      dict(settings.import_baseline) if settings.import_baseline else None)
+    except _assortment.AssortmentError as e:
+        raise CatalogError(str(e))
+
+
+def _apply_assortment(conn: sqlite3.Connection, venue: str, plan: _assortment.AssortmentPlan, at: str) -> None:
+    """Refresh the map snapshot and POS identities. Article numbers stay the same across imports."""
+    norm = _assortment.normalize_name
+    old_entries = [r[0] for r in conn.execute("SELECT entry_id FROM map_entries WHERE venue_id = ?", (venue,))]
+    conn.executemany("DELETE FROM class_links WHERE entry_id = ?", [(i,) for i in old_entries])
+    conn.execute("DELETE FROM map_keys WHERE venue_id = ?", (venue,))
+    conn.execute("DELETE FROM map_entries WHERE venue_id = ?", (venue,))
+    entry_ids: List[int] = []
+    for e in plan.entries:
+        cur = conn.execute("INSERT INTO map_entries (venue_id, pos_name, status, mapping_mode, provisional, price, notes) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (venue, e.pos_name, e.status, e.mapping_mode, e.provisional, e.price, e.notes))
+        entry_ids.append(cur.lastrowid)
+        conn.executemany("INSERT INTO class_links (entry_id, position, model_key, class_name, priority, note) "
+                         "VALUES (?, ?, ?, ?, ?, ?)",
+                         [(cur.lastrowid, i, l["model"], l["class"], l["priority"], l["note"]) for i, l in enumerate(e.links)])
+        conn.executemany("INSERT INTO map_keys (venue_id, norm_name, entry_id) VALUES (?, ?, ?)",
+                         [(venue, k, cur.lastrowid) for k in e.keys])
+
+    known_pairs = {(c, n): a for c, n, a in conn.execute(
+        "SELECT code, name, article_id FROM pos_identities WHERE venue_id = ? AND code IS NOT NULL", (venue,))}
+    by_code: Dict[str, int] = {c: a for (c, _), a in sorted(known_pairs.items())}
+    by_name: Dict[str, int] = {norm(n): a for (_, n), a in sorted(known_pairs.items())}
+    for n, a in conn.execute("SELECT norm_name, article_id FROM pos_identities WHERE venue_id = ? AND code IS NULL", (venue,)):
+        by_name.setdefault(n, a)
+    needs_review: List[Dict[str, Any]] = []
+    pair_article: Dict[Tuple[str, str], int] = {}
+    for group in plan.groups:
+        existing = sorted({a for c, n in group for a in (by_code.get(c), by_name.get(norm(n))) if a is not None})
+        if existing:
+            article = existing[0]
+        else:
+            newest = max(group, key=lambda p: (plan.stats[p].last_seen, p))
+            article = conn.execute("INSERT INTO articles (venue_id, display_name, created_at) VALUES (?, ?, ?)",
+                                   (venue, newest[1].strip(), at)).lastrowid
+        if len(existing) > 1:
+            needs_review.append({"pairs": [{"code": c, "name": n} for c, n in group], "articles": existing})
+        for pair in group:
+            target = known_pairs.get(pair) or by_code.get(pair[0]) or by_name.get(norm(pair[1])) or article
+            pair_article[pair] = target
+            by_code.setdefault(pair[0], target)
+            by_name.setdefault(norm(pair[1]), target)
+
+    for pair, target in sorted(pair_article.items()):
+        code, name = pair
+        item = plan.stats[pair]
+        state = plan.states[pair]
+        last_sale = item.last_sale.isoformat(sep=" ") if item.last_sale else None
+        values = (state, int(state == _assortment.TRACKED), item.first_seen.isoformat(sep=" "),
+                  item.last_seen.isoformat(sep=" "), last_sale, item.sold, item.sale_rows, item.last_price)
+        if pair in known_pairs:
+            conn.execute("UPDATE pos_identities SET state = ?, not_verified = ?, first_seen = ?, last_seen = ?, last_sale = ?, "
+                         "sold_qty = ?, sale_rows = ?, last_price = ? WHERE venue_id = ? AND code = ? AND name = ?",
+                         values + (venue, code, name))
+            continue
+        placeholder = conn.execute("SELECT identity_id, article_id FROM pos_identities "
+                                   "WHERE venue_id = ? AND code IS NULL AND norm_name = ?", (venue, norm(name))).fetchone()
+        if placeholder:  # a name known only from the map has now been sold
+            conn.execute("UPDATE pos_identities SET code = ?, name = ?, state = ?, not_verified = ?, first_seen = ?, "
+                         "last_seen = ?, last_sale = ?, sold_qty = ?, sale_rows = ?, last_price = ? WHERE identity_id = ?",
+                         (code, name) + values + (placeholder[0],))
+        else:
+            conn.execute("INSERT INTO pos_identities (venue_id, article_id, code, name, norm_name, state, not_verified, "
+                         "first_seen, last_seen, last_sale, sold_qty, sale_rows, last_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         (venue, target, code, name, norm(name)) + values)
+
+    sold_names = {norm(n) for _, n in plan.stats}
+    map_only = 0
+    for index, entry in enumerate(plan.entries):
+        for key in entry.keys:
+            if key in sold_names:
+                continue
+            map_only += 1
+            state = _assortment.IGNORED if entry.status == "skip" else (
+                _assortment.TRACKED if entry.links else _assortment.DORMANT)
+            row = conn.execute("SELECT identity_id FROM pos_identities WHERE venue_id = ? AND code IS NULL AND norm_name = ?",
+                               (venue, key)).fetchone()
+            if row:
+                conn.execute("UPDATE pos_identities SET state = ?, not_verified = ? WHERE identity_id = ?",
+                             (state, int(state == _assortment.TRACKED), row[0]))
+                continue
+            siblings = {pair_article[p] for p in pair_article if norm(p[1]) in entry.keys}
+            if len(siblings) == 1:
+                article = siblings.pop()
+            else:
+                article = conn.execute("INSERT INTO articles (venue_id, display_name, created_at) VALUES (?, ?, ?)",
+                                       (venue, entry.pos_name.strip(), at)).lastrowid
+            conn.execute("INSERT INTO pos_identities (venue_id, article_id, code, name, norm_name, state, not_verified) "
+                         "VALUES (?, ?, NULL, ?, ?, ?, ?)", (venue, article, key, key, state, int(state == _assortment.TRACKED)))
+    known_keys = {k for e in plan.entries for k in e.keys}
+    for identity_id, key in conn.execute("SELECT identity_id, norm_name FROM pos_identities WHERE venue_id = ? AND code IS NULL",
+                                         (venue,)).fetchall():
+        if key not in known_keys:  # removed from the map: kept, but no longer tracked
+            conn.execute("UPDATE pos_identities SET state = ?, not_verified = 0 WHERE identity_id = ?",
+                         (_assortment.DORMANT, identity_id))
+    for article_id, in conn.execute("SELECT article_id FROM articles WHERE venue_id = ?", (venue,)).fetchall():
+        row = conn.execute("SELECT name FROM pos_identities WHERE article_id = ? ORDER BY last_seen IS NULL, last_seen DESC, name LIMIT 1",
+                           (article_id,)).fetchone()
+        if row:
+            conn.execute("UPDATE articles SET display_name = ? WHERE article_id = ?", (row[0].strip(), article_id))
+    plan.report["map_only_names"] = map_only
+    plan.report["needs_review"] = needs_review
+
+
+def import_catalog(settings: CatalogSettings) -> Dict[str, Any]:
+    """Full import: class lists, then articles and their POS history, in one all-or-nothing step."""
+    return _import(settings, _build_assortment_plan(settings))
+
+
 def import_class_lists(settings: CatalogSettings) -> Dict[str, Any]:
+    return _import(settings, None)
+
+
+def _import(settings: CatalogSettings, plan: Optional[_assortment.AssortmentPlan]) -> Dict[str, Any]:
     """Bring the tool's class lists into the Catalog, all or nothing.
 
     Safe to repeat: existing numbers never change and new classes are only appended. If a source
@@ -199,7 +399,10 @@ def import_class_lists(settings: CatalogSettings) -> Dict[str, Any]:
                 [(venue, model, i, names[i], at) for i in range(len(stored), len(names))])
         if conflicts:
             raise CatalogError("Import refused, nothing changed. " + "; ".join(conflicts))
-        if report["added"]:
+        if plan is not None:
+            _apply_assortment(conn, venue, plan, at)
+            report["assortment"] = plan.report
+        if report["added"] or plan is not None:
             conn.execute("INSERT INTO import_runs (venue_id, at, summary_json) VALUES (?, ?, ?)",
                          (venue, at, json.dumps(report, ensure_ascii=False, sort_keys=True)))
         conn.execute("COMMIT")
@@ -255,6 +458,76 @@ def list_classes(settings: CatalogSettings, model: str) -> List[Dict[str, Any]]:
             "SELECT class_id, name, active FROM classes WHERE venue_id = ? AND model_key = ? ORDER BY class_id",
             (settings.venue_id, model)).fetchall()
     return [{"id": i, "name": name, "active": bool(active)} for i, name, active in rows]
+
+
+STATE_LABELS = {"tracked": "Praćeno", "ignored": "Ignorisano", "pending": "Čeka odluku", "dormant": "Uspavano"}
+
+
+def _variation(row: Sequence[Any], classes: Optional[List[str]] = None) -> Dict[str, Any]:
+    article_id, code, name, state, sold, last_sale, not_verified, provisional, mode = row
+    tags: List[str] = []
+    if not_verified:
+        tags.append("nije provereno na snimku")
+    if provisional:
+        tags.append("privremeno")
+    if code is None:
+        tags.append("nije prodavano")
+    elif sold <= 0:
+        tags.append("sve stornirano")
+    return {"article_id": article_id, "code": code, "name": name.strip(), "state": state,
+            "state_label": STATE_LABELS[state], "sold": sold, "last_sale": last_sale, "tags": tags,
+            "provisional_reason": provisional, "mapping_mode": mode, "classes": classes or []}
+
+
+def list_model_view(settings: CatalogSettings, model: str) -> Dict[str, Any]:
+    """Classes of a model with variation counts, plus map classes not on the tool's list."""
+    classes = list_classes(settings, model)
+    with _open_for_read(settings) as conn:
+        counts = dict(conn.execute(
+            "SELECT l.class_name, COUNT(DISTINCT i.identity_id) FROM class_links l "
+            "JOIN map_entries e ON e.entry_id = l.entry_id AND e.venue_id = ? AND e.status != 'skip' "
+            "JOIN map_keys k ON k.entry_id = e.entry_id "
+            "JOIN pos_identities i ON i.venue_id = k.venue_id AND i.norm_name = k.norm_name "
+            "WHERE l.model_key = ? GROUP BY l.class_name", (settings.venue_id, model.lower())).fetchall())
+    for item in classes:
+        item["variation_count"] = counts.get(item["name"], 0)
+    listed = {c["name"] for c in classes}
+    others = [{"name": n, "variation_count": c} for n, c in sorted(counts.items()) if n not in listed]
+    return {"model": model, "classes": classes, "map_only_classes": others}
+
+
+def list_variations(settings: CatalogSettings, model: str, class_name: str) -> List[Dict[str, Any]]:
+    view = list_model_view(settings, model)
+    if class_name not in {c["name"] for c in view["classes"]} | {c["name"] for c in view["map_only_classes"]}:
+        raise UnknownModel(f"{model}.{class_name}")
+    with _open_for_read(settings) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT i.article_id, i.code, i.name, i.state, i.sold_qty, i.last_sale, i.not_verified, "
+            "e.provisional, e.mapping_mode, e.entry_id FROM class_links l "
+            "JOIN map_entries e ON e.entry_id = l.entry_id AND e.venue_id = ? AND e.status != 'skip' "
+            "JOIN map_keys k ON k.entry_id = e.entry_id "
+            "JOIN pos_identities i ON i.venue_id = k.venue_id AND i.norm_name = k.norm_name "
+            "WHERE l.model_key = ? AND l.class_name = ? ORDER BY i.sold_qty DESC, i.name, i.code",
+            (settings.venue_id, model.lower(), class_name)).fetchall()
+        result = []
+        for row in rows:
+            links = conn.execute("SELECT model_key, class_name FROM class_links WHERE entry_id = ? ORDER BY position",
+                                 (row[9],)).fetchall()
+            result.append(_variation(row[:9], [f"{m}.{c}" for m, c in links]))
+    return result
+
+
+def list_unclassified(settings: CatalogSettings) -> Dict[str, Any]:
+    """POS pairs without a class, grouped by state, best sellers first."""
+    with _open_for_read(settings) as conn:
+        rows = conn.execute(
+            "SELECT i.article_id, i.code, i.name, i.state, i.sold_qty, i.last_sale, i.not_verified, NULL, NULL "
+            "FROM pos_identities i WHERE i.venue_id = ? AND i.code IS NOT NULL AND i.state != 'tracked' "
+            "ORDER BY i.sold_qty DESC, i.name, i.code", (settings.venue_id,)).fetchall()
+    groups = {state: [] for state in ("pending", "dormant", "ignored")}
+    for row in rows:
+        groups[row[3]].append(_variation(row))
+    return {"groups": [{"state": s, "label": STATE_LABELS[s], "items": items} for s, items in groups.items()]}
 
 
 def catalog_status(settings: CatalogSettings) -> Dict[str, Any]:
