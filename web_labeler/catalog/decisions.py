@@ -9,14 +9,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-EFFECT_KINDS = ("classes", "provisional", "ignore", "merge")
+EFFECT_KINDS = ("classes", "provisional", "ignore", "merge", "class_target")
 KINDS = EFFECT_KINDS + ("revoke", "propose", "reject")
 LABELER_KINDS = {"ignore", "propose"}
 MODES = ("fallback", "any")
 IGNORE_WHY = {"assortment": "izbačeno iz asortimana"}  # X with a kind of reason; no kind = plain X
 
 KIND_LABELS = {"classes": "Promena klase", "provisional": "Zvezdica", "ignore": "Ne pratimo (X)", "merge": "Spajanje artikala",
-               "revoke": "Poništavanje", "propose": "Predlog", "reject": "Odbijen predlog"}
+               "revoke": "Poništavanje", "propose": "Predlog", "reject": "Odbijen predlog",
+               "class_target": "Klasa za novi artikal"}
 
 
 @dataclass
@@ -38,6 +39,9 @@ class Variation:
     ignore_why: Optional[str] = None
     awaiting_release: bool = False
     under_review: bool = False  # "na proveri": tracked because of a till finding nobody confirmed yet
+    # class_target (D9): the class this variation goes to once the live model knows it; mapped only from then on
+    target: Optional[Tuple[str, str]] = None
+    target_opened: bool = False
 
 
 @dataclass
@@ -91,6 +95,15 @@ def apply(variations: Dict[int, Variation], decisions: List[Decision], as_of: st
             v.provisional = d.payload.get("provisional") or None
             v.state = "tracked" if v.links else "pending"
             v.not_verified = bool(v.links)
+            v.target, v.target_opened = None, False
+            v.decided, v.last_decision = True, max(v.last_decision, d.decision_id)
+        elif d.kind == "class_target":
+            v = variations.get(d.identity_id)
+            if v is None:
+                continue
+            # no mapping until the live model knows the class (resolved by the caller, which knows the live model)
+            v.target, v.target_opened = (d.payload["model"], d.payload["class"]), bool(d.payload.get("opened"))
+            v.links, v.mode, v.state, v.not_verified = [], None, "pending", False
             v.decided, v.last_decision = True, max(v.last_decision, d.decision_id)
         elif d.kind == "provisional":
             v = variations.get(d.identity_id)
@@ -102,6 +115,7 @@ def apply(variations: Dict[int, Variation], decisions: List[Decision], as_of: st
             for v in variations.values():
                 if v.article_id == target:
                     v.state, v.links, v.decided = "ignored", [], True
+                    v.target, v.target_opened = None, False
                     v.ignore_why = d.payload.get("why") or None
                     v.last_decision = max(v.last_decision, d.decision_id)
         elif d.kind == "merge":

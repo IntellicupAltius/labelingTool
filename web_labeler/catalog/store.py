@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from web_labeler.catalog import assortment as _assortment
+from web_labeler.catalog import class_lists as _class_lists
 from web_labeler.catalog import class_rules as _rules
 from web_labeler.catalog import decisions as _decisions
 from web_labeler.catalog import examples as _examples
@@ -20,7 +21,7 @@ from web_labeler.catalog import model_cards as _model_cards
 from web_labeler.catalog import releases as _releases
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
            "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings",
            "miro_pages", "miro_suggested", "miro_reviews", "miro_links", "evidence", "evidence_events", "decisions",
@@ -415,6 +416,39 @@ CREATE TRIGGER inbox_snoozes_no_delete BEFORE DELETE ON inbox_snoozes
 BEGIN SELECT RAISE(ABORT, 'snoozes are append-only'); END;
 """
 
+# v12: decisions may also be class_target (D9). SQLite cannot change a CHECK, so the table is rebuilt with every row
+# and id kept (run with foreign keys off, see _open_for_write); the append-only triggers come back unchanged.
+_SCHEMA_V12 = """
+CREATE TABLE decisions_v12 (
+    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id    TEXT NOT NULL REFERENCES venues(venue_id),
+    kind        TEXT NOT NULL CHECK (kind IN ('classes', 'provisional', 'ignore', 'merge', 'revoke', 'propose', 'reject',
+                                              'class_target')),
+    article_id  INTEGER REFERENCES articles(article_id),
+    identity_id INTEGER REFERENCES pos_identities(identity_id),
+    target_id   INTEGER REFERENCES decisions(decision_id),
+    payload     TEXT NOT NULL,
+    reason      TEXT,
+    evidence    TEXT,
+    actor       TEXT NOT NULL,
+    role        TEXT NOT NULL CHECK (role IN ('admin', 'labeler')),
+    created_at  TEXT NOT NULL,
+    valid_from  TEXT NOT NULL
+);
+INSERT INTO decisions_v12 (decision_id, venue_id, kind, article_id, identity_id, target_id, payload, reason, evidence, actor,
+                           role, created_at, valid_from)
+    SELECT decision_id, venue_id, kind, article_id, identity_id, target_id, payload, reason, evidence, actor, role,
+           created_at, valid_from FROM decisions;
+DROP TABLE decisions;
+ALTER TABLE decisions_v12 RENAME TO decisions;
+CREATE INDEX decisions_article ON decisions (venue_id, article_id);
+CREATE INDEX decisions_identity ON decisions (venue_id, identity_id);
+CREATE TRIGGER decisions_no_update BEFORE UPDATE ON decisions
+BEGIN SELECT RAISE(ABORT, 'decisions are append-only'); END;
+CREATE TRIGGER decisions_no_delete BEFORE DELETE ON decisions
+BEGIN SELECT RAISE(ABORT, 'decisions are append-only'); END;
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -583,12 +617,19 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}{_SCHEMA_V10}{_SCHEMA_V11}"
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}{_SCHEMA_V10}{_SCHEMA_V11}{_SCHEMA_V12}"
                                f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+        elif version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
             steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8, _SCHEMA_V9,
-                     _SCHEMA_V10, _SCHEMA_V11][version - 1:]
+                     _SCHEMA_V10, _SCHEMA_V11, _SCHEMA_V12][version - 1:]
+            conn.execute("PRAGMA foreign_keys = OFF")  # the decisions rebuild (v12) drops a table others point to
+            before = conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] if version >= 6 else 0
             conn.executescript(f"BEGIN;{''.join(steps)}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+            problems = conn.execute("PRAGMA foreign_key_check").fetchall()
+            after = conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+            conn.execute("PRAGMA foreign_keys = ON")
+            if problems or after != before:
+                raise CatalogError(f"Catalog upgrade check failed (decisions {before} -> {after}, references {len(problems)})")
         elif version != SCHEMA_VERSION:
             raise CatalogError(f"Unsupported Catalog database version: {version}")
     except sqlite3.Error as e:
@@ -941,12 +982,15 @@ def mapping_text(v: _decisions.Variation) -> str:
     if v.state == "ignored":
         why = _decisions.IGNORE_WHY.get(v.ignore_why or "")
         return f"ne pratimo: {why}" if why else "ne pratimo"
+    if not v.links and v.target:
+        return f"čeka klasu {v.target[0]}.{v.target[1]} (živi model je još ne zna)"
     if not v.links:
         return "mapiranje nedostaje"
     return ", ".join(f"{m}.{c}" for m, c in v.links)
 
 
-def _variation(v: _decisions.Variation, evidence: Optional[Mapping[int, Dict[str, Any]]] = None) -> Dict[str, Any]:
+def _variation(v: _decisions.Variation, evidence: Optional[Mapping[int, Dict[str, Any]]] = None,
+               flow: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     ev = (evidence or {}).get(v.identity_id, {"confirmed": None, "pending": 0})
     tags: List[str] = []
     if v.not_verified and ev["confirmed"] is None:
@@ -963,12 +1007,14 @@ def _variation(v: _decisions.Variation, evidence: Optional[Mapping[int, Dict[str
         tags.append("na proveri")
     if v.awaiting_release:
         tags.append("ručna odluka, čeka izdanje")
+    if flow and flow["stage"] != "tracked":
+        tags.append(f"nova klasa: {flow['label']}")
     image = None if ev["confirmed"] is None else {"evidence_id": ev["confirmed"], "url": _evidence_url(ev["confirmed"]),
                                                   "source_label": EVIDENCE_SOURCE_LABEL}
     return {"identity_id": v.identity_id, "article_id": v.article_id, "code": v.code, "name": v.name.strip(),
             "state": v.state, "state_label": STATE_LABELS[v.state], "sold": v.sold, "last_sale": v.last_sale, "tags": tags,
             "provisional_reason": v.provisional, "mapping_mode": v.mode, "classes": [f"{m}.{c}" for m, c in v.links],
-            "mapping": mapping_text(v), "image": image, "pending_images": ev["pending"]}
+            "mapping": mapping_text(v), "image": image, "pending_images": ev["pending"], "flow": dict(flow) if flow else None}
 
 
 TRAINING_LABELS = {"trained": "U modelu", "excluded": "Izbačena iz treninga", "not_in_model": "Nije u živom modelu",
@@ -1018,11 +1064,32 @@ def _current(conn: sqlite3.Connection, venue: str, as_of: Optional[str] = None) 
         result[identity_id] = _decisions.Variation(identity_id, article_id, code, name, state, sold, last_sale,
                                                    bool(not_verified), provisional, mode, links)
     _decisions.apply(result, _load_decisions(conn, venue), as_of or _today())
+    _resolve_targets(conn, venue, result)
     released = conn.execute("SELECT MAX(decisions_upto) FROM releases WHERE venue_id = ?", (venue,)).fetchone()[0] or 0
     for v in result.values():
         v.awaiting_release = v.decided and v.last_decision > released
     _apply_till_findings(conn, venue, result)
     return result
+
+
+def _trained_names(conn: sqlite3.Connection, venue: str) -> Dict[Tuple[str, str], str]:
+    """(model lower, tool class name) -> the name the live model outputs, for classes the live model knows."""
+    return {(m.lower(), n): t for m, n, t in conn.execute(
+        "SELECT c.model_key, c.name, t.trained_name FROM classes c JOIN class_training t ON t.venue_id = c.venue_id "
+        "AND t.model_key = c.model_key AND t.class_id = c.class_id WHERE c.venue_id = ? AND t.state = 'trained' "
+        "AND t.trained_name IS NOT NULL", (venue,))}
+
+
+def _resolve_targets(conn: sqlite3.Connection, venue: str, current: Dict[int, _decisions.Variation]) -> None:
+    """A class chosen for a new article maps only once the live model knows it (D9). Until then: no mapping."""
+    waiting = [v for v in current.values() if v.target and v.state != "ignored"]
+    if not waiting:
+        return
+    trained = _trained_names(conn, venue)
+    for v in waiting:
+        name = trained.get(v.target)
+        if name:
+            v.links, v.state, v.not_verified, v.mode = [(v.target[0], name)], "tracked", True, "fallback"
 
 
 def _till_findings(conn: sqlite3.Connection, venue: str) -> List[Tuple[int, Dict[str, Any], str]]:
@@ -1581,6 +1648,8 @@ def _clean_change(settings: CatalogSettings, conn: sqlite3.Connection, venue: st
         if _decisions.resolve(into, merges) == _decisions.resolve(article_id, merges):
             raise CatalogError("Artikal je već deo tog artikla.")
         return {"into": into}
+    if kind == "class_target":
+        return _clean_target(conn, venue, payload)
     if kind == "ignore":
         why = payload.get("why")
         if why in (None, ""):
@@ -1589,6 +1658,49 @@ def _clean_change(settings: CatalogSettings, conn: sqlite3.Connection, venue: st
             raise CatalogError("Nepoznat razlog za X.")
         return {"why": why}
     raise CatalogError(f"Nepoznata vrsta odluke: {kind}")
+
+
+def _clean_target(conn: sqlite3.Connection, venue: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Admin picks the class for a new article: a new class appended to a model, or an existing one (D9)."""
+    models = {m.lower(): m for m, in conn.execute("SELECT model_key FROM models WHERE venue_id = ?", (venue,))}
+    model_key = models.get(str(payload.get("model") or "").strip().lower())
+    if model_key is None:
+        raise CatalogError("Izaberi model.")
+    rows = conn.execute("SELECT c.class_id, c.name, t.state, t.trained_name FROM classes c LEFT JOIN class_training t "
+                        "ON t.venue_id = c.venue_id AND t.model_key = c.model_key AND t.class_id = c.class_id "
+                        "WHERE c.venue_id = ? AND c.model_key = ? ORDER BY c.class_id", (venue, model_key)).fetchall()
+    if payload.get("open_new"):
+        try:
+            name = _class_lists.clean_name(payload.get("class"))
+        except _class_lists.ClassListError as e:
+            raise CatalogError(str(e))
+        taken = {str(n).upper() for _, n, _, _ in rows} | {str(t).upper() for _, _, _, t in rows if t}
+        if name.upper() in taken:
+            raise CatalogError(f"Klasa {name} već postoji u modelu {model_key}. Izaberi je kao postojeću klasu.")
+        return {"model": model_key.lower(), "model_key": model_key, "class": name,
+                "class_id": (rows[-1][0] + 1) if rows else 0, "opened": True}
+    name = str(payload.get("class") or "").strip()
+    hit = next((r for r in rows if r[1] == name), None)
+    if hit is None:
+        raise CatalogError("Izaberi postojeću klasu ovog modela.")
+    if hit[2] == "excluded":
+        raise CatalogError(f"Klasa {name} je izbačena iz treninga, pa je model nikad neće naučiti. Izaberi drugu ili otvori novu.")
+    return {"model": model_key.lower(), "model_key": model_key, "class": name, "class_id": hit[0], "opened": False}
+
+
+def _open_class(settings: CatalogSettings, conn: sqlite3.Connection, venue: str, change: Mapping[str, Any]) -> Tuple[Path, Path]:
+    """Append the new class to the Catalog and to the end of the tool's class list. Returns (file, backup of the old file)."""
+    model_key, name, class_id = change["model_key"], change["class"], change["class_id"]
+    conn.execute("INSERT INTO classes (venue_id, model_key, class_id, name, imported_at) VALUES (?, ?, ?, ?, ?)",
+                 (venue, model_key, class_id, name, _now()))
+    expected = [n for n, in conn.execute("SELECT name FROM classes WHERE venue_id = ? AND model_key = ? AND class_id < ? "
+                                         "ORDER BY class_id", (venue, model_key, class_id))]
+    try:
+        path = _class_lists.find_file(settings.source_models_dir, model_key)
+        backup = _class_lists.append_class(path, name, expected, settings.db_path.parent / "class_list_backups")
+    except _class_lists.ClassListError as e:
+        raise CatalogError(str(e))
+    return path, backup
 
 
 def record_decision(settings: CatalogSettings, kind: str, actor: Any, role: Any, *, article_id: Optional[int] = None,
@@ -1607,6 +1719,7 @@ def record_decision(settings: CatalogSettings, kind: str, actor: Any, role: Any,
     day = _valid_date(valid_from) if role == "admin" else _today()
     venue = settings.venue_id
     conn = _open_for_write(settings)
+    written: Optional[Tuple[Path, Path]] = None
     try:
         conn.execute("BEGIN IMMEDIATE")
         if identity_id is not None:
@@ -1619,7 +1732,7 @@ def record_decision(settings: CatalogSettings, kind: str, actor: Any, role: Any,
                                                    (venue, article_id)).fetchone() is None:
             raise UnknownArticle(article_id)
         decisions = {d.decision_id: d for d in _load_decisions(conn, venue)}
-        if kind in ("classes", "provisional") and identity_id is None:
+        if kind in ("classes", "provisional", "class_target") and identity_id is None:
             raise CatalogError("Izaberi POS varijaciju (ime i šifru).")
         if kind in ("ignore", "merge", "propose") and article_id is None:
             raise CatalogError("Izaberi artikal.")
@@ -1658,12 +1771,18 @@ def record_decision(settings: CatalogSettings, kind: str, actor: Any, role: Any,
             (venue, kind, article_id, identity_id, target_id if kind in ("revoke", "reject") else None,
              json.dumps(payload, ensure_ascii=False, sort_keys=True), why, " ".join(str(evidence or "").split())[:300] or None,
              person, role, _now(), day)).lastrowid
+        if kind == "class_target" and payload.get("opened"):
+            written = _open_class(settings, conn, venue, payload)  # the file is written last, right before COMMIT
         conn.execute("COMMIT")
     except sqlite3.Error as e:
         conn.rollback()
+        if written:
+            _class_lists.restore(*written)
         raise CatalogError(f"Nije sačuvano: {e}")
     except (CatalogError, UnknownArticle, NotAllowed):
         conn.rollback()
+        if written:
+            _class_lists.restore(*written)
         raise
     finally:
         conn.close()
@@ -1692,6 +1811,11 @@ def _fmt_day(value: str) -> str:
 
 
 def _describe(kind: str, payload: Mapping[str, Any], article_names: Mapping[int, str]) -> str:
+    if kind == "class_target":
+        where = f"{payload['model']}.{payload['class']}"
+        head = (f"nova klasa {where} (broj {payload['class_id']} u modelu {payload['model_key']})" if payload.get("opened")
+                else f"klasa {where}")
+        return head + ", mapira se kad je živi model nauči"
     if kind == "new_class":
         return "treba nova klasa" + (f" ({payload['note']})" if payload.get("note") else "")
     if kind == "classes":
@@ -1720,9 +1844,14 @@ def _describe(kind: str, payload: Mapping[str, Any], article_names: Mapping[int,
 def _miro_text(kind: str, subject: str, code: Optional[str], payload: Mapping[str, Any], valid_from: str, reason: Optional[str],
                article_names: Mapping[int, str]) -> Optional[str]:
     """Exact sentence for the owner to copy into Miro and Word until they are locked."""
-    if kind not in ("classes", "ignore", "merge"):
+    if kind not in ("classes", "ignore", "merge", "class_target"):
         return None
     who = f"POS artikal {subject}" + (f" (šifra {code})" if code else "")
+    if kind == "class_target":
+        text = f"{who} od {_fmt_day(valid_from)} ide u {payload['model']}.{payload['class']} čim je živi model nauči."
+        if payload.get("opened"):
+            text += f" Nova klasa {payload['class']} dodata je na kraj liste modela {payload['model_key']} (broj {payload['class_id']})."
+        return text + (f" Razlog: {reason.rstrip('.')}." if reason else "")
     body = {"classes": f"od {_fmt_day(valid_from)} ide u {_describe(kind, payload, article_names)}",
             "ignore": (f"od {_fmt_day(valid_from)} je izbačen iz asortimana i ne prati se" if payload.get("why") == "assortment"
                        else f"od {_fmt_day(valid_from)} se ne prati"),
@@ -1774,27 +1903,76 @@ def list_decisions(settings: CatalogSettings, kind: Optional[str] = None) -> Dic
     return {"items": items}
 
 
+FLOW_LABELS = {"waiting_class": "Čeka klasu", "labeling": "U označavanju", "training": "Čeka trening", "tracked": "Praćeno"}
+
+
+def _raw_images(settings: CatalogSettings, model: str, class_name: str) -> Optional[int]:
+    """Labeled images of a class in RAW (only counted, never changed). None when RAW is not reachable."""
+    root = settings.dataset_dir
+    if root is None or not root.is_dir():
+        return None
+    folder = root / model.lower() / "images" / class_name
+    if not folder.is_dir():
+        return 0
+    return sum(1 for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _examples._IMAGE_SUFFIXES)
+
+
+def _flows(settings: CatalogSettings, current: Mapping[int, _decisions.Variation],
+           decisions: Sequence[_decisions.Decision]) -> Dict[int, Dict[str, Any]]:
+    """Where each article on the new class path is (D9): Čeka klasu -> U označavanju -> Čeka trening -> Praćeno."""
+    asked: Dict[int, _decisions.Decision] = {}
+    for d in decisions:
+        if (d.kind == "propose" and d.payload.get("kind") == "new_class" and d.identity_id
+                and _proposal_status(d.decision_id, decisions) == "pending"):
+            asked[d.identity_id] = d
+    images: Dict[Tuple[str, str], Optional[int]] = {}
+    out: Dict[int, Dict[str, Any]] = {}
+    for v in current.values():
+        if v.state == "ignored":
+            continue
+        if v.target:
+            model, cls = v.target
+            if v.links:
+                stage = "tracked"
+            else:
+                if v.target not in images:
+                    images[v.target] = _raw_images(settings, model, cls)
+                stage = "training" if images[v.target] else "labeling"
+            out[v.identity_id] = {"stage": stage, "label": FLOW_LABELS[stage], "model": model, "class": cls,
+                                  "opened": v.target_opened, "raw_images": images.get(v.target)}
+        elif v.identity_id in asked:
+            d = asked[v.identity_id]
+            out[v.identity_id] = {"stage": "waiting_class", "label": FLOW_LABELS["waiting_class"], "model": None,
+                                  "class": None, "opened": False, "raw_images": None, "proposal_id": d.decision_id,
+                                  "note": (d.payload.get("change") or {}).get("note")}
+    return out
+
+
 def list_articles(settings: CatalogSettings, query: Optional[str] = None, state: Optional[str] = None) -> Dict[str, Any]:
     """Every POS variation of the venue with its mapping, for someone starting from the till."""
     q = _assortment.normalize_name(query or "")
     with _open_for_read(settings) as conn:
         current = _current(conn, settings.venue_id)
         evidence = _evidence_by_identity(conn, settings.venue_id)
+        flows = _flows(settings, current, _load_decisions(conn, settings.venue_id))
     counts = {s: 0 for s in STATE_LABELS}
     counts["missing"] = 0
+    counts["new_class"] = len(flows)
     items = []
     for v in _sorted(current.values()):
         counts[v.state] += 1
-        missing = v.state != "ignored" and not v.links
+        missing = v.state != "ignored" and not v.links and not v.target
         counts["missing"] += missing
         if state == "missing" and not missing:
             continue
-        if state and state != "missing" and v.state != state:
+        if state == "new_class" and v.identity_id not in flows:
+            continue
+        if state and state not in ("missing", "new_class") and v.state != state:
             continue
         if q and q not in _assortment.normalize_name(v.name) and q not in (v.code or ""):
             continue
-        items.append(_variation(v, evidence))
-    return {"items": items, "counts": counts, "state_labels": STATE_LABELS}
+        items.append(_variation(v, evidence, flows.get(v.identity_id)))
+    return {"items": items, "counts": counts, "state_labels": STATE_LABELS, "flow_labels": FLOW_LABELS}
 
 
 def article_card(settings: CatalogSettings, article_id: int, as_of: Optional[str] = None) -> Dict[str, Any]:
@@ -1821,9 +1999,10 @@ def article_card(settings: CatalogSettings, article_id: int, as_of: Optional[str
         for i in ids:
             images.extend(list_evidence_conn(conn, venue, i))
         home_name = conn.execute("SELECT display_name FROM articles WHERE article_id = ?", (home,)).fetchone()[0]
+    flows = _flows(settings, {v.identity_id: v for v in variations}, decisions)
     items = []
     for v in variations:
-        item = _variation(v, evidence)
+        item = _variation(v, evidence, flows.get(v.identity_id))
         item["first_seen"], item["last_seen"] = details.get(v.identity_id, (None, None))
         item["mode_label"] = MODE_LABELS.get(v.mode or "", "") if len(v.links) > 1 else ""
         items.append(item)
@@ -1893,7 +2072,7 @@ def _release_sources(conn: sqlite3.Connection, venue: str) -> _releases.ReleaseS
     by_identity: Dict[int, List[Dict[str, Any]]] = {}
     by_article: Dict[int, List[Dict[str, Any]]] = {}
     for d in active:
-        if d.kind == "classes" and d.identity_id is not None:
+        if d.kind in ("classes", "class_target") and d.identity_id is not None:
             by_identity.setdefault(d.identity_id, []).append(info[d.decision_id])
         elif d.kind == "ignore" and d.article_id is not None:
             by_article.setdefault(_decisions.resolve(d.article_id, merges), []).append(info[d.decision_id])
@@ -2641,8 +2820,11 @@ def list_inbox(settings: CatalogSettings, today: Optional[str] = None) -> Dict[s
                 new_class.add(d.identity_id)
             elif d.article_id and not d.identity_id:
                 waiting_articles.add(d.article_id)
+    flows = _flows(settings, current, decisions)
     items, counts = [], Counter()
     for v in _sorted(x for x in current.values() if x.code is not None and x.state == "pending" and x.sold > 0):
+        if v.target:
+            continue  # has its class, waits for labeling or training: listed below with its step
         if v.identity_id in new_class:
             counts["waiting_class"] += 1
         elif v.identity_id in waiting_ids or v.article_id in waiting_articles:
@@ -2651,8 +2833,13 @@ def list_inbox(settings: CatalogSettings, today: Optional[str] = None) -> Dict[s
             counts["snoozed"] += 1
         else:
             items.append(_variation(v, evidence))
-    return {"items": items, "counts": {"waiting": len(items), "proposed": counts["proposed"],
-                                       "waiting_class": counts["waiting_class"], "snoozed": counts["snoozed"]}}
+    path = [_variation(v, evidence, flows[v.identity_id]) for v in _sorted(current.values())
+            if v.identity_id in flows and flows[v.identity_id]["stage"] != "tracked"]
+    order = list(FLOW_LABELS)
+    path.sort(key=lambda i: order.index(i["flow"]["stage"]))
+    return {"items": items, "new_class": path, "flow_labels": FLOW_LABELS,
+            "counts": {"waiting": len(items), "proposed": counts["proposed"], "waiting_class": counts["waiting_class"],
+                       "snoozed": counts["snoozed"], "new_class": len(path)}}
 
 
 def snooze(settings: CatalogSettings, identity_id: int, actor: Any, role: Any, reason: Any = "") -> Dict[str, Any]:

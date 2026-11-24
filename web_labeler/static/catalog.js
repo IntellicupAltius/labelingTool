@@ -41,7 +41,7 @@
   let openCardFile = null;
   let cardRetries = 0;
   const ARTICLE_FILTERS = [["", "Svi"], ["tracked", "Praćeno"], ["missing", "Mapiranje nedostaje"], ["pending", "Čeka odluku"],
-    ["dormant", "Uspavano"], ["ignored", "Ignorisano"]];
+    ["dormant", "Uspavano"], ["ignored", "Ignorisano"], ["new_class", "Nova klasa"]];
   const DECISION_FILTERS = [["propose", "Predlozi"], ["ignore", "X odluke"], ["", "Sve odluke"]];
   let articleQuery = "";
   let articleFilter = "";
@@ -653,7 +653,7 @@
     if (isAdmin()) {
       const buttons = el("div", "catalogMiroButtons");
       const msg = el("span", "catalogSubhead");
-      if (["classes", "provisional", "ignore", "merge"].includes(h.kind) && !h.revoked) {
+      if (["classes", "provisional", "ignore", "merge", "class_target"].includes(h.kind) && !h.revoked) {
         const undo = el("button", "btn small", "Poništi");
         undo.onclick = () => askReason(item, "Zašto poništavaš?", async (reason) => {
           await decide({ kind: "revoke", target_id: h.decision_id, reason });
@@ -671,8 +671,11 @@
           });
           return b;
         };
-        if (h.payload.kind === "new_class") buttons.append(el("span", "catalogSubhead", "Nova klasa se otvara u etapi 3. Do tada artikal čeka."));
-        else buttons.append(applyBtn("Primeni", false));
+        if (h.payload.kind === "new_class") {
+          const openBtn = el("button", "btn primary small", "Otvori klasu");
+          openBtn.onclick = () => classTargetForm(item, { identity_id: h.identity_id, article_id: h.article_id, proposal_id: h.decision_id });
+          buttons.append(openBtn);
+        } else buttons.append(applyBtn("Primeni", false));
         if (h.payload.kind === "classes") buttons.append(applyBtn("Primeni sa zvezdicom", true));
         const no = el("button", "btn small", "Odbij");
         no.onclick = () => askReason(item, "Zašto odbijaš?", async (reason) => {
@@ -890,6 +893,12 @@
       const change = el("button", "btn small", isAdmin() ? "Promeni klasu" : "Predloži promenu");
       change.onclick = async () => { await loadChoices(); variationForm(formSlot, v, !isAdmin()); formSlot.scrollIntoView({ block: "nearest" }); };
       act.append(change);
+      if (isAdmin() && v.state !== "ignored") {
+        const fresh = el("button", "btn small", "Nova klasa…");
+        fresh.title = "Otvori novu klasu za ovo piće ili izaberi klasu koju model još uči";
+        fresh.onclick = () => { classTargetForm(formSlot, { identity_id: v.identity_id, article_id: v.article_id }); formSlot.scrollIntoView({ block: "nearest" }); };
+        act.append(fresh);
+      }
       row.append(el("td", "", v.name), el("td", "", v.code || "nema"), el("td", "num", v.code ? formatQty(v.sold) : "nema"),
         el("td", "", formatDate(v.first_seen)), el("td", "", formatDate(v.last_seen)), el("td"), mapping, tags, imageCell(v), act);
       row.children[5].append(stateTag(v));
@@ -1037,6 +1046,64 @@
     body.replaceChildren(...nodes);
   }
 
+  // ---------------- New class (admin) ----------------
+
+  async function classTargetForm(container, target) {
+    container.querySelectorAll(".catalogAsk").forEach((x) => x.remove());
+    const box = el("div", "catalogAsk catalogClassForm");
+    const msg = el("span", "catalogPasteMsg");
+    const modelPick = el("select");
+    const kindPick = el("select");
+    kindPick.append(new Option("Nova klasa", "new"), new Option("Postojeća klasa", "existing"));
+    const nameInput = el("input", "catalogReason");
+    nameInput.placeholder = "Ime nove klase, npr. MATCHA_CASA";
+    const classPick = el("select");
+    const reason = el("input", "catalogReason");
+    reason.placeholder = "Zašto (npr. novo piće na meniju)";
+    const hint = el("div", "catalogSubhead",
+      "Nova klasa ide na kraj liste klasa u alatu, brojevi postojećih klasa se ne menjaju. Artikal se uparuje tek kad promovisan model nauči klasu.");
+    try {
+      const models = (await getJson("/api/catalog/models")).models;
+      modelPick.append(new Option("Izaberi model…", ""), ...models.map((m) => new Option(m.name, m.name)));
+    } catch (e) { msg.textContent = e.message; }
+    const fillClasses = async () => {
+      classPick.replaceChildren(new Option("Izaberi klasu…", ""));
+      if (!modelPick.value) return;
+      const view = await getJson(`/api/catalog/models/${encodeURIComponent(modelPick.value)}/classes`);
+      for (const c of view.classes) {
+        if (c.training_state === "excluded") continue;
+        classPick.append(new Option(`${c.name} (${c.training_label})`, c.name));
+      }
+    };
+    const showKind = () => {
+      const fresh = kindPick.value === "new";
+      nameInput.style.display = fresh ? "" : "none";
+      classPick.style.display = fresh ? "none" : "";
+    };
+    modelPick.onchange = () => fillClasses().catch((e) => { msg.textContent = e.message; });
+    kindPick.onchange = showKind;
+    showKind();
+    const save = el("button", "btn primary small", "Sačuvaj");
+    const cancel = el("button", "btn small", "Odustani");
+    save.onclick = async () => {
+      save.disabled = true;
+      try {
+        const fresh = kindPick.value === "new";
+        const cls = fresh ? nameInput.value.trim() : classPick.value;
+        if (!modelPick.value) throw new Error("Izaberi model.");
+        if (!cls) throw new Error(fresh ? "Upiši ime nove klase." : "Izaberi klasu.");
+        const payload = { model: modelPick.value, class: cls, open_new: fresh };
+        if (target.proposal_id) payload.from_proposal = target.proposal_id;
+        await decide({ kind: "class_target", identity_id: target.identity_id, article_id: target.article_id, payload, reason: reason.value.trim() });
+        showToast(fresh ? "Klasa je otvorena." : "Sačuvano.");
+        refreshAfterDecision();
+      } catch (e) { msg.textContent = e.message; save.disabled = false; }
+    };
+    cancel.onclick = () => box.remove();
+    box.append(modelPick, kindPick, nameInput, classPick, reason, save, cancel, msg, hint);
+    container.append(box);
+  }
+
   // ---------------- Inbox "čeka te" ----------------
 
   function inboxForm(slot, v, kind) {
@@ -1100,6 +1167,32 @@
     const intro = el("div", "catalogSubhead",
       `Artikli koji se prodaju, a nemaju klasu. Najprodavaniji su prvi. Poslato adminu: ${data.counts.proposed}, čeka novu klasu: ${data.counts.waiting_class}, odloženo: ${data.counts.snoozed}.`);
     const nodes = [title, intro];
+    if (data.new_class.length) {
+      nodes.push(el("h3", "catalogVarHead", `Nova klasa (${data.new_class.length})`));
+      nodes.push(el("div", "catalogSubhead", "Put novog pića: Čeka klasu → U označavanju → Čeka trening → Praćeno."));
+      for (const v of data.new_class) {
+        const card = el("div", "catalogFinding");
+        const head = el("div", "catalogFindingTitle", `${v.name} `);
+        head.append(el("span", v.flow.stage === "waiting_class" ? "catalogTag warn" : "catalogTag", v.flow.label));
+        card.append(head);
+        const where = v.flow.class ? `klasa ${v.flow.model}.${v.flow.class}` : (v.flow.note ? `napomena: ${v.flow.note}` : "klasa još nije izabrana");
+        const images = v.flow.raw_images ? ` · označenih slika: ${v.flow.raw_images}` : "";
+        card.append(el("div", "catalogSubhead", `Šifra ${v.code || "nema"} · ${where}${images}`));
+        const slot = el("div");
+        const buttons = el("div", "catalogMiroButtons");
+        if (isAdmin() && v.flow.stage === "waiting_class") {
+          const openBtn = el("button", "btn primary small", "Otvori klasu");
+          openBtn.onclick = () => classTargetForm(slot, { identity_id: v.identity_id, article_id: v.article_id, proposal_id: v.flow.proposal_id });
+          buttons.append(openBtn);
+        }
+        const open = el("button", "btn small", "Otvori karticu");
+        open.onclick = () => showArticle(v.article_id);
+        buttons.append(open);
+        card.append(buttons, slot);
+        nodes.push(card);
+      }
+      nodes.push(el("h3", "catalogVarHead", "Bez klase"));
+    }
     if (!data.items.length) nodes.push(el("div", "catalogHint", "Ništa ne čeka. Bravo!"));
     for (const v of data.items) {
       const card = el("div", "catalogFinding");

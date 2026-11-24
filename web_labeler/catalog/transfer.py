@@ -85,6 +85,9 @@ def transfer(source_db: Path, settings: store.CatalogSettings, source_media: Opt
             if actor in skip:
                 report["skipped"].append(f"odluka #{d_id} ({actor})")
                 continue
+            if kind == "class_target":  # it opened a class in the trial tool's lists; open it again in the real tool
+                report["skipped"].append(f"odluka #{d_id}: klasa za novi artikal se ne prenosi, otvori je ponovo")
+                continue
             if target_id is not None and target_id not in id_map:
                 report["skipped"].append(f"odluka #{d_id}: odnosi se na odluku koja se ne prenosi")
                 continue
