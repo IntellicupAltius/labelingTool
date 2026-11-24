@@ -457,6 +457,7 @@ class CatalogSettings:
     release_dir: Optional[Path] = None
     pipeline_map_path: Optional[Path] = None
     trial_dir: Optional[Path] = None
+    reminder_emails: Tuple[str, ...] = ()
 
     @classmethod
     def from_config(cls, cfg: Mapping[str, Any], models_dir: Path,
@@ -513,7 +514,8 @@ class CatalogSettings:
                    optional_path("catalog_backup_dir"), model_cards,
                    optional_path("catalog_release_dir") or (db_path.parent / "releases" if db_path else None),
                    optional_path("catalog_pipeline_map_path"),
-                   optional_path("catalog_trial_dir") or (db_path.parent / "trial_days" if db_path else None))
+                   optional_path("catalog_trial_dir") or (db_path.parent / "trial_days" if db_path else None),
+                   tuple(str(e).strip() for e in (cfg.get("catalog_reminder_emails") or []) if str(e).strip()))
 
     @classmethod
     def from_config_file(cls, config_path: Path) -> "CatalogSettings":
@@ -2248,7 +2250,8 @@ FINDING_ACTIONS = {"changed_file": ("Koristi novu verziju", "Zadrži staru verzi
                    "code_reused": ("Viđeno, odlučiću u Artiklima", "Greška u kasi"),
                    "second_code": ("Isti artikal, potvrdi", "Nije isti"),
                    "new_article": ("Viđeno", "Ne treba"),
-                   "price_jump": ("U redu", "Proveriti šifru")}
+                   "price_jump": ("U redu", "Proveriti šifru"),
+                   "pos_missing": ("Stiglo je / rešeno", "Nije potrebno")}
 
 
 class UnknownFinding(Exception):
@@ -2672,3 +2675,49 @@ def snooze(settings: CatalogSettings, identity_id: int, actor: Any, role: Any, r
     finally:
         conn.close()
     return {"identity_id": identity_id, "until": until}
+
+
+# ---------------- Reminder for a missing POS report (ticket 15) ----------------
+
+REMINDER_HOUR = 9
+
+
+def missing_report_reminders(settings: CatalogSettings, now: Optional[datetime] = None,
+                             send: Optional[Any] = None) -> Dict[str, Any]:
+    """For every late day (not 'lokal nije radio'), once, after 09:00: a finding in the tool and the email text in
+    <db dir>/reminders/. An email goes out only when catalog_reminder_emails is set AND a sender is given; nothing is
+    sent until the owner decides addresses and the way of sending."""
+    now = now or datetime.now()
+    report: Dict[str, Any] = {"created": [], "sent": [], "skipped_before_hour": now.hour < REMINDER_HOUR}
+    if now.hour < REMINDER_HOUR:
+        return report
+    table = day_table(settings, today=now.date().isoformat())
+    late = [d["day"] for d in table["days"] if d["status"] == "late"]
+    venue = settings.venue_id
+    conn = _open_for_write(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        done = {day for day, in conn.execute("SELECT day FROM findings WHERE venue_id = ? AND kind = 'pos_missing'", (venue,))}
+        outbox = settings.db_path.parent / "reminders"
+        for day in sorted(set(late) - done):
+            text = (f"Podsetnik: POS izveštaj za {_pos.fmt_day(day)} nije stigao. Molimo pošaljite ga kao i obično, "
+                    "ili u alatu (Katalog → Dani) označite da lokal nije radio.")
+            _add_finding(conn, venue, "pos_missing", day, None, f"Nije stigao POS izveštaj za {_pos.fmt_day(day)}", text,
+                         {"day": day}, _now())
+            outbox.mkdir(parents=True, exist_ok=True)
+            (outbox / f"{day}.txt").write_text(text + "\n", encoding="utf-8")
+            report["created"].append(day)
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    recipients = list(getattr(settings, "reminder_emails", None) or [])
+    if send is not None and recipients:
+        for day in report["created"]:
+            send(recipients, f"Nije stigao POS izveštaj za {_pos.fmt_day(day)}",
+                 (settings.db_path.parent / "reminders" / f"{day}.txt").read_text(encoding="utf-8"))
+            report["sent"].append(day)
+    return report

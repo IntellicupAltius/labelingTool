@@ -221,5 +221,40 @@ class DayTableTests(PosIntakeTests):
         conn.close()
 
 
+
+class ReminderTests(DayTableTests):
+    """Ticket 15: one reminder per late day after 09:00, none for a closed day, nothing sent without addresses."""
+
+    def at(self, hour):
+        from datetime import date
+        return datetime.combine(date.today() + timedelta(days=self.FUTURE), datetime.min.time()).replace(hour=hour)
+
+    def test_reminders(self):
+        self.report(20, 10)
+        self.receive()
+        self.assertEqual(store.missing_report_reminders(self.settings, self.at(8))["created"], [])  # before 09:00
+        store.mark_day(self.settings, self.day(3), "closed", "Goca", "labeler", "praznik")
+        sent = []
+        report = store.missing_report_reminders(self.settings, self.at(9), send=lambda *a: sent.append(a))
+        late = sorted(self.day(b) for b in range(2, self.FUTURE + 1) if b != 3)  # from the switch-on day; D+1 still on time; closed day gets nothing
+        self.assertEqual(report["created"], late)
+        self.assertEqual((report["sent"], sent), ([], []))  # no addresses configured: nothing goes out
+        self.assertTrue((self.tmp / "db" / "reminders" / f"{late[0]}.txt").is_file())
+        self.assertEqual(store.missing_report_reminders(self.settings, self.at(10))["created"], [])  # once per day
+        self.assertEqual(len([f for f in self.findings() if f["kind"] == "pos_missing"]), len(late))
+
+    def test_sends_only_with_addresses(self):
+        self.report(20, 10)
+        self.receive()
+        settings = catalog.CatalogSettings.from_config(
+            {"catalog_venue_id": "venue_a", "catalog_db_path": str(self.tmp / "db" / "catalog.db"),
+             "catalog_pos_dir": str(self.drops), "catalog_pos_adapter": "blaznavac_csv",
+             "catalog_reminder_emails": ["labeleri@example.com"]}, self.tmp / "Models", self.tmp / "raw")
+        sent = []
+        report = store.missing_report_reminders(settings, self.at(9), send=lambda to, subject, body: sent.append((to, subject)))
+        self.assertEqual(len(sent), len(report["created"]))
+        self.assertEqual(sent[0][0], ["labeleri@example.com"])
+
+
 if __name__ == "__main__":
     unittest.main()
