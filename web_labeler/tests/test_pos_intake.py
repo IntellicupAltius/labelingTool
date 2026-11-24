@@ -164,5 +164,62 @@ class PosIntakeTests(unittest.TestCase):
         self.assertEqual(mapping.read_bytes(), map_before)
 
 
+
+class DayTableTests(PosIntakeTests):
+    """Ticket 13: one status per day, D+1 deadline, 'lokal nije radio', no late days before the module."""
+
+    FUTURE = 8  # the table is read as if today were 8 days later; the module is switched on today
+
+    def day(self, back):
+        from datetime import date
+        return (date.today() + timedelta(days=self.FUTURE - back)).isoformat()
+
+    def report(self, back, n_rows, name=None, last_hour=22):
+        d = self.day(back)
+        compact = d.replace("-", ".")
+        rows = [row(d, f"0{i:03d}", f"Pice {i}", f"{compact} {10 + i % (last_hour - 10):02d}:00") for i in range(n_rows - 1)]
+        rows.append(row(d, "0999", "Kasno", f"{compact} {last_hour:02d}:00"))
+        self.write(name or f"{d[8:10]}.{d[5:7]}.csv", rows)
+
+    def status(self, back):
+        from datetime import date
+        future = (date.today() + timedelta(days=self.FUTURE)).isoformat()
+        return next(x for x in store.day_table(self.settings, today=future)["days"] if x["day"] == self.day(back))
+
+    def test_statuses(self):
+        for weeks in (1, 2, 3):
+            self.report(3 + 7 * weeks, 10)
+        self.report(9, 10)  # before the module is switched on
+        self.receive()       # baseline: the module starts today
+        self.report(3, 2)                   # far fewer rows than the same weekday usually has
+        self.report(4, 10, last_hour=15)    # last receipt too early
+        self.report(5, 10, name="01.01.csv")  # name and date disagree
+        self.report(6, 10)
+        self.receive()
+        self.assertEqual(self.status(6)["status"], "ok")
+        self.assertEqual(self.status(9)["status"], "ok")
+        self.assertIn("redova", " ".join(self.status(3)["notes"]))
+        self.assertEqual(self.status(3)["status"], "suspicious")
+        self.assertEqual(self.status(5)["status"], "suspicious")
+        self.assertEqual(self.status(2)["status"], "late")
+        self.assertEqual(self.status(1)["status"], "waiting")  # yesterday: due until the end of today
+        self.assertEqual(self.status(12)["status"], "before")  # never late before the module
+
+    def test_closed_day_by_labeler_with_reason_and_undo(self):
+        self.report(20, 10)
+        self.receive()
+        with self.assertRaises(catalog.CatalogError):
+            store.mark_day(self.settings, self.day(2), "closed", "Goca", "labeler", "")
+        store.mark_day(self.settings, self.day(2), "closed", "Goca", "labeler", "praznik")
+        st = self.status(2)
+        self.assertEqual((st["status"], st["notes"]), ("closed", ["Goca: praznik"]))
+        store.mark_day(self.settings, self.day(2), "reopened", "Aleksa", "admin", "ipak radio")
+        self.assertEqual(self.status(2)["status"], "late")
+        conn = sqlite3.connect(str(self.tmp / "db" / "catalog.db"))
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute("DELETE FROM pos_day_marks")
+        conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()

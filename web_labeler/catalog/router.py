@@ -144,6 +144,20 @@ def build_catalog_router(settings: CatalogSettings) -> APIRouter:
         except CatalogError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    @router.get("/day-table")
+    def catalog_day_table() -> Dict[str, Any]:
+        try:
+            return store.day_table(settings)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.post("/day-table/{day}")
+    def catalog_mark_day(day: str, req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        try:
+            return store.mark_day(settings, day, str(req.get("action") or ""), req.get("actor"), req.get("role"), req.get("reason"))
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     @router.get("/pos-days")
     def catalog_pos_days() -> Dict[str, Any]:
         try:

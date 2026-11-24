@@ -32,6 +32,7 @@
   const viewModelCards = document.getElementById("catalogViewModelCards");
   const viewReleases = document.getElementById("catalogViewReleases");
   const viewFindings = document.getElementById("catalogViewFindings");
+  const viewDays = document.getElementById("catalogViewDays");
   const FINDING_FILTERS = [["open", "Čeka odluku"], ["all", "Sve"]];
   let findingFilter = "open";
   const NOT_RECORDED = "nije zabeleženo";
@@ -1033,6 +1034,35 @@
     body.replaceChildren(...nodes);
   }
 
+  // ---------------- Day table ----------------
+
+  function renderDays(data) {
+    const title = el("h2", "catalogTitle", "Dani ");
+    title.append(el("span", "catalogCount", data.enabled ? `praćenje od ${formatDate(data.enabled)}` : "praćenje još nije uključeno"));
+    const intro = el("div", "catalogSubhead", "Izveštaj za jedan dan treba da stigne do kraja sledećeg dana. Ako lokal nije radio, označi to ovde.");
+    const table = el("table", "catalogTable");
+    const head = el("tr");
+    for (const t of ["Dan", "Stanje", "Redova", "Napomena", ""]) head.append(el("th", "", t));
+    table.append(head);
+    for (const d of data.days) {
+      const tr = el("tr");
+      const state = el("td");
+      state.append(el("span", ["late", "suspicious"].includes(d.status) ? "catalogTag warn" : "catalogTag", d.label));
+      const action = el("td");
+      if (d.can_close || d.can_reopen) {
+        const b = el("button", "btn small", d.can_reopen ? "Poništi" : "Lokal nije radio");
+        b.onclick = () => askReason(tr.lastChild, d.can_reopen ? "Zašto poništavaš?" : "Razlog (npr. praznik)", async (reason) => {
+          await postJson(`/api/catalog/day-table/${d.day}`, { action: d.can_reopen ? "reopened" : "closed", actor: person(), role: roleSelect.value, reason });
+        });
+        action.append(b);
+      }
+      tr.append(el("td", "", formatDate(d.day)), state, el("td", "num", d.rows === null ? "" : String(d.rows)),
+        el("td", "", d.notes.join("; ")), action);
+      table.append(tr);
+    }
+    body.replaceChildren(title, intro, table);
+  }
+
   // ---------------- Findings (POS intake) ----------------
 
   function renderFindings(data) {
@@ -1417,6 +1447,11 @@
         if (no === requestNo) renderMiro(data);
         return;
       }
+      if (view === "days") {
+        const data = await getJson("/api/catalog/day-table");
+        if (no === requestNo) renderDays(data);
+        return;
+      }
       if (view === "findings") {
         const data = await getJson(`/api/catalog/findings?status=${findingFilter}`);
         if (no === requestNo) renderFindings(data);
@@ -1468,6 +1503,7 @@
     viewModelCards.classList.toggle("primary", view === "modelcards");
     viewReleases.classList.toggle("primary", view === "releases");
     viewFindings.classList.toggle("primary", view === "findings");
+    viewDays.classList.toggle("primary", view === "days");
     selectedVariation = null;
     openCardFile = null;
     cardRetries = 0;
@@ -1538,6 +1574,7 @@
   viewReleases.onclick = () => setView("releases");
   viewFindings.classList.toggle("hidden", roleSelect.value !== "admin");
   viewFindings.onclick = () => setView("findings");
+  viewDays.onclick = () => setView("days");
   modelSelect.onchange = () => { selectedClass = null; selectedVariation = null; openCardFile = null; loadClasses(); };
   viewClasses.onclick = () => setView("classes");
   viewUnclassified.onclick = () => setView("unclassified");

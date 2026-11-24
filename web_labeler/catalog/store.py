@@ -20,12 +20,12 @@ from web_labeler.catalog import model_cards as _model_cards
 from web_labeler.catalog import releases as _releases
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
            "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings",
            "miro_pages", "miro_suggested", "miro_reviews", "miro_links", "evidence", "evidence_events", "decisions",
            "map_names", "source_lines", "training_classes", "releases", "locks",
-           "pos_files", "pos_file_rows", "findings", "finding_events"}
+           "pos_files", "pos_file_rows", "findings", "finding_events", "pos_day_marks"}
 
 _SCHEMA = """
 CREATE TABLE venues (
@@ -381,6 +381,23 @@ CREATE TRIGGER finding_events_no_delete BEFORE DELETE ON finding_events
 BEGIN SELECT RAISE(ABORT, 'finding history is append-only'); END;
 """
 
+_SCHEMA_V10 = """
+CREATE TABLE pos_day_marks (
+    mark_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id TEXT NOT NULL REFERENCES venues(venue_id),
+    day      TEXT NOT NULL,
+    action   TEXT NOT NULL CHECK (action IN ('closed', 'reopened')),
+    actor    TEXT NOT NULL,
+    role     TEXT NOT NULL,
+    reason   TEXT,
+    at       TEXT NOT NULL
+);
+CREATE TRIGGER pos_day_marks_no_update BEFORE UPDATE ON pos_day_marks
+BEGIN SELECT RAISE(ABORT, 'day marks are append-only'); END;
+CREATE TRIGGER pos_day_marks_no_delete BEFORE DELETE ON pos_day_marks
+BEGIN SELECT RAISE(ABORT, 'day marks are append-only'); END;
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -547,10 +564,11 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}"
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}{_SCHEMA_V10}"
                                f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3, 4, 5, 6, 7, 8):
-            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8, _SCHEMA_V9][version - 1:]
+        elif version in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8, _SCHEMA_V9,
+                     _SCHEMA_V10][version - 1:]
             conn.executescript(f"BEGIN;{''.join(steps)}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version != SCHEMA_VERSION:
             raise CatalogError(f"Unsupported Catalog database version: {version}")
@@ -2441,3 +2459,121 @@ def list_pos_days(settings: CatalogSettings) -> Dict[str, Any]:
         for entry in days.values():
             entry["active_file_id"] = _active_file(conn, venue, entry["day"]) if entry["day"] else None
     return {"days": sorted(days.values(), key=lambda d: d["day"] or "", reverse=True)}
+
+
+# ---------------- Day table (ticket 13) ----------------
+
+DAY_STATUS_LABELS = {"ok": "Stiglo u redu", "suspicious": "Stiglo sumnjivo", "late": "Kasni", "closed": "Nije radilo",
+                     "waiting": "Čeka (rok je kraj sutrašnjeg dana)", "before": "Pre uključivanja"}
+
+
+def _day_closed(conn: sqlite3.Connection, venue: str) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for day, action, actor, reason, at in conn.execute(
+            "SELECT day, action, actor, reason, at FROM pos_day_marks WHERE venue_id = ? ORDER BY mark_id", (venue,)):
+        if action == "closed":
+            out[day] = {"actor": actor, "reason": reason, "at": at}
+        else:
+            out.pop(day, None)
+    return out
+
+
+def day_table(settings: CatalogSettings, today: Optional[str] = None, days: int = 45) -> Dict[str, Any]:
+    """One status per day. A report for day D is on time during all of D+1 (D4). Days before the module was switched on
+    are never late (they are shown as they are)."""
+    from datetime import date, timedelta
+    import statistics
+    today_d = date.fromisoformat(today) if today else date.today()
+    venue = settings.venue_id
+    with _open_for_read(settings) as conn:
+        first = conn.execute("SELECT MIN(received_at) FROM pos_files WHERE venue_id = ?", (venue,)).fetchone()[0]
+        enabled = first[:10] if first else None
+        files = {}
+        for file_id, day, rows, last, status in conn.execute(
+                "SELECT file_id, report_day, rows_paid, ring_last, status FROM pos_files WHERE venue_id = ? AND report_day IS NOT NULL",
+                (venue,)):
+            files.setdefault(day, []).append((file_id, rows, last, status))
+        active = {day: _active_file(conn, venue, day) for day in files}
+        info = {f: (rows, last) for day in files for f, rows, last, _ in files[day]}
+        mismatch = {f for f, in conn.execute("SELECT file_id FROM findings WHERE venue_id = ? AND kind = 'name_mismatch'", (venue,))}
+        closed = _day_closed(conn, venue)
+    by_weekday: Dict[int, List[Tuple[str, int, str]]] = {}
+    for day, f in active.items():
+        if f is not None:
+            rows, last = info[f]
+            by_weekday.setdefault(date.fromisoformat(day).weekday(), []).append((day, rows, last or ""))
+
+    def usual(day: str) -> Tuple[Optional[float], Optional[str]]:
+        same = [(r, l) for d, r, l in by_weekday.get(date.fromisoformat(day).weekday(), []) if d != day]
+        if len(same) < 3:
+            return None, None
+        lasts = sorted(l[11:16] for _, l in same if l)
+        return statistics.median(r for r, _ in same), lasts[len(lasts) // 2] if lasts else None
+
+    out = []
+    for back in range(1, days + 1):
+        d = today_d - timedelta(days=back)
+        day = d.isoformat()
+        f = active.get(day)
+        notes: List[str] = []
+        rows = None
+        if day in closed:
+            status = "closed"
+            c = closed[day]
+            notes.append(f"{c['actor']}: {c['reason'] or 'bez razloga'}")
+        elif f is not None:
+            rows, last = info[f]
+            status = "ok"
+            typical_rows, typical_last = usual(day)
+            if f in mismatch:
+                notes.append("ime fajla i datum se ne slažu")
+            if typical_rows and rows < typical_rows / 2:
+                notes.append(f"{rows} redova, obično oko {int(typical_rows)}")
+            if typical_last and last and last[11:16] < f"{max(0, int(typical_last[:2]) - 3):02d}:{typical_last[3:5]}":
+                notes.append(f"poslednji račun u {last[11:16]}, obično oko {typical_last}")
+            if notes:
+                status = "suspicious"
+        elif files.get(day):
+            status = "suspicious" if enabled and day >= enabled else "before"
+            notes.append("stigao je samo neispravan izveštaj")
+        elif enabled is None or day < enabled:
+            status = "before"
+        elif back >= 2:
+            status = "late"
+        else:
+            status = "waiting"
+        out.append({"day": day, "status": status, "label": DAY_STATUS_LABELS[status], "rows": rows, "notes": notes,
+                    "can_close": status in ("late", "waiting", "suspicious", "before"), "can_reopen": status == "closed"})
+    return {"enabled": enabled, "days": out, "counts": dict(Counter(d["status"] for d in out))}
+
+
+def mark_day(settings: CatalogSettings, day: str, action: str, actor: Any, role: Any, reason: Any = "") -> Dict[str, Any]:
+    """'Lokal nije radio' (closed) or undo (reopened). Labeler or admin; nothing is erased."""
+    from datetime import date
+    person, role = _clean_person(actor, role)
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        raise CatalogError("Neispravan datum.")
+    if action not in ("closed", "reopened"):
+        raise CatalogError("Nepoznata akcija.")
+    why = " ".join(str(reason or "").split())[:300] or None
+    if action == "closed" and not why:
+        raise CatalogError("Upiši razlog (npr. praznik, renoviranje).")
+    venue = settings.venue_id
+    conn = _open_for_write(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        is_closed = day in _day_closed(conn, venue)
+        if (action == "closed") == is_closed:
+            raise CatalogError("Dan je već označen." if is_closed else "Dan nije označen kao neradni.")
+        conn.execute("INSERT INTO pos_day_marks (venue_id, day, action, actor, role, reason, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (venue, day, action, person, role, why, _now()))
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    return {"day": day, "action": action}
