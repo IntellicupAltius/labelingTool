@@ -144,3 +144,4 @@
 .catalogClipCanvas { pointer-events: none; }
 .catalogClipGrid.drawing .catalogClipCanvas { pointer-events: auto; cursor: crosshair; }
 .catalogClipSlider { flex: 1; min-width: 160px; }
+.catalogSubhead.warn { color: #f59e0b; }

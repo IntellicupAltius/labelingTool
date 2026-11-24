@@ -427,18 +427,36 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(names(), [])
         self.assertEqual(store.list_inbox(self.settings)["counts"]["snoozed"], 1)
         from datetime import date, timedelta
-        later = (date.today() + timedelta(days=15)).isoformat()
-        self.assertEqual([i["name"] for i in store.list_inbox(self.settings, later)["items"]], ["NEW DRINK"])  # back after 14 days
+        self.assertEqual([i["name"] for i in store.list_inbox(self.settings, (date.today() + timedelta(days=29)).isoformat())["snoozed"]],
+                         ["NEW DRINK"])
+        later = (date.today() + timedelta(days=31)).isoformat()
+        self.assertEqual([i["name"] for i in store.list_inbox(self.settings, later)["items"]], ["NEW DRINK"])  # back after 30 days
         prop = catalog.record_decision(self.settings, "propose", "Goca", "labeler", identity_id=v["identity_id"],
                                        payload={"kind": "new_class", "change": {"note": "zelena flaša"}}, reason="nema klase")
         self.assertEqual(prop["text"], "predlog: treba nova klasa (zelena flaša)")
-        inbox = store.list_inbox(self.settings, (date.today() + timedelta(days=15)).isoformat())
+        inbox = store.list_inbox(self.settings, (date.today() + timedelta(days=31)).isoformat())
         self.assertEqual((inbox["items"], inbox["counts"]["waiting_class"]), ([], 1))
         catalog.record_decision(self.settings, "reject", "Aleksa", "admin", target_id=prop["decision_id"], reason="postoji klasa")
-        self.assertEqual([i["name"] for i in store.list_inbox(self.settings, (date.today() + timedelta(days=15)).isoformat())["items"]],
+        self.assertEqual([i["name"] for i in store.list_inbox(self.settings, (date.today() + timedelta(days=31)).isoformat())["items"]],
                          ["NEW DRINK"])
         catalog.record_decision(self.settings, "ignore", "Goca", "labeler", article_id=v["article_id"])  # X acts at once
         self.assertEqual(store.list_inbox(self.settings)["items"], [])
+
+    def test_za_odluku_holds_unsold_proposals_and_provisional(self):
+        """Ticket 20: one list; a proposal shows on its article; dormant only as a filter; * in its own section."""
+        v = self.identity("NEW DRINK")
+        prop = catalog.record_decision(self.settings, "propose", "Claude (predlog)", "labeler", article_id=v["article_id"],
+                                       payload={"kind": "ignore", "change": {}}, reason="hrana")
+        inbox = store.list_inbox(self.settings)
+        item = next(i for i in inbox["items"] if i["name"] == "NEW DRINK")
+        self.assertEqual((item["proposal"]["decision_id"], item["proposal"]["text"], item["proposal"]["actor"]),
+                         (prop["decision_id"], "ne pratimo (X)", "Claude (predlog)"))
+        catalog.record_decision(self.settings, "ignore", "Goca", "labeler", article_id=v["article_id"],
+                                payload={"from_proposal": prop["decision_id"]})
+        self.assertEqual(catalog.get_decision(self.settings, prop["decision_id"])["status_label"], "Rešen")
+        self.assertNotIn("NEW DRINK", [i["name"] for i in store.list_inbox(self.settings)["items"]])
+        self.assertIn("provisional", inbox)
+        self.assertIn("dormant", inbox)
 
     def test_merge_proposal_from_inbox(self):
         v = self.identity("NEW DRINK")

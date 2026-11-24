@@ -1,8 +1,8 @@
-// Classes tab. A separate layer over the workspace: it never calls setMode or touches the loaded
+// Katalog tab (the only Catalog tab since ticket 20). A separate layer over the workspace: it never calls setMode or touches the loaded
 // video and annotations, so opening it cannot lose unexported work.
 (function () {
   const ROLE_KEY = "catalog.role";
-  const tab = document.getElementById("tabClasses");
+  const tab = document.getElementById("tabInbox");
   const tabs = tab.closest(".tabs");
   const panel = document.getElementById("catalogPanel");
   const modelSelect = document.getElementById("catalogModelSelect");
@@ -34,7 +34,7 @@
   const viewFindings = document.getElementById("catalogViewFindings");
   const viewDays = document.getElementById("catalogViewDays");
   const viewInbox = document.getElementById("catalogViewInbox");
-  const tabInbox = document.getElementById("tabInbox");
+  const tabInbox = tab;
   const FINDING_FILTERS = [["open", "Čeka odluku"], ["all", "Sve"]];
   let findingFilter = "open";
   const NOT_RECORDED = "nije zabeleženo";
@@ -42,17 +42,17 @@
   let cardRetries = 0;
   const ARTICLE_FILTERS = [["", "Svi"], ["tracked", "Praćeno"], ["missing", "Mapiranje nedostaje"], ["pending", "Čeka odluku"],
     ["dormant", "Uspavano"], ["ignored", "Ignorisano"], ["new_class", "Nova klasa"]];
-  const DECISION_FILTERS = [["propose", "Predlozi"], ["ignore", "X odluke"], ["", "Sve odluke"]];
+  const DECISION_FILTERS = [["", "Sve odluke"], ["ignore", "X odluke"], ["propose", "Predlozi"]];
   let articleQuery = "";
   let articleFilter = "";
-  let decisionFilter = "propose";
+  let decisionFilter = "";
   let openArticle = null;
   let classChoices = null;
   const MIRO_FILTERS = [["all", "Sve"], ["waiting", "Čeka potvrdu"], ["confirmed", "Potvrđeno"], ["none", "Bez klase"], ["retired", "Arhiva"]];
   let miroFilter = "waiting";
   let exampleSeed = Math.floor(Math.random() * 1e9);
   let requestNo = 0;
-  let view = "classes";
+  let view = "inbox";
   let selectedClass = null;
 
   function readRole() {
@@ -661,7 +661,7 @@
       box.append(copy);
       item.append(box);
     }
-    if (isAdmin()) {
+    {
       const buttons = el("div", "catalogMiroButtons");
       const msg = el("span", "catalogSubhead");
       if (["classes", "provisional", "ignore", "merge", "class_target"].includes(h.kind) && !h.revoked) {
@@ -700,19 +700,16 @@
         buttons.append(open);
       }
       if (buttons.children.length) { buttons.append(msg); item.append(buttons); }
-    } else if (card === undefined && h.article_id) {
-      const open = el("button", "btn small", "Otvori karticu");
-      open.onclick = () => showArticle(h.article_id);
-      item.append(open);
     }
     return item;
   }
 
-  function askReason(container, label, action) {
+  function askReason(container, label, action, prefill) {
     container.querySelectorAll(".catalogAsk").forEach((x) => x.remove());
     const box = el("div", "catalogAsk");
     const input = el("input", "catalogReason");
     input.placeholder = label;
+    if (prefill) input.value = prefill;
     const ok = el("button", "btn primary small", "Sačuvaj");
     const cancel = el("button", "btn small", "Odustani");
     const msg = el("span", "catalogPasteMsg");
@@ -877,11 +874,10 @@
       await decide({ kind: "ignore", article_id: card.home_article_id, reason, payload: { why: "assortment" } });
     });
     actions.append(gone);
-    if (isAdmin()) {
-      const merge = el("button", "btn", "Spoji sa…");
-      merge.onclick = () => mergeForm(formSlot, card);
-      actions.append(merge);
-    }
+    const merge = el("button", "btn", "Spoji sa…");
+    merge.title = "Isto piće je dobilo novu šifru ili novo ime u kasi";
+    merge.onclick = () => mergeForm(formSlot, card);
+    actions.append(merge);
     nodes.push(actions, formSlot);
     nodes.push(el("h3", "catalogVarHead", `POS varijacije (${card.variations.length})`));
     const table = el("table", "catalogTable");
@@ -901,10 +897,10 @@
       const mapping = mappingCell(v);
       if (v.mode_label) mapping.append(el("div", "catalogSubhead", v.mode_label));
       const act = el("td");
-      const change = el("button", "btn small", isAdmin() ? "Promeni klasu" : "Predloži promenu");
-      change.onclick = async () => { await loadChoices(); variationForm(formSlot, v, !isAdmin()); formSlot.scrollIntoView({ block: "nearest" }); };
+      const change = el("button", "btn small", "Promeni klasu");
+      change.onclick = async () => { await loadChoices(); variationForm(formSlot, v, false); formSlot.scrollIntoView({ block: "nearest" }); };
       act.append(change);
-      if (isAdmin() && v.state !== "ignored") {
+      if (v.state !== "ignored") {
         const fresh = el("button", "btn small", "Nova klasa…");
         fresh.title = "Otvori novu klasu za ovo piće ili izaberi klasu koju model još uči";
         fresh.onclick = () => { classTargetForm(formSlot, { identity_id: v.identity_id, article_id: v.article_id }); formSlot.scrollIntoView({ block: "nearest" }); };
@@ -957,10 +953,9 @@
   }
 
   function renderDecisions(data) {
-    const title = el("h2", "catalogTitle", "Odluke ");
-    const pending = data.items.filter((d) => d.kind === "propose" && d.status === "pending").length;
-    title.append(el("span", "catalogCount", decisionFilter === "propose" ? `${pending} predloga čeka odluku` : `${data.items.length} zapisa`));
-    const intro = el("div", "catalogSubhead", "Ništa se ne briše. Promena ili poništavanje pravi novi zapis, a odluke čekaju sledeće izdanje i ne menjaju produkciju.");
+    const title = el("h2", "catalogTitle", "Istorija odluka ");
+    title.append(el("span", "catalogCount", `${data.items.length} zapisa`));
+    const intro = el("div", "catalogSubhead", "Ko je šta odlučio, kada i zašto. Ništa se ne briše: promena ili poništavanje pravi novi zapis. Odluke čekaju sledeće izdanje i ne menjaju produkciju. Odluke se donose u \u201eZa odluku\u201c.");
     const filters = el("div", "catalogViews");
     for (const [key, label] of DECISION_FILTERS) {
       const b = el("button", key === decisionFilter ? "btn primary small" : "btn small", label);
@@ -1121,137 +1116,202 @@
     container.append(box);
   }
 
-  // ---------------- Inbox "čeka te" ----------------
+  // ---------------- "Za odluku" (ticket 20): every article without a class, one pass, decided at once ----------------
 
-  function inboxForm(slot, v, kind) {
+  let inboxFilter = "items";
+  const INBOX_FILTERS = [["items", "Za odluku"], ["snoozed", "Odloženo"], ["dormant", "Uspavano (dugo se ne prodaje)"]];
+
+  function classForm(slot, v, star, proposalId) {
     slot.replaceChildren();
-    const box = el("div", "catalogAsk");
+    const box = el("div", "catalogAsk catalogClassForm");
     const msg = el("span", "catalogPasteMsg");
-    const note = el("input", "catalogReason");
-    note.placeholder = "Napomena (nije obavezno)";
-    let read = () => ({});
-    if (kind === "classes") {
-      const modelPick = el("select");
-      const classPick = el("select");
-      const fill = () => classPick.replaceChildren(new Option("Izaberi klasu…", ""), ...(classChoices[modelPick.value] || []).map((n) => new Option(n, n)));
-      modelPick.append(...Object.keys(classChoices).map((m) => new Option(m, m)));
-      modelPick.onchange = fill;
-      fill();
-      box.append(modelPick, classPick);
-      read = () => {
-        if (!classPick.value) throw new Error("Izaberi klasu.");
-        return { links: [{ model: modelPick.value, class: classPick.value }] };
-      };
-    } else if (kind === "merge") {
-      const pick = el("input", "catalogReason");
-      pick.placeholder = "Ime postojećeg artikla";
-      const list = el("datalist");
-      list.id = `catalogMerge${v.identity_id}`;
-      pick.setAttribute("list", list.id);
-      getJson("/api/catalog/articles?state=tracked").then((d) => {
-        const seen = new Set();
-        for (const a of d.items) if (a.article_id !== v.article_id && !seen.has(a.name)) { seen.add(a.name); list.append(new Option(a.name, a.name)); }
-        pick._items = d.items;
-      });
-      box.append(pick, list);
-      read = () => {
-        const hit = (pick._items || []).find((a) => a.name === pick.value.trim());
-        if (!hit) throw new Error("Izaberi artikal sa spiska.");
-        return { into: hit.article_id };
-      };
-    }
-    const save = el("button", "btn primary small", "Pošalji");
+    const modelPick = el("select");
+    const classPick = el("select");
+    const fill = () => classPick.replaceChildren(new Option("Izaberi klasu…", ""), ...(classChoices[modelPick.value] || []).map((n) => new Option(n, n)));
+    modelPick.append(...Object.keys(classChoices).map((m) => new Option(m, m)));
+    modelPick.onchange = fill;
+    fill();
+    const unsure = el("input", "catalogReason");
+    unsure.placeholder = "Šta nije sigurno, npr. nije viđeno na snimku / nova varijacija, treba dotrenirati";
+    const reason = el("input", "catalogReason");
+    reason.placeholder = "Zašto (obavezno)";
+    const save = el("button", "btn primary small", star ? "Sačuvaj sa zvezdicom" : "Sačuvaj");
     const cancel = el("button", "btn small", "Odustani");
     save.onclick = async () => {
       save.disabled = true;
       try {
-        const change = read();
-        if (kind === "new_class") change.note = note.value.trim();
-        await decide({ kind: "propose", identity_id: v.identity_id, article_id: v.article_id, payload: { kind, change }, reason: note.value.trim() || "predlog labelera" });
-        showToast("Poslato adminu.");
+        if (!classPick.value) throw new Error("Izaberi klasu.");
+        if (star && !unsure.value.trim()) throw new Error("Upiši šta nije sigurno.");
+        const payload = { links: [{ model: modelPick.value, class: classPick.value }], mode: "fallback",
+          provisional: star ? unsure.value.trim() : null };
+        if (proposalId) payload.from_proposal = proposalId;
+        await decide({ kind: "classes", identity_id: v.identity_id, article_id: v.article_id, payload, reason: reason.value.trim() });
+        showToast(star ? "Sačuvano sa zvezdicom." : "Sačuvano.");
         loadClasses();
       } catch (e) { msg.textContent = e.message; save.disabled = false; }
     };
     cancel.onclick = () => slot.replaceChildren();
-    box.append(note, save, cancel, msg);
+    box.append(modelPick, classPick);
+    if (star) box.append(unsure);
+    box.append(reason, save, cancel, msg);
     slot.append(box);
+  }
+
+  function proposalBox(v, slot) {
+    const p = v.proposal;
+    const box = el("div", "catalogMiroText");
+    const who = p.actor ? `, ${p.actor}` : "";
+    box.append(el("div", "", `Predlog${who}: ${p.text}.${p.reason ? ` Zašto: ${p.reason}` : ""}`));
+    const buttons = el("div", "catalogMiroButtons");
+    const accept = el("button", "btn primary small", "Prihvati predlog");
+    accept.onclick = () => askReason(slot, "Zašto (može ostati ovako)", async (reason) => {
+      const payload = { ...(p.change || {}), from_proposal: p.decision_id };
+      const body = { kind: p.kind, identity_id: v.identity_id, article_id: v.article_id, payload, reason: reason || "prihvaćen predlog" };
+      if (p.kind === "ignore") { delete body.identity_id; body.payload = { from_proposal: p.decision_id }; }
+      await decide(body);
+    }, "prihvaćen predlog");
+    const reject = el("button", "btn small", "Odbij predlog");
+    reject.onclick = () => askReason(slot, "Zašto odbijaš?", async (reason) => {
+      await decide({ kind: "reject", target_id: p.decision_id, reason });
+    });
+    if (p.kind === "new_class") accept.onclick = () => classTargetForm(slot, { identity_id: v.identity_id, article_id: v.article_id, proposal_id: p.decision_id });
+    buttons.append(accept, reject);
+    box.append(buttons);
+    return box;
+  }
+
+  function decideCard(v) {
+    const card = el("div", "catalogFinding");
+    const head = el("div", "catalogFindingTitle", `${v.name} `);
+    if (v.state === "dormant") head.append(el("span", "catalogTag", "uspavano"));
+    if (!v.code) head.append(el("span", "catalogTag", "nije prodavano"));
+    if (v.clip) head.append(el("span", ["missing", "late"].includes(v.clip.status) ? "catalogTag warn" : "catalogTag", v.clip.label));
+    if (v.snoozed_until) head.append(el("span", "catalogTag", `odloženo do ${formatDate(v.snoozed_until)}`));
+    card.append(head);
+    const sold = v.code ? `prodato ${formatQty(v.sold)} · poslednja prodaja ${formatDate(v.last_sale)}` : "nije prodavano";
+    card.append(el("div", "catalogSubhead", `Šifra ${v.code || "nema"} · ${sold}`));
+    const slot = el("div");
+    const proposalId = v.proposal ? v.proposal.decision_id : null;
+    if (v.proposal) card.append(proposalBox(v, slot));
+    const buttons = el("div", "catalogMiroButtons");
+    const x = el("button", "btn small", "Ne pratimo");
+    x.title = "Hrana, cigarete i sve što kamera ne prati. Ide na blacklist.";
+    x.onclick = () => askReason(slot, "Napomena (nije obavezno), npr. hrana", async (reason) => {
+      const body = { kind: "ignore", article_id: v.article_id, reason };
+      if (proposalId) body.payload = { from_proposal: proposalId };
+      await decide(body);
+    });
+    const existing = el("button", "btn small", "Postojeća klasa");
+    existing.title = "Sigurni smo: piće je isto kao postojeća klasa";
+    existing.onclick = () => classForm(slot, v, false, proposalId);
+    const starred = el("button", "btn small", "Predloži klasu (*)");
+    starred.title = "Verovatno ta klasa, ali nije sigurno ili treba dotrenirati novu varijaciju. Dobija zvezdicu.";
+    starred.onclick = () => classForm(slot, v, true, proposalId);
+    const fresh = el("button", "btn small", "Nova klasa");
+    fresh.title = "Piće koje model ne zna: otvara se nova klasa na kraju liste";
+    fresh.onclick = () => classTargetForm(slot, { identity_id: v.identity_id, article_id: v.article_id, proposal_id: proposalId || undefined });
+    const later = el("button", "btn small", "Odloži za sada");
+    later.title = "Nestaje sa liste i vraća se posle 30 dana";
+    later.onclick = async () => {
+      try { await postJson(`/api/catalog/inbox/${v.identity_id}/snooze`, { actor: person(), role: roleSelect.value }); showToast("Odloženo na 30 dana."); loadClasses(); }
+      catch (e) { showToast(e.message); }
+    };
+    const open = el("button", "btn small", "Otvori karticu");
+    open.title = "Artikal, slike, istorija; snimak ako postoji";
+    open.onclick = () => showArticle(v.article_id);
+    buttons.append(x, existing, starred, fresh);
+    if (!v.snoozed_until) buttons.append(later);
+    buttons.append(open);
+    if (v.clip && ["ready", "seen"].includes(v.clip.status)) {
+      const watch = el("button", "btn primary small", "Pogledaj snimak");
+      watch.onclick = () => clipViewer(slot, v.identity_id);
+      buttons.prepend(watch);
+    }
+    card.append(buttons, slot);
+    return card;
+  }
+
+  function provisionalCard(v) {
+    const card = el("div", "catalogFinding");
+    const head = el("div", "catalogFindingTitle", `${v.name} `);
+    head.append(el("span", "catalogTag warn", "*"));
+    card.append(head);
+    card.append(el("div", "catalogSubhead", `${v.mapping} · ${v.provisional_reason || "bez napomene"}`));
+    const slot = el("div");
+    const buttons = el("div", "catalogMiroButtons");
+    const confirm = el("button", "btn small", "Skini zvezdicu");
+    confirm.title = "Provereno: klasa je sigurna";
+    confirm.onclick = () => askReason(slot, "Kako je provereno? (obavezno)", async (reason) => {
+      const links = v.classes.map((c) => { const [m, ...rest] = c.split("."); return { model: m, class: rest.join(".") }; });
+      await decide({ kind: "classes", identity_id: v.identity_id, article_id: v.article_id, reason,
+        payload: { links, mode: v.mapping_mode === "any" ? "any" : "fallback", provisional: null } });
+    });
+    const open = el("button", "btn small", "Otvori karticu");
+    open.onclick = () => showArticle(v.article_id);
+    buttons.append(confirm, open);
+    card.append(buttons, slot);
+    return card;
+  }
+
+  function newClassCard(v) {
+    const card = el("div", "catalogFinding");
+    const head = el("div", "catalogFindingTitle", `${v.name} `);
+    head.append(el("span", v.flow.stage === "waiting_class" ? "catalogTag warn" : "catalogTag", v.flow.label));
+    card.append(head);
+    const where = v.flow.class ? `klasa ${v.flow.model}.${v.flow.class}` : (v.flow.note ? `napomena: ${v.flow.note}` : "klasa još nije izabrana");
+    const images = v.flow.raw_images ? ` · označenih slika: ${v.flow.raw_images}` : "";
+    card.append(el("div", "catalogSubhead", `Šifra ${v.code || "nema"} · ${where}${images}`));
+    const slot = el("div");
+    const buttons = el("div", "catalogMiroButtons");
+    if (v.flow.stage === "waiting_class") {
+      const openBtn = el("button", "btn primary small", "Otvori klasu");
+      openBtn.onclick = () => classTargetForm(slot, { identity_id: v.identity_id, article_id: v.article_id, proposal_id: v.flow.proposal_id });
+      buttons.append(openBtn);
+    }
+    const open = el("button", "btn small", "Otvori karticu");
+    open.onclick = () => showArticle(v.article_id);
+    buttons.append(open);
+    if (v.clip && ["ready", "seen"].includes(v.clip.status)) {
+      const watch = el("button", "btn small", "Snimak i slanje na označavanje");
+      watch.onclick = () => clipViewer(slot, v.identity_id);
+      buttons.append(watch);
+    }
+    card.append(buttons, slot);
+    return card;
   }
 
   async function renderInbox(data) {
     await loadChoices();
-    const title = el("h2", "catalogTitle", "Čeka te ");
+    const title = el("h2", "catalogTitle", "Za odluku ");
     title.append(el("span", "catalogCount", `${data.counts.waiting} artikala`));
     const intro = el("div", "catalogSubhead",
-      `Artikli koji se prodaju, a nemaju klasu. Najprodavaniji su prvi. Poslato adminu: ${data.counts.proposed}, čeka novu klasu: ${data.counts.waiting_class}, odloženo: ${data.counts.snoozed}.`);
-    const nodes = [title, intro];
+      "Svaki artikal iz kase koji nema klasu. Za svaki izaberi jedno: Ne pratimo (blacklist), Postojeća klasa (sigurno), " +
+      "Predloži klasu (*) (verovatno, treba proveriti ili dotrenirati), Nova klasa, ili Odloži za sada (vraća se za 30 dana). " +
+      "Odluka važi odmah i upisuje se u Istoriju odluka.");
+    const filters = el("div", "catalogViews");
+    for (const [key, label] of INBOX_FILTERS) {
+      const count = { items: data.counts.waiting, snoozed: data.counts.snoozed, dormant: data.counts.dormant }[key];
+      const b = el("button", key === inboxFilter ? "btn primary small" : "btn small", `${label} (${count})`);
+      b.onclick = () => { inboxFilter = key; renderInbox(data); };
+      filters.append(b);
+    }
+    const nodes = [title, intro, filters];
+    const list = data[inboxFilter] || [];
+    if (!list.length) nodes.push(el("div", "catalogHint", inboxFilter === "items" ? "Ništa ne čeka odluku. Bravo!" : "Nema artikala."));
+    list.forEach((v) => nodes.push(decideCard(v)));
     if (data.new_class.length) {
-      nodes.push(el("h3", "catalogVarHead", `Nova klasa (${data.new_class.length})`));
+      nodes.push(el("h3", "catalogVarHead", `Nova klasa u toku (${data.new_class.length})`));
       nodes.push(el("div", "catalogSubhead", "Put novog pića: Čeka klasu → U označavanju → Čeka trening → Praćeno."));
-      for (const v of data.new_class) {
-        const card = el("div", "catalogFinding");
-        const head = el("div", "catalogFindingTitle", `${v.name} `);
-        head.append(el("span", v.flow.stage === "waiting_class" ? "catalogTag warn" : "catalogTag", v.flow.label));
-        card.append(head);
-        const where = v.flow.class ? `klasa ${v.flow.model}.${v.flow.class}` : (v.flow.note ? `napomena: ${v.flow.note}` : "klasa još nije izabrana");
-        const images = v.flow.raw_images ? ` · označenih slika: ${v.flow.raw_images}` : "";
-        card.append(el("div", "catalogSubhead", `Šifra ${v.code || "nema"} · ${where}${images}`));
-        const slot = el("div");
-        const buttons = el("div", "catalogMiroButtons");
-        if (isAdmin() && v.flow.stage === "waiting_class") {
-          const openBtn = el("button", "btn primary small", "Otvori klasu");
-          openBtn.onclick = () => classTargetForm(slot, { identity_id: v.identity_id, article_id: v.article_id, proposal_id: v.flow.proposal_id });
-          buttons.append(openBtn);
-        }
-        const open = el("button", "btn small", "Otvori karticu");
-        open.onclick = () => showArticle(v.article_id);
-        buttons.append(open);
-        if (v.clip && ["ready", "seen"].includes(v.clip.status)) {
-          const watch = el("button", "btn small", "Snimak i slanje na označavanje");
-          watch.onclick = () => clipViewer(slot, v.identity_id);
-          buttons.append(watch);
-        }
-        card.append(buttons, slot);
-        nodes.push(card);
-      }
-      nodes.push(el("h3", "catalogVarHead", "Bez klase"));
+      data.new_class.forEach((v) => nodes.push(newClassCard(v)));
     }
-    if (!data.items.length) nodes.push(el("div", "catalogHint", "Ništa ne čeka. Bravo!"));
-    for (const v of data.items) {
-      const card = el("div", "catalogFinding");
-      const itemHead = el("div", "catalogFindingTitle", `${v.name} `);
-      if (v.clip) itemHead.append(el("span", ["missing", "late"].includes(v.clip.status) ? "catalogTag warn" : "catalogTag", v.clip.label));
-      card.append(itemHead);
-      card.append(el("div", "catalogSubhead", `Šifra ${v.code || "nema"} · prodato ${formatQty(v.sold)} · poslednja prodaja ${formatDate(v.last_sale)}`));
-      const slot = el("div");
-      const buttons = el("div", "catalogMiroButtons");
-      const x = el("button", "btn small", "X Ne pratimo");
-      x.title = "Hrana, cigarete i sve što kamera ne prati";
-      x.onclick = () => askReason(slot, "Napomena (nije obavezno), npr. hrana", async (reason) => {
-        await decide({ kind: "ignore", article_id: v.article_id, reason });
-      });
-      const propose = el("button", "btn small", "Predloži klasu");
-      propose.onclick = () => inboxForm(slot, v, "classes");
-      const same = el("button", "btn small", "Isto kao postojeći artikal");
-      same.onclick = () => inboxForm(slot, v, "merge");
-      const fresh = el("button", "btn small", "Treba nova klasa");
-      fresh.onclick = () => inboxForm(slot, v, "new_class");
-      const later = el("button", "btn small", "Odloži");
-      later.title = "Vraća se pri sledećoj prodaji ili za 14 dana";
-      later.onclick = async () => {
-        try { await postJson(`/api/catalog/inbox/${v.identity_id}/snooze`, { actor: person(), role: roleSelect.value }); showToast("Odloženo."); loadClasses(); }
-        catch (e) { showToast(e.message); }
-      };
-      const open = el("button", "btn small", "Otvori karticu (slika)");
-      open.onclick = () => showArticle(v.article_id);
-      buttons.append(x, propose, same, fresh, later, open);
-      if (v.clip && ["ready", "seen"].includes(v.clip.status)) {
-        const watch = el("button", "btn primary small", "Pogledaj snimak");
-        watch.onclick = () => clipViewer(slot, v.identity_id);
-        buttons.prepend(watch);
-      }
-      card.append(buttons, slot);
-      nodes.push(card);
-    }
+    nodes.push(el("h3", "catalogVarHead", `Privremeno (*) (${data.provisional.length})`));
+    nodes.push(el("div", "catalogSubhead warn",
+      "Podsetnik: procedura za potvrdu zvezdice još ne postoji (kako se skupi snimak, ko dooznači, kada se dotrenira). Zapisano u BACKLOG."));
+    if (!data.provisional.length) nodes.push(el("div", "catalogHint small", "Nema artikala sa zvezdicom."));
+    data.provisional.forEach((v) => nodes.push(provisionalCard(v)));
+    const history = el("button", "btn small", "Istorija odluka →");
+    history.onclick = () => setView("decisions");
+    nodes.push(history);
     body.replaceChildren(...nodes);
   }
 
@@ -1941,11 +2001,10 @@
     viewReport.classList.toggle("hidden", !admin);
     viewMiro.classList.toggle("hidden", !admin);
     viewEvidence.classList.toggle("hidden", !admin);
-    viewDecisions.classList.toggle("hidden", !admin);
     viewModelCards.classList.toggle("hidden", !admin);
     viewReleases.classList.toggle("hidden", !admin);
     viewFindings.classList.toggle("hidden", !admin);
-    if (!admin && ["report", "miro", "evidence", "decisions", "modelcards", "releases", "findings"].includes(view)) setView("classes");
+    if (!admin && ["report", "miro", "evidence", "modelcards", "releases", "findings"].includes(view)) setView("inbox");
     else if (openArticle !== null && !panel.classList.contains("hidden")) showArticle(openArticle);
     else if (!panel.classList.contains("hidden")) loadClasses();
   }
@@ -1960,7 +2019,6 @@
   viewEvidence.onclick = () => setView("evidence");
   viewNoImage.onclick = () => setView("noimage");
   viewArticles.onclick = () => setView("articles");
-  viewDecisions.classList.toggle("hidden", roleSelect.value !== "admin");
   viewDecisions.onclick = () => setView("decisions");
   viewReport.onclick = () => setView("report");
   viewModelCards.classList.toggle("hidden", roleSelect.value !== "admin");
@@ -1974,8 +2032,7 @@
   modelSelect.onchange = () => { selectedClass = null; selectedVariation = null; openCardFile = null; loadClasses(); };
   viewClasses.onclick = () => setView("classes");
   viewUnclassified.onclick = () => setView("unclassified");
-  tab.onclick = () => { setOpen(true); tabInbox.classList.remove("tabActive"); if (view === "inbox") setView("classes"); refresh(); };
-  tabInbox.onclick = () => { setOpen(true); tab.classList.remove("tabActive"); tabInbox.classList.add("tabActive"); setView("inbox"); };
+  tab.onclick = () => { setOpen(true); setView("inbox"); refresh(); };
   tabs.addEventListener("click", (e) => {
     const button = e.target.closest(".tabBtn");
     if (button && button !== tab && button !== tabInbox) { setOpen(false); tabInbox.classList.remove("tabActive"); }

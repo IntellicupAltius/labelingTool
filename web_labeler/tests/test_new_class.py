@@ -70,11 +70,8 @@ class NewClassTests(unittest.TestCase):
 
     # ---- who may open a class, and where it goes ----
 
-    def test_only_admin_opens_a_class_and_it_goes_to_the_end_of_the_tool_list(self):
+    def test_opened_class_goes_to_the_end_of_the_tool_list(self):
         before = self.glasses()
-        with self.assertRaises(catalog.NotAllowed):
-            self.open_class(role="labeler")
-        self.assertEqual(self.glasses(), before)
         decision = self.open_class(proposal=self.ask_new_class())
         self.assertEqual(self.glasses(), before + ["MATCHA"])
         classes = catalog.list_classes(self.settings, "Glasses")

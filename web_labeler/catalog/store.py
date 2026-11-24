@@ -1903,7 +1903,7 @@ _DECISION_SELECT = ("SELECT d.decision_id, d.kind, d.article_id, d.identity_id, 
                     "d.actor, d.role, d.created_at, d.valid_from, i.code, i.name, a.display_name FROM decisions d "
                     "LEFT JOIN pos_identities i ON i.identity_id = d.identity_id "
                     "LEFT JOIN articles a ON a.article_id = d.article_id WHERE d.venue_id = ? ")
-PROPOSAL_STATUS_LABELS = {"pending": "Čeka odluku", "applied": "Primenjen", "rejected": "Odbijen"}
+PROPOSAL_STATUS_LABELS = {"pending": "Čeka odluku", "applied": "Rešen", "rejected": "Odbijen"}
 
 
 def _fmt_day(value: str) -> str:
@@ -2892,25 +2892,49 @@ def mark_day(settings: CatalogSettings, day: str, action: str, actor: Any, role:
 
 # ---------------- Inbox "čeka te" (ticket 14) ----------------
 
-SNOOZE_DAYS = 14
+SNOOZE_DAYS = 30  # "Odloži za sada": back in the list after 30 days (owner 24.11.2026)
 
 
 def _snoozed(conn: sqlite3.Connection, venue: str, current: Mapping[int, _decisions.Variation], today: str) -> Dict[int, str]:
-    """Snoozed until 14 days pass or the article is sold again, whichever is first."""
+    """Snoozed until the day written with the snooze (30 days); a new sale does not bring it back earlier."""
     out: Dict[int, str] = {}
     for identity_id, until, at in conn.execute(
             "SELECT identity_id, until_day, at FROM inbox_snoozes WHERE venue_id = ? ORDER BY snooze_id", (venue,)):
-        v = current.get(identity_id)
-        sold_again = v is not None and v.last_sale and v.last_sale[:10] > at[:10]
-        if until > today and not sold_again:
+        if until > today:
             out[identity_id] = until
         else:
             out.pop(identity_id, None)
     return out
 
 
+def _proposal_view(d: _decisions.Decision, names: Mapping[int, str], meta: Mapping[int, Tuple[Any, Any, Any]]) -> Dict[str, Any]:
+    kind = d.payload.get("kind")
+    change = d.payload.get("change") or {}
+    if kind == "classes":
+        where = ", ".join(f"{l['model']}.{l['class']}" for l in change.get("links") or []) or "bez klase"
+        text = f"klasa {where}" + (" (sa zvezdicom)" if change.get("provisional") else "")
+    elif kind == "ignore":
+        text = "ne pratimo (X)"
+    elif kind == "merge":
+        text = f"isto kao {names.get(change.get('into'), change.get('into'))}"
+    elif kind == "new_class":
+        text = "treba nova klasa" + (f": {change['note']}" if change.get("note") else "")
+    else:
+        text = KIND_TEXT.get(kind, str(kind))
+    reason, actor, created_at = meta.get(d.decision_id, (None, None, None))
+    return {"decision_id": d.decision_id, "kind": kind, "change": change, "text": text, "reason": reason,
+            "actor": actor, "created_at": created_at}
+
+
+KIND_TEXT = {"provisional": "zvezdica"}
+
+
 def list_inbox(settings: CatalogSettings, today: Optional[str] = None) -> Dict[str, Any]:
-    """What waits for the labeler: sold articles without a class, nobody proposed anything yet, not snoozed."""
+    """Ticket 20, "Za odluku": everything without a class waits here, sold or not, with any open proposal shown on it.
+
+    Long unsold (dormant) articles and snoozed ones are filters, not the main list; X (ignored) is decided already.
+    The new class path and the provisional (*) articles have their own sections on the same screen.
+    """
     today = today or _today()
     venue = settings.venue_id
     with _open_for_read(settings) as conn:
@@ -2918,39 +2942,49 @@ def list_inbox(settings: CatalogSettings, today: Optional[str] = None) -> Dict[s
         decisions = _load_decisions(conn, venue)
         snoozed = _snoozed(conn, venue, current, today)
         evidence = _evidence_by_identity(conn, venue)
-    waiting_ids, waiting_articles, new_class = set(), set(), set()
+        names = dict(conn.execute("SELECT article_id, display_name FROM articles WHERE venue_id = ?", (venue,)).fetchall())
+        meta = {i: (r, a, c) for i, r, a, c in conn.execute(
+            "SELECT decision_id, reason, actor, created_at FROM decisions WHERE venue_id = ? AND kind = 'propose'", (venue,))}
+    by_identity: Dict[int, _decisions.Decision] = {}
+    by_article: Dict[int, _decisions.Decision] = {}
+    new_class = set()
     for d in decisions:
         if d.kind == "propose" and _proposal_status(d.decision_id, decisions) == "pending":
-            if d.identity_id:
-                waiting_ids.add(d.identity_id)
             if d.payload.get("kind") == "new_class" and d.identity_id:
                 new_class.add(d.identity_id)
-            elif d.article_id and not d.identity_id:
-                waiting_articles.add(d.article_id)
+            elif d.identity_id:
+                by_identity[d.identity_id] = d
+            elif d.article_id:
+                by_article[d.article_id] = d
     flows = _flows(settings, current, decisions)
-    items, counts = [], Counter()
-    for v in _sorted(x for x in current.values() if x.code is not None and x.state == "pending" and x.sold > 0):
-        if v.target:
-            continue  # has its class, waits for labeling or training: listed below with its step
-        if v.identity_id in new_class:
-            counts["waiting_class"] += 1
-        elif v.identity_id in waiting_ids or v.article_id in waiting_articles:
-            counts["proposed"] += 1
-        elif v.identity_id in snoozed:
-            counts["snoozed"] += 1
+    items, dormant, later = [], [], []
+    for v in _sorted(current.values()):
+        if v.state in ("tracked", "ignored") or v.target or v.identity_id in new_class:
+            continue
+        proposal = by_identity.get(v.identity_id) or by_article.get(v.article_id) or by_article.get(v.source_article_id)
+        item = _variation(v, evidence)
+        item["proposal"] = _proposal_view(proposal, names, meta) if proposal else None
+        if v.identity_id in snoozed:
+            item["snoozed_until"] = snoozed[v.identity_id]
+            later.append(item)
+        elif v.state == "pending" or proposal is not None:
+            items.append(item)
         else:
-            items.append(_variation(v, evidence))
+            dormant.append(item)
+    provisional = [_variation(v, evidence) for v in _sorted(current.values()) if v.provisional and v.state != "ignored"]
     path = [_variation(v, evidence, flows[v.identity_id]) for v in _sorted(current.values())
             if v.identity_id in flows and flows[v.identity_id]["stage"] != "tracked"]
     clip_status = _clips.read_status(settings.db_path.parent) if settings.clips and settings.db_path else {}
-    for item in items + path:
+    for item in items + dormant + later + path:
         st = clip_status.get(item["identity_id"])
         item["clip"] = {"status": st, "label": _clips.CLIP_STATUS_LABELS[st]} if st in _clips.CLIP_STATUS_LABELS else None
     order = list(FLOW_LABELS)
     path.sort(key=lambda i: order.index(i["flow"]["stage"]))
-    return {"items": items, "new_class": path, "flow_labels": FLOW_LABELS,
-            "counts": {"waiting": len(items), "proposed": counts["proposed"], "waiting_class": counts["waiting_class"],
-                       "snoozed": counts["snoozed"], "new_class": len(path)}}
+    return {"items": items, "dormant": dormant, "snoozed": later, "provisional": provisional, "new_class": path,
+            "flow_labels": FLOW_LABELS, "snooze_days": SNOOZE_DAYS,
+            "counts": {"waiting": len(items), "proposed": sum(1 for i in items if i["proposal"]), "dormant": len(dormant),
+                       "snoozed": len(later), "provisional": len(provisional), "new_class": len(path),
+                       "waiting_class": sum(1 for i in path if i["flow"]["stage"] == "waiting_class")}}
 
 
 def snooze(settings: CatalogSettings, identity_id: int, actor: Any, role: Any, reason: Any = "") -> Dict[str, Any]:

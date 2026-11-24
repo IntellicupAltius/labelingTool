@@ -11,7 +11,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 EFFECT_KINDS = ("classes", "provisional", "ignore", "merge", "class_target")
 KINDS = EFFECT_KINDS + ("revoke", "propose", "reject")
-LABELER_KINDS = {"ignore", "propose"}
+# Owner 24.11.2026 (ticket 20): whoever is at the tool decides, one pass; the role only opens admin screens.
+LABELER_KINDS = set(KINDS)
 MODES = ("fallback", "any")
 IGNORE_WHY = {"assortment": "izbačeno iz asortimana"}  # X with a kind of reason; no kind = plain X
 

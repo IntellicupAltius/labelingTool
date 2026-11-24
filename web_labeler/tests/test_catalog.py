@@ -856,15 +856,14 @@ class DecisionTests(AssortmentFixture):
     def set_class(self, identity, cls, **kw):
         return self.decide("classes", identity_id=identity, payload={"links": [{"model": "glasses", "class": cls}]}, **kw)
 
-    def test_labeler_may_only_mark_x_or_propose(self):
-        with self.assertRaises(catalog.NotAllowed):
-            self.set_class(self.burger["identity_id"], "CASA", role="labeler")
-        with self.assertRaises(catalog.NotAllowed):
-            self.decide("merge", role="labeler", article_id=self.burger["article_id"], payload={"into": 1})
+    def test_whoever_is_at_the_tool_decides(self):
+        """Ticket 20 (owner 24.11.2026): one pass, Goca or the owner; the decision counts at once and can be revoked."""
+        decision = self.set_class(self.burger["identity_id"], "CASA", role="labeler")
+        self.assertEqual((decision["role"], decision["actor"]), ("labeler", "Goca"))
         x = self.decide("ignore", role="labeler", article_id=self.burger["article_id"], reason="", valid_from="2030-01-01")
-        self.assertEqual((x["role"], x["actor"], x["valid_from"]), ("labeler", "Goca", store._today()))
-        with self.assertRaises(catalog.NotAllowed):
-            self.decide("revoke", role="labeler", target_id=x["decision_id"])
+        self.assertEqual(x["valid_from"], store._today())  # only the admin may date a decision ahead
+        undo = self.decide("revoke", role="labeler", target_id=x["decision_id"])
+        self.assertEqual(undo["kind"], "revoke")
         proposal = self.decide("propose", role="labeler", identity_id=self.burger["identity_id"],
                                payload={"kind": "classes", "change": {"links": [{"model": "glasses", "class": "CASA"}]}})
         self.assertEqual(proposal["status"], "pending")
