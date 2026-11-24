@@ -133,3 +133,14 @@
 .catalogCheck ul { margin: 4px 0 0; padding-left: 18px; color: var(--text); font-weight: 400; line-height: 1.5; }
 .catalogChangeList { margin: 0 0 12px; padding-left: 18px; line-height: 1.55; }
 .catalogChangeList li.warn { color: #fbbf24; }
+
+/* footage card (ticket 17) */
+.catalogClip { margin-top: 10px; padding: 10px; border: 1px solid var(--border, #334155); border-radius: 8px; }
+.catalogClipGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 8px 0; }
+.catalogClipCell { min-width: 0; }
+.catalogClipName { font-weight: 600; margin-bottom: 4px; }
+.catalogClipWrap { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; overflow: hidden; }
+.catalogClipWrap video, .catalogClipCanvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.catalogClipCanvas { pointer-events: none; }
+.catalogClipGrid.drawing .catalogClipCanvas { pointer-events: auto; cursor: crosshair; }
+.catalogClipSlider { flex: 1; min-width: 160px; }

@@ -645,6 +645,20 @@ function resetWorkspaceUI(message) {
   if (message) setStatus(message);
 }
 
+// KATALOG-1 ticket 18: a clip sent from the Catalog comes with its model and class already chosen.
+function applyCatalogPreselect(hint) {
+  state.preselectClass = null;
+  const pre = hint && hint.catalog && hint.preselect;
+  if (!pre) return;
+  for (const id of ["modelSelect", "modalModelSelect"]) {
+    const sel = $(id);
+    if (!sel) continue;
+    const opt = Array.from(sel.options).find(o => o.value.toLowerCase() === String(pre.model).toLowerCase());
+    if (opt) sel.value = opt.value;
+  }
+  state.preselectClass = pre.class || null;
+}
+
 function renderCaseInfoBanner() {
   const banner = document.getElementById("caseInfoBanner");
   if (!banner) return;
@@ -654,9 +668,10 @@ function renderCaseInfoBanner() {
     return;
   }
   const isUV  = (info.case_type === "UV");
-  const color = isUV ? "#f97316" : "#3b82f6";
-  const bg    = isUV ? "rgba(249,115,22,0.12)" : "rgba(59,130,246,0.12)";
-  const badge = isUV ? "UV hallucination" : "MPI missing";
+  const isCatalog = (info.case_type === "KATALOG");
+  const color = isUV ? "#f97316" : (isCatalog ? "#22c55e" : "#3b82f6");
+  const bg    = isUV ? "rgba(249,115,22,0.12)" : (isCatalog ? "rgba(34,197,94,0.12)" : "rgba(59,130,246,0.12)");
+  const badge = isUV ? "UV hallucination" : (isCatalog ? "Novi artikal" : "MPI missing");
   const cls   = info.detected_class || info.target_class || "";
   banner.style.display = "block";
   banner.style.cssText = `display:block; padding:6px 12px; background:${bg}; border-left:3px solid ${color}; font-size:12px; color:#e2e8f0; line-height:1.5;`;
@@ -1870,7 +1885,7 @@ function togglePlay() {
 function openModalForRect(rect) {
   state.modalOpen = true;
   state.modalRect = rect;
-  state.modalSelectedClass = null;
+  state.modalSelectedClass = (state.mode === "video" && state.preselectClass) ? state.preselectClass : null;
   $("modalError").textContent = "";
   $("classFilter").value = "";
   $("backgroundCheck").checked = false;
@@ -3463,6 +3478,7 @@ async function init() {
     ]);
     state.hintData = (hintsRes && hintsRes.detected_class) ? hintsRes : null;
     state.caseInfo = (infoRes && infoRes.instruction) ? infoRes : null;
+    applyCatalogPreselect(state.hintData);
     renderCaseInfoBanner();
   }
 

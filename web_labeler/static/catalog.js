@@ -899,6 +899,12 @@
         fresh.onclick = () => { classTargetForm(formSlot, { identity_id: v.identity_id, article_id: v.article_id }); formSlot.scrollIntoView({ block: "nearest" }); };
         act.append(fresh);
       }
+      if (v.has_clips) {
+        const watch = el("button", "btn small", "Snimak");
+        watch.title = "Snimak prodaje sa 3 kamere; odavde i slanje na označavanje";
+        watch.onclick = () => { clipViewer(formSlot, v.identity_id); formSlot.scrollIntoView({ block: "nearest" }); };
+        act.append(watch);
+      }
       row.append(el("td", "", v.name), el("td", "", v.code || "nema"), el("td", "num", v.code ? formatQty(v.sold) : "nema"),
         el("td", "", formatDate(v.first_seen)), el("td", "", formatDate(v.last_seen)), el("td"), mapping, tags, imageCell(v), act);
       row.children[5].append(stateTag(v));
@@ -1188,6 +1194,11 @@
         const open = el("button", "btn small", "Otvori karticu");
         open.onclick = () => showArticle(v.article_id);
         buttons.append(open);
+        if (v.clip && ["ready", "seen"].includes(v.clip.status)) {
+          const watch = el("button", "btn small", "Snimak i slanje na označavanje");
+          watch.onclick = () => clipViewer(slot, v.identity_id);
+          buttons.append(watch);
+        }
         card.append(buttons, slot);
         nodes.push(card);
       }
@@ -1222,10 +1233,183 @@
       const open = el("button", "btn small", "Otvori karticu (slika)");
       open.onclick = () => showArticle(v.article_id);
       buttons.append(x, propose, same, fresh, later, open);
+      if (v.clip && ["ready", "seen"].includes(v.clip.status)) {
+        const watch = el("button", "btn primary small", "Pogledaj snimak");
+        watch.onclick = () => clipViewer(slot, v.identity_id);
+        buttons.prepend(watch);
+      }
       card.append(buttons, slot);
       nodes.push(card);
     }
     body.replaceChildren(...nodes);
+  }
+
+  // ---------------- Footage of a new article: 3 cameras, "Vidim ga", "Nije na snimku" (ticket 17) ----------------
+
+  function fmtSecond(t) {
+    const m = Math.floor(t / 60), sec = Math.floor(t % 60);
+    return `${m}:${String(sec).padStart(2, "0")}`;
+  }
+
+  async function clipViewer(slot, identityId) {
+    let card;
+    try { card = await getJson(`/api/catalog/clips/${identityId}`); }
+    catch (e) { showToast(e.message); return; }
+    renderClipCard(slot, card, 0);
+  }
+
+  function renderClipCard(slot, card, index) {
+    const box = el("div", "catalogClip");
+    if (!card.sales.length) {
+      box.append(el("div", "catalogHint", card.status_label === "Nema snimka"
+        ? "Nema snimka. Program traži sledeću prodaju ovog artikla."
+        : `${card.status_label}. Program sprema snimak.`));
+      slot.replaceChildren(box);
+      return;
+    }
+    const sale = card.sales[Math.min(index, card.sales.length - 1)];
+    const head = el("div", "catalogFindingTitle", `${sale.label} `);
+    head.append(el("span", "catalogCount", `prodaja ${index + 1} od ${card.sales.length}`));
+    if (sale.seen.length) head.append(el("span", "catalogTag", `viđeno: ${sale.seen.map((s) => s.camera).join(", ")}`));
+    const help = el("div", "catalogSubhead", "Snimak kreće od trenutka kucanja. Kad vidiš piće, klikni \"Vidim ga\" i prevuci pravougaonik oko njega na jednoj kameri.");
+    const grid = el("div", "catalogClipGrid");
+    const videos = [];
+    let drawing = false;
+    let chosen = null; // {channel, box:[x,y,w,h]}
+    const save = el("button", "btn primary small", "Sačuvaj");
+    save.disabled = true;
+    for (const cam of sale.cameras) {
+      const cell = el("div", "catalogClipCell");
+      cell.append(el("div", "catalogClipName", cam.name));
+      if (!cam.ready) {
+        cell.append(el("div", "catalogHint", "Snimak ove kamere se još priprema."));
+        grid.append(cell);
+        continue;
+      }
+      const wrap = el("div", "catalogClipWrap");
+      const video = document.createElement("video");
+      video.src = cam.url; video.muted = true; video.preload = "auto"; video.playsInline = true;
+      const canvas = el("canvas", "catalogClipCanvas");
+      wrap.append(video, canvas);
+      cell.append(wrap);
+      grid.append(cell);
+      videos.push(video);
+      let start = null;
+      const point = (ev) => {
+        const r = canvas.getBoundingClientRect();
+        return [Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height))];
+      };
+      const paint = (b) => {
+        canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (!b) return;
+        ctx.strokeStyle = "#facc15"; ctx.lineWidth = 3;
+        ctx.strokeRect(b[0] * canvas.width, b[1] * canvas.height, b[2] * canvas.width, b[3] * canvas.height);
+      };
+      canvas.onmousedown = (ev) => {
+        if (!drawing) return;
+        start = point(ev);
+        grid.querySelectorAll("canvas").forEach((c) => { if (c !== canvas) c.getContext("2d").clearRect(0, 0, c.width, c.height); });
+      };
+      canvas.onmousemove = (ev) => {
+        if (!drawing || !start) return;
+        const p = point(ev);
+        paint([Math.min(start[0], p[0]), Math.min(start[1], p[1]), Math.abs(p[0] - start[0]), Math.abs(p[1] - start[1])]);
+      };
+      canvas.onmouseup = (ev) => {
+        if (!drawing || !start) return;
+        const p = point(ev);
+        const b = [Math.min(start[0], p[0]), Math.min(start[1], p[1]), Math.abs(p[0] - start[0]), Math.abs(p[1] - start[1])];
+        start = null;
+        if (b[2] < 0.01 || b[3] < 0.01) { paint(null); return; }
+        chosen = { channel: cam.channel, box: b };
+        paint(b);
+        save.disabled = false;
+      };
+    }
+    // one set of controls for all cameras
+    const controls = el("div", "catalogMiroButtons");
+    const play = el("button", "btn small", "Pusti");
+    const slider = document.createElement("input");
+    slider.type = "range"; slider.min = "0"; slider.max = "600"; slider.step = "1"; slider.value = "0"; slider.className = "catalogClipSlider";
+    const clock = el("span", "catalogCount", "+0:00 od kucanja");
+    const speed = el("button", "btn small", "Brže ×4");
+    let rate = 1;
+    const lead = () => videos[0];
+    const syncAll = (t) => videos.forEach((v) => { if (Math.abs(v.currentTime - t) > 0.4) v.currentTime = t; });
+    if (videos.length) {
+      lead().addEventListener("loadedmetadata", () => { slider.max = String(Math.floor(lead().duration || 600)); });
+      lead().addEventListener("timeupdate", () => {
+        slider.value = String(Math.floor(lead().currentTime));
+        clock.textContent = `+${fmtSecond(lead().currentTime)} od kucanja`;
+        if (!lead().paused) syncAll(lead().currentTime);
+      });
+    }
+    play.onclick = () => {
+      if (!videos.length) return;
+      if (lead().paused) { syncAll(lead().currentTime); videos.forEach((v) => { v.playbackRate = rate; v.play(); }); play.textContent = "Pauza"; }
+      else { videos.forEach((v) => v.pause()); play.textContent = "Pusti"; }
+    };
+    slider.oninput = () => { const t = Number(slider.value); videos.forEach((v) => { v.currentTime = t; }); clock.textContent = `+${fmtSecond(t)} od kucanja`; };
+    speed.onclick = () => { rate = rate === 1 ? 4 : 1; videos.forEach((v) => { v.playbackRate = rate; }); speed.textContent = rate === 1 ? "Brže ×4" : "Normalno"; };
+    const seen = el("button", "btn primary small", "Vidim ga");
+    const cancel = el("button", "btn small", "Odustani");
+    cancel.style.display = "none"; save.style.display = "none";
+    seen.onclick = () => {
+      videos.forEach((v) => v.pause()); play.textContent = "Pusti";
+      drawing = true; chosen = null; save.disabled = true;
+      grid.classList.add("drawing");
+      seen.style.display = "none"; cancel.style.display = ""; save.style.display = "";
+      showToast("Prevuci pravougaonik oko pića na jednoj kameri.");
+    };
+    cancel.onclick = () => {
+      drawing = false; chosen = null; grid.classList.remove("drawing");
+      grid.querySelectorAll("canvas").forEach((c) => c.getContext("2d").clearRect(0, 0, c.width, c.height));
+      seen.style.display = ""; cancel.style.display = "none"; save.style.display = "none";
+    };
+    save.onclick = async () => {
+      if (!chosen) return;
+      try {
+        const result = await postJson(`/api/catalog/clips/${card.identity_id}/seen`, {
+          sale: sale.slug, channel: chosen.channel, second: lead().currentTime, box: chosen.box, actor: person(), role: roleSelect.value });
+        showToast("Sačuvano. Slika čeka potvrdu admina.");
+        renderClipCard(slot, result.card, index);
+      } catch (e) { showToast(e.message); }
+    };
+    const notHere = el("button", "btn small", "Nije na snimku");
+    notHere.title = "Pića nema na ovom snimku: prelazi se na sledeću prodaju";
+    notHere.onclick = async () => {
+      try {
+        const next = await postJson(`/api/catalog/clips/${card.identity_id}/not-visible`, { sale: sale.slug, actor: person(), role: roleSelect.value });
+        renderClipCard(slot, next, 0);
+      } catch (e) { showToast(e.message); }
+    };
+    const nav = el("span");
+    if (card.sales.length > 1) {
+      const other = el("button", "btn small", "Druga prodaja");
+      other.onclick = () => renderClipCard(slot, card, (index + 1) % card.sales.length);
+      nav.append(other);
+    }
+    const close = el("button", "btn small", "Zatvori");
+    close.onclick = () => { videos.forEach((v) => v.pause()); slot.replaceChildren(); };
+    controls.append(play, slider, clock, speed, seen, cancel, save, notHere, nav, close);
+    if (card.target && card.to_send) {
+      const send = el("button", "btn primary small", `Pošalji na označavanje (${card.to_send})`);
+      send.title = `Isečak 10 sekundi pre i posle svakog "Vidim ga", sa izabranim ${card.target.model} / ${card.target.class}`;
+      send.onclick = async () => {
+        try {
+          send.disabled = true;
+          showToast("Pravim isečke, može da potraje minut...");
+          const r = await postJson(`/api/catalog/clips/${card.identity_id}/send`, { actor: person(), role: roleSelect.value });
+          showToast(`Poslato ${r.sent} isečaka. Otvori ih u Labeler tabu: lista "katalog (za označavanje)".`);
+          clipViewer(slot, card.identity_id);
+        } catch (e) { send.disabled = false; showToast(e.message); }
+      };
+      controls.append(send);
+    }
+    box.append(head, help, grid, controls);
+    slot.replaceChildren(box);
   }
 
   // ---------------- Day table ----------------

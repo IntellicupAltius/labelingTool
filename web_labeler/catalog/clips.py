@@ -58,6 +58,12 @@ class ClipSettings:
     est_bytes_per_channel_minute: int = 45 * 1024 * 1024  # 2.7 GB per camera hour (Nov 2026 footage)
     attempts_before_missing: int = 2
     stop_hour: int = 22  # no new sale after this hour: the nightly sync (23:55) must find its lock free
+    previews: bool = True  # small H.264 copy per camera for the card (the NVR gives 4K HEVC browsers cannot play)
+    ffmpeg: str = "ffmpeg"
+    camera_names: Tuple[Tuple[int, str], ...] = ()
+    camera_tokens: Tuple[Tuple[int, str], ...] = ((1, "SANK_LEVO"), (2, "SANK_TOCILICA"), (3, "SANK_DESNO"))
+    labeling_videos_dir: Optional[Path] = None
+    cut_seconds: int = 10
     enabled: bool = False  # real NVR downloads only after the owner switches them on (catalog_clip_enabled)
 
     @classmethod
@@ -85,11 +91,29 @@ class ClipSettings:
                 extra[attr] = int(cfg[key])
         if cfg.get("catalog_clip_est_mb_per_channel_minute") is not None:
             extra["est_bytes_per_channel_minute"] = int(float(cfg["catalog_clip_est_mb_per_channel_minute"]) * 1024 * 1024)
+        if cfg.get("catalog_clip_previews") is not None:
+            extra["previews"] = bool(cfg["catalog_clip_previews"])
+        if isinstance(cfg.get("catalog_clip_camera_names"), dict):
+            extra["camera_names"] = tuple(sorted((int(k), str(v)) for k, v in cfg["catalog_clip_camera_names"].items()))
+        if isinstance(cfg.get("catalog_clip_camera_tokens"), dict):
+            extra["camera_tokens"] = tuple(sorted((int(k), str(v)) for k, v in cfg["catalog_clip_camera_tokens"].items()))
+        videos = str(cfg.get("videos_dir") or "").strip()
+        data_root = str(cfg.get("data_root") or "").strip()
+        if videos:
+            extra["labeling_videos_dir"] = Path(videos).expanduser()
+        elif data_root:
+            extra["labeling_videos_dir"] = Path(data_root).expanduser() / "videos"
         if cfg.get("catalog_clip_channels"):
             extra["channels"] = tuple(int(c) for c in cfg["catalog_clip_channels"])
         if cfg.get("catalog_clip_busy_patterns") is not None:
             extra["busy_patterns"] = tuple(str(p) for p in cfg["catalog_clip_busy_patterns"])
         return cls(**{**base.__dict__, **extra})
+
+    def camera_name(self, channel: int) -> str:
+        return dict(self.camera_names).get(int(channel), f"Kamera {channel}")
+
+    def camera_token(self, channel: int) -> str:
+        return dict(self.camera_tokens).get(int(channel), f"KAMERA_{channel}")
 
     def sale_estimate(self) -> int:
         return self.est_bytes_per_channel_minute * self.window_minutes * len(self.channels)
@@ -253,7 +277,36 @@ def download_sale(settings: ClipSettings, identity_id: int, sale: Sale, runner: 
             target.unlink()  # a stub the NVR sent back: not footage
     if not channels and folder.exists():
         remove_folder(settings, folder)
-    return {"channels": channels, "bytes": size, "folder": str(folder.relative_to(settings.root))}
+    previews = make_previews(settings, folder, channels) if channels else {}
+    return {"channels": channels, "bytes": size, "folder": str(folder.relative_to(settings.root)), "previews": previews}
+
+
+def preview_file(folder: Path, channel: int) -> Path:
+    return folder / f"preview_ch{channel}.mp4"
+
+
+def make_previews(settings: ClipSettings, folder: Path, channels: Mapping[str, str]) -> Dict[str, str]:
+    """A small copy per camera the browser can play (960 px wide, 10 fps, H.264). Failure only means no preview yet."""
+    out: Dict[str, str] = {}
+    if not settings.previews:
+        return out
+    for ch, rel in channels.items():
+        src = settings.root / rel
+        dst = preview_file(folder, int(ch))
+        tmp = dst.with_name(dst.stem + ".part.mp4")
+        try:
+            rc = subprocess.run([settings.ffmpeg, "-v", "error", "-y", "-i", str(src), "-an", "-vf", "scale=960:-2,fps=10",
+                                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
+                                 "-movflags", "+faststart", str(tmp)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600).returncode
+        except (OSError, subprocess.SubprocessError):
+            rc = 1
+        if rc == 0 and tmp.is_file() and tmp.stat().st_size > 0:
+            tmp.replace(dst)
+            out[str(ch)] = str(dst.relative_to(settings.root))
+        elif tmp.exists():
+            tmp.unlink()
+    return out
 
 
 def remove_folder(settings: ClipSettings, folder: Path) -> None:
@@ -280,6 +333,7 @@ class SaleState:
     status: str = "planned"  # planned | downloaded | missing | failed | deleted
     attempts: int = 0
     channels: Dict[str, str] = field(default_factory=dict)
+    previews: Dict[str, str] = field(default_factory=dict)
     bytes: int = 0
     folder: Optional[str] = None
     not_visible: bool = False
@@ -305,6 +359,9 @@ def fold_events(events: Sequence[Mapping[str, Any]], attempts_before_missing: in
         detail = e.get("detail") or {}
         if action == "downloaded":
             sale.status, sale.channels, sale.bytes, sale.folder = "downloaded", dict(detail.get("channels") or {}), int(e.get("bytes") or 0), e.get("folder")
+            sale.previews = dict(detail.get("previews") or {})
+        elif action == "preview":
+            sale.previews.update(detail.get("previews") or {})
         elif action == "failed":
             sale.attempts += 1
             sale.status = "missing" if sale.attempts >= attempts_before_missing else "failed"
@@ -453,11 +510,13 @@ def run_job(settings: Any, now: Optional[datetime] = None, dry_run: bool = False
             if result["channels"]:
                 budget["used"] += result["bytes"]
                 budget["failures_in_row"] = 0
-                sales[sale.key] = SaleState(sale.key, "downloaded", 0, result["channels"], result["bytes"], result["folder"])
+                sales[sale.key] = SaleState(sale.key, "downloaded", 0, result["channels"], result["previews"], result["bytes"],
+                                            result["folder"])
                 report["downloaded"].append({"identity_id": iid, "sale": sale.key, "channels": sorted(result["channels"]),
                                              "bytes": result["bytes"]})
                 log({"identity_id": iid, "action": "downloaded", "sale_time": sale.key, "day": sale.day,
-                     "bytes": result["bytes"], "folder": result["folder"], "detail": {"channels": result["channels"]}})
+                     "bytes": result["bytes"], "folder": result["folder"],
+                     "detail": {"channels": result["channels"], "previews": result["previews"]}})
                 return
             budget["failures_in_row"] += 1
             prev = sales.get(sale.key) or SaleState(sale.key)
@@ -495,6 +554,19 @@ def run_job(settings: Any, now: Optional[datetime] = None, dry_run: bool = False
                     break
             if report["stopped"]:
                 break
+        # 5. previews that failed earlier are tried again
+        report["previews"] = []
+        if clips.previews and not dry_run:
+            for iid, st in states.items():
+                for sale in st["sales"].values():
+                    if sale.status != "downloaded" or not sale.folder or set(sale.previews) >= set(sale.channels):
+                        continue
+                    missing = {c: r for c, r in sale.channels.items() if c not in sale.previews}
+                    made = make_previews(clips, clips.root / sale.folder, missing)
+                    if made:
+                        sale.previews.update(made)
+                        report["previews"].append({"identity_id": iid, "sale": sale.key, "channels": sorted(made)})
+                        log({"identity_id": iid, "action": "preview", "sale_time": sale.key, "detail": {"previews": made}})
         report["used_bytes"] = budget["used"]
         if findings and not dry_run:
             store.add_clip_events(settings, [], findings)
@@ -525,3 +597,23 @@ def read_status(folder: Path) -> Dict[int, str]:
         return {int(k): str(v) for k, v in data.get("status", {}).items()}
     except (OSError, ValueError):
         return {}
+
+
+# ---------------- cut for labeling (ticket 18) ----------------
+
+LABELING_BATCH = "handoff_katalog"
+
+
+def cut_clip(settings: ClipSettings, src: Path, start: float, seconds: float, dst: Path) -> None:
+    """Exact cut from the full camera file, re-encoded to H.264 mp4 (full resolution) so the labeling tool reads it."""
+    tmp = dst.with_name(dst.stem + ".part.mp4")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    rc = subprocess.run([settings.ffmpeg, "-v", "error", "-y", "-ss", f"{max(0.0, start):.2f}", "-i", str(src), "-t", f"{seconds:.2f}",
+                         "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+                         "-movflags", "+faststart", str(tmp)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=1800).returncode
+    if rc != 0 or not tmp.is_file() or tmp.stat().st_size == 0:
+        if tmp.exists():
+            tmp.unlink()
+        raise ClipError("Isečak nije napravljen.")
+    tmp.replace(dst)

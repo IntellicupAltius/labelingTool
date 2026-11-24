@@ -3,6 +3,7 @@
 FAKE_NVR_MISSING   comma list of --start values (2026-11-23T09:00:00) the NVR "no longer has": nothing is written
 FAKE_NVR_BYTES     size of each written file (default 200000)
 FAKE_NVR_LOG       file that gets one line per call (arguments, and whether FAKE_NVR_SECRET was in the environment)
+FAKE_NVR_REAL      when set, each file is a real tiny video (ffmpeg test pattern, 160x90, 2 fps, full window length)
 FAKE_NVR_NEED_SECRET  when set, nothing is written unless FAKE_NVR_SECRET is in the environment (sourced secrets)
 """
 import argparse
@@ -32,4 +33,9 @@ day = start.strftime("%Y-%m-%d")
 for ch in a.channels:
     out = Path(a.output) / day / f"channel_{ch}" / f"ch{ch}_{day}_{start.strftime('%H-%M-%S')}_{minutes}min.mkv"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(b"\0" * int(os.environ.get("FAKE_NVR_BYTES", "200000")))
+    if os.environ.get("FAKE_NVR_REAL"):
+        import subprocess
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc=size=160x90:rate=2:duration={minutes * 60}",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(out)], check=True)
+    else:
+        out.write_bytes(b"\0" * int(os.environ.get("FAKE_NVR_BYTES", "200000")))

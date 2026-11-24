@@ -333,6 +333,43 @@ def build_catalog_router(settings: CatalogSettings) -> APIRouter:
         except CatalogUnavailable as e:
             raise HTTPException(status_code=503, detail=str(e))
 
+    # ---- card with the cameras (ticket 17) ----
+
+    def clip_errors(fn):
+        try:
+            return fn()
+        except (store.UnknownClip, UnknownArticle):
+            raise HTTPException(status_code=404, detail="Taj snimak više ne postoji.")
+        except NotAllowed as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/clips/{identity_id}")
+    def catalog_clip_card(identity_id: int) -> Dict[str, Any]:
+        return clip_errors(lambda: store.clip_card(settings, identity_id))
+
+    @router.get("/clips/{identity_id}/video/{slug}/{channel}")
+    def catalog_clip_video(identity_id: int, slug: str, channel: int) -> FileResponse:
+        path = clip_errors(lambda: store.clip_video(settings, identity_id, slug, channel))
+        return FileResponse(path, media_type="video/mp4", headers={"Cache-Control": "private, max-age=3600"})
+
+    @router.post("/clips/{identity_id}/seen")
+    def catalog_clip_seen(identity_id: int, req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        return clip_errors(lambda: store.mark_seen(settings, identity_id, str(req.get("sale") or ""), int(req.get("channel") or 0),
+                                                   req.get("second"), req.get("box"), req.get("actor"), req.get("role")))
+
+    @router.post("/clips/{identity_id}/not-visible")
+    def catalog_clip_not_visible(identity_id: int, req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        return clip_errors(lambda: store.mark_not_visible(settings, identity_id, str(req.get("sale") or ""),
+                                                          req.get("actor"), req.get("role")))
+
+    @router.post("/clips/{identity_id}/send")
+    def catalog_clip_send(identity_id: int, req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        return clip_errors(lambda: store.send_to_labeling(settings, identity_id, req.get("actor"), req.get("role")))
+
     @router.post("/evidence/{evidence_id}/decision")
     def catalog_decide_evidence(evidence_id: int, req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         try:

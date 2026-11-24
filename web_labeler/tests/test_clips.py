@@ -20,7 +20,7 @@ FAKE = Path(__file__).resolve().parent / "fake_nvr_downloader.py"
 NOW = datetime(2026, 11, 24, 12, 0)
 
 
-class ClipTests(unittest.TestCase):
+class ClipBase(unittest.TestCase):
     tearDown_base = test_releases.ReleaseTests.tearDown
     write_live = test_releases.ReleaseTests.write_live
     write_map = test_releases.ReleaseTests.write_map
@@ -60,7 +60,8 @@ class ClipTests(unittest.TestCase):
     def clip_settings(self, **extra):
         cfg = {"catalog_clip_root": str(self.clip_root), "catalog_clip_downloader": [sys.executable, str(FAKE)],
                "catalog_clip_lock": str(self.lock), "catalog_clip_enabled": True, "catalog_clip_cap_gb": 1,
-               "catalog_clip_est_mb_per_channel_minute": 0.02, "catalog_clip_busy_patterns": ["pipeline.run_day"]}
+               "catalog_clip_est_mb_per_channel_minute": 0.02, "catalog_clip_busy_patterns": ["pipeline.run_day"],
+               "catalog_clip_previews": False}
         cfg.update(extra)
         return self.make_settings(**cfg)
 
@@ -78,6 +79,8 @@ class ClipTests(unittest.TestCase):
     def new_drink(self):
         return self.identity("NEW DRINK")["identity_id"]
 
+
+class ClipTests(ClipBase):
     # ---- choice of sales ----
 
     def test_sales_one_per_day_least_crowded_newest_first_only_finished_and_still_on_nvr(self):
@@ -134,6 +137,13 @@ class ClipTests(unittest.TestCase):
                                 payload={}, reason="ne pratimo")
         report = self.run_job()
         self.assertNotIn(v["identity_id"], {d["identity_id"] for d in report["downloaded"]})
+        self.assertNotIn(v["identity_id"], report["status"])
+
+    def test_skips_article_with_a_pending_x_proposal(self):
+        v = self.identity("OTHER NEW")
+        catalog.record_decision(self.settings, "propose", "Claude (predlog)", "labeler", article_id=v["article_id"],
+                                payload={"kind": "ignore", "change": {}}, reason="hrana")
+        report = self.run_job()
         self.assertNotIn(v["identity_id"], report["status"])
 
     # ---- missing on the NVR ----
@@ -279,6 +289,169 @@ class ClipTests(unittest.TestCase):
         with self.assertRaises(sqlite3.DatabaseError):
             conn.execute("DELETE FROM clip_events")
         conn.close()
+
+
+
+class CardBase(ClipBase):
+    """Real tiny videos from the fake NVR, previews on."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["FAKE_NVR_REAL"] = "1"
+        self.settings = self.clip_settings(catalog_clip_previews=True, catalog_clip_window_minutes=1,
+                                           catalog_clip_min_bytes=1000, catalog_clip_sales_per_article=1,
+                                           catalog_clip_camera_names={"1": "Šank levo", "2": "Točilica", "3": "Šank desno"},
+                                           videos_dir=str(self.tmp / "videos"))
+        self.run_job()
+        self.iid = self.new_drink()
+
+    def tearDown(self):
+        os.environ.pop("FAKE_NVR_REAL", None)
+        super().tearDown()
+
+    def run_job(self, now=datetime(2026, 11, 24, 11, 55, 30), settings=None, **kw):
+        return super().run_job(now=now, settings=settings, **kw)
+
+    def seen(self, card, channel=2, second=12.5, box=(0.25, 0.2, 0.3, 0.4)):
+        return store.mark_seen(self.settings, self.iid, card["sales"][0]["slug"], channel, second, list(box), "Goca", "labeler")
+
+
+class CardTests(CardBase):
+    """Ticket 17: the card, "Vidim ga" and "Nije na snimku"."""
+
+    def test_card_plays_three_cameras_from_the_ring_without_paths(self):
+        card = store.clip_card(self.settings, self.iid)
+        self.assertEqual(card["status_label"], "Snimak spreman")
+        self.assertEqual(len(card["sales"]), 1)
+        sale = card["sales"][0]
+        self.assertEqual(sale["label"], "Kucano 23.11.2026. u 09:00")
+        self.assertEqual([c["name"] for c in sale["cameras"]], ["Šank levo", "Točilica", "Šank desno"])
+        self.assertTrue(all(c["ready"] for c in sale["cameras"]))
+        text = str(card)
+        for bad in (".mkv", ".mp4", str(self.clip_root), "channel_", "/media"):
+            self.assertNotIn(bad, text)
+        path = store.clip_video(self.settings, self.iid, sale["slug"], 2)
+        self.assertEqual(path.suffix, ".mp4")
+        self.assertIn(self.clip_root.resolve(), path.parents)
+        with self.assertRaises(store.UnknownClip):
+            store.clip_video(self.settings, self.iid, "../../etc", 2)
+
+    def test_vidim_ga_is_catalog_evidence_waiting_for_admin_never_raw(self):
+        raw = self.tmp / "raw"
+        raw_before = sorted(raw.rglob("*")) if raw.exists() else []
+        result = self.seen(store.clip_card(self.settings, self.iid))
+        ev = result["evidence"]
+        self.assertEqual(ev["status"], "pending")
+        self.assertEqual((ev["width"], ev["height"]), (160, 90))  # full camera frame, box drawn on it
+        with store._open_for_read(self.settings) as conn:
+            self.assertEqual(conn.execute("SELECT source FROM evidence WHERE evidence_id = ?", (ev["evidence_id"],)).fetchone()[0], "clip")
+        self.assertEqual(result["card"]["status_label"], "Viđeno na snimku")
+        seen = self.events("seen")[0]["detail"]
+        self.assertEqual((seen["channel"], seen["second"], seen["box"]), (2, 12.5, [0.25, 0.2, 0.3, 0.4]))
+        self.assertEqual(sorted(raw.rglob("*")) if raw.exists() else [], raw_before)
+        media = self.settings.media_dir.resolve()
+        self.assertTrue(any(p.is_file() for p in media.rglob("*")))
+        for root in self.settings.forbidden_roots:
+            self.assertNotIn(Path(root).resolve(), media.parents)
+        # the admin decides it like a pasted screenshot
+        catalog.decide_evidence(self.settings, ev["evidence_id"], "confirmed", "Aleksa")
+        self.assertEqual(catalog.get_evidence(self.settings, ev["evidence_id"])["status"], "confirmed")
+
+    def test_box_must_be_one_real_rectangle(self):
+        card = store.clip_card(self.settings, self.iid)
+        for box in ((0, 0, 0, 0), (0.9, 0.9, 0.3, 0.3), (0.1, 0.1)):
+            with self.assertRaises(catalog.CatalogError):
+                self.seen(card, box=box)
+        with self.assertRaises(catalog.CatalogError):
+            self.seen(card, second=9999)
+        self.assertEqual(self.events("seen"), [])
+
+    def test_nije_na_snimku_goes_to_next_sale_then_nema_snimka(self):
+        card = store.clip_card(self.settings, self.iid)
+        card = store.mark_not_visible(self.settings, self.iid, card["sales"][0]["slug"], "Goca", "labeler")
+        self.assertEqual(card["sales"], [])
+        self.assertEqual(card["status_label"], "Nema snimka")
+        report = self.run_job()  # the job fetches the next sale
+        self.assertIn({"identity_id": self.iid, "sale": "2026-11-22 12:00", "channels": ["1", "2", "3"]},
+                      [{k: d[k] for k in ("identity_id", "sale", "channels")} for d in report["downloaded"]])
+        card = store.clip_card(self.settings, self.iid)
+        self.assertEqual(card["sales"][0]["label"], "Kucano 22.11.2026. u 12:00")
+
+
+class SendToLabelingTests(CardBase):
+    """Ticket 18 on a fake clip: cut ±10 s around "Vidim ga", model and class preselected, nothing in RAW."""
+
+    def give_class(self):
+        catalog.record_decision(self.settings, "class_target", "Aleksa", "admin", identity_id=self.iid,
+                                payload={"model": "Glasses", "class": "CASA", "open_new": False}, reason="isto piće")
+
+    def test_cut_10s_around_each_seen_on_that_camera_with_model_and_class(self):
+        import json
+        import subprocess
+        self.give_class()
+        card = store.clip_card(self.settings, self.iid)
+        self.assertEqual(card["target"], {"model": "Glasses", "class": "CASA"})
+        self.seen(card, channel=2, second=25.0)
+        self.assertEqual(store.clip_card(self.settings, self.iid)["to_send"], 1)
+        raw = self.tmp / "raw"
+        raw_before = sorted(raw.rglob("*")) if raw.exists() else []
+        result = store.send_to_labeling(self.settings, self.iid, "Goca", "labeler")
+        self.assertEqual((result["sent"], result["videos"], result["model"], result["class"]), (1, ["Točilica"], "Glasses", "CASA"))
+        batch = self.tmp / "videos" / "handoff_katalog"
+        videos = sorted(p.name for p in batch.glob("*.mp4"))
+        self.assertEqual(videos, ["BLAZNAVAC_KATALOG_0400_SANK_TOCILICA_20261123090015.mp4"])  # ring 09:00 + 15 s
+        name = videos[0].lower()
+        self.assertIn("sank_tocilica", name)  # IntelliCup picks the camera crop by this token
+        dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                    str(batch / videos[0])], capture_output=True, text=True).stdout)
+        self.assertAlmostEqual(dur, 20.0, delta=1.0)
+        hint = json.loads((batch / videos[0].replace(".mp4", "_hints.json")).read_text())
+        self.assertEqual((hint["preselect"], hint["at_second"], hint["tlwh_norm"]),
+                         ({"model": "Glasses", "class": "CASA"}, 10.0, [0.25, 0.2, 0.3, 0.4]))
+        info = json.loads((batch / videos[0].replace(".mp4", "_info.json")).read_text())
+        self.assertEqual(info["case_type"], "KATALOG")
+        self.assertTrue((batch / "_session.json").is_file())
+        self.assertEqual(sorted(raw.rglob("*")) if raw.exists() else [], raw_before)
+        self.assertEqual(store.clip_card(self.settings, self.iid)["to_send"], 0)
+        with self.assertRaises(catalog.CatalogError):
+            store.send_to_labeling(self.settings, self.iid, "Goca", "labeler")  # nothing new
+        self.assertEqual(len(self.events("sent")), 1)
+
+    def test_cut_starts_at_zero_near_the_ring(self):
+        self.give_class()
+        self.seen(store.clip_card(self.settings, self.iid), channel=1, second=4.0)
+        store.send_to_labeling(self.settings, self.iid, "Goca", "labeler")
+        batch = self.tmp / "videos" / "handoff_katalog"
+        self.assertEqual([p.name for p in batch.glob("*.mp4")], ["BLAZNAVAC_KATALOG_0400_SANK_LEVO_20261123090000.mp4"])
+        import json
+        hint = json.loads(next(batch.glob("*_hints.json")).read_text())
+        self.assertEqual(hint["at_second"], 4.0)
+
+    def test_article_card_offers_the_footage(self):
+        v = self.identity("NEW DRINK")
+        card = catalog.article_card(self.settings, v["article_id"])
+        self.assertTrue(next(x for x in card["variations"] if x["identity_id"] == self.iid)["has_clips"])
+
+    def test_needs_a_class_first(self):
+        self.seen(store.clip_card(self.settings, self.iid))
+        with self.assertRaises(catalog.CatalogError):
+            store.send_to_labeling(self.settings, self.iid, "Goca", "labeler")
+        self.assertFalse((self.tmp / "videos" / "handoff_katalog").exists())
+
+    def test_till_name_is_escaped_in_the_banner_text(self):
+        import json
+        self.write_pos("d.csv", [pos_row("0700", "<b>NOVO</b>", "2026.11.23 10:00")])
+        catalog.import_catalog(self.settings)
+        self.run_job()
+        iid = self.identity("<b>NOVO</b>")["identity_id"]
+        catalog.record_decision(self.settings, "class_target", "Aleksa", "admin", identity_id=iid,
+                                payload={"model": "Glasses", "class": "CASA", "open_new": False}, reason="x")
+        card = store.clip_card(self.settings, iid)
+        store.mark_seen(self.settings, iid, card["sales"][0]["slug"], 3, 30, [0.1, 0.1, 0.2, 0.2], "Goca", "labeler")
+        store.send_to_labeling(self.settings, iid, "Goca", "labeler")
+        info = json.loads(next((self.tmp / "videos" / "handoff_katalog").glob("*_info.json")).read_text())
+        self.assertNotIn("<b>", info["instruction"])
+        self.assertIn("&lt;b&gt;", info["instruction"])
 
 
 if __name__ == "__main__":

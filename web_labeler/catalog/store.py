@@ -1,13 +1,15 @@
 """Catalog core: the only code that reads or changes the Catalog database."""
 from __future__ import annotations
 
+import html
 import json
+import re
 import os
 from collections import Counter
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
@@ -457,7 +459,7 @@ CREATE TABLE clip_events (
     venue_id    TEXT NOT NULL REFERENCES venues(venue_id),
     identity_id INTEGER NOT NULL REFERENCES pos_identities(identity_id),
     action      TEXT NOT NULL CHECK (action IN ('planned', 'downloaded', 'failed', 'missing', 'deleted', 'warned',
-                                                'seen', 'not_visible', 'sent')),
+                                                'preview', 'seen', 'not_visible', 'sent')),
     sale_time   TEXT,
     day         TEXT,
     bytes       INTEGER,
@@ -1448,7 +1450,7 @@ def _clean_person(name: Any, role: Any) -> Tuple[str, str]:
 
 
 def add_evidence(settings: CatalogSettings, identity_id: int, data: bytes, added_by: str, role: str,
-                 model: Optional[str] = None, class_name: Optional[str] = None) -> Dict[str, Any]:
+                 model: Optional[str] = None, class_name: Optional[str] = None, source: str = "paste") -> Dict[str, Any]:
     """Save a pasted screenshot for one POS variation. It waits for the admin and never goes to RAW."""
     import hashlib
     person, role = _clean_person(added_by, role)
@@ -1481,8 +1483,9 @@ def add_evidence(settings: CatalogSettings, identity_id: int, data: bytes, added
         at = _now()
         evidence_id = conn.execute(
             "INSERT INTO evidence (venue_id, identity_id, article_id, model_key, class_name, sha256, media_type, width, height, "
-            "size_bytes, source, added_by, added_role, added_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paste', ?, ?, ?, 'pending')",
-            (venue, identity_id, row[0], model, class_name, sha, media_type, width, height, len(data), person, role, at)).lastrowid
+            "size_bytes, source, added_by, added_role, added_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+            (venue, identity_id, row[0], model, class_name, sha, media_type, width, height, len(data), source, person, role,
+             at)).lastrowid
         conn.execute("INSERT INTO evidence_events (venue_id, evidence_id, at, actor, role, action) VALUES (?, ?, ?, ?, ?, 'added')",
                      (venue, evidence_id, at, person, role))
         conn.execute("COMMIT")
@@ -2025,6 +2028,9 @@ def article_card(settings: CatalogSettings, article_id: int, as_of: Optional[str
         images = []
         for i in ids:
             images.extend(list_evidence_conn(conn, venue, i))
+        with_clips = {i for i, in conn.execute(
+            f"SELECT DISTINCT identity_id FROM clip_events WHERE venue_id = ? AND action = 'downloaded' "
+            f"AND identity_id IN ({','.join('?' * len(ids)) or 'NULL'})", (venue, *ids))}
         home_name = conn.execute("SELECT display_name FROM articles WHERE article_id = ?", (home,)).fetchone()[0]
     flows = _flows(settings, {v.identity_id: v for v in variations}, decisions)
     items = []
@@ -2032,6 +2038,7 @@ def article_card(settings: CatalogSettings, article_id: int, as_of: Optional[str
         item = _variation(v, evidence, flows.get(v.identity_id))
         item["first_seen"], item["last_seen"] = details.get(v.identity_id, (None, None))
         item["mode_label"] = MODE_LABELS.get(v.mode or "", "") if len(v.links) > 1 else ""
+        item["has_clips"] = v.identity_id in with_clips and settings.clips is not None
         items.append(item)
     return {"article_id": article_id, "name": row[0].strip(), "home_article_id": home, "home_name": home_name.strip(),
             "merged_into": home if home != article_id else None, "member_articles": members, "variations": items,
@@ -2862,12 +2869,12 @@ def list_inbox(settings: CatalogSettings, today: Optional[str] = None) -> Dict[s
             counts["snoozed"] += 1
         else:
             items.append(_variation(v, evidence))
-    clip_status = _clips.read_status(settings.db_path.parent) if settings.clips and settings.db_path else {}
-    for item in items:
-        st = clip_status.get(item["identity_id"])
-        item["clip"] = {"status": st, "label": _clips.CLIP_STATUS_LABELS[st]} if st in _clips.CLIP_STATUS_LABELS else None
     path = [_variation(v, evidence, flows[v.identity_id]) for v in _sorted(current.values())
             if v.identity_id in flows and flows[v.identity_id]["stage"] != "tracked"]
+    clip_status = _clips.read_status(settings.db_path.parent) if settings.clips and settings.db_path else {}
+    for item in items + path:
+        st = clip_status.get(item["identity_id"])
+        item["clip"] = {"status": st, "label": _clips.CLIP_STATUS_LABELS[st]} if st in _clips.CLIP_STATUS_LABELS else None
     order = list(FLOW_LABELS)
     path.sort(key=lambda i: order.index(i["flow"]["stage"]))
     return {"items": items, "new_class": path, "flow_labels": FLOW_LABELS,
@@ -2953,9 +2960,16 @@ def _clip_candidates(settings: CatalogSettings, conn: sqlite3.Connection, today:
     decisions = _load_decisions(conn, venue)
     snoozed = _snoozed(conn, venue, current, today)
     flows = _flows(settings, current, decisions)
+    # someone already proposed X (food, cigarettes): no footage needed unless the admin turns the proposal down
+    x_ids, x_articles = set(), set()
+    for d in decisions:
+        if d.kind == "propose" and d.payload.get("kind") == "ignore" and _proposal_status(d.decision_id, decisions) == "pending":
+            (x_ids.add(d.identity_id) if d.identity_id else x_articles.add(d.article_id))
     out = []
     for v in _sorted(current.values()):
         if v.code is None or v.sold <= 0 or v.state == "ignored":
+            continue
+        if v.identity_id in x_ids or v.article_id in x_articles or v.source_article_id in x_articles:
             continue
         stage = (flows.get(v.identity_id) or {}).get("stage")
         waiting = v.state == "pending" and not v.target and v.identity_id not in snoozed
@@ -3022,3 +3036,236 @@ def add_clip_events(settings: CatalogSettings, events: Sequence[Mapping[str, Any
         raise
     finally:
         conn.close()
+
+
+# ---------------- Card with the cameras (ticket 17) ----------------
+
+class UnknownClip(Exception):
+    pass
+
+
+def _clip_settings(settings: CatalogSettings) -> "_clips.ClipSettings":
+    if settings.clips is None:
+        raise CatalogError("Snimci nisu podešeni.")
+    return settings.clips
+
+
+def _fmt_sale(key: str) -> str:
+    day, hm = key.split(" ")
+    y, m, d = day.split("-")
+    return f"{int(d)}.{int(m)}.{y}. u {hm}"
+
+
+def sale_slug(key: str) -> str:
+    return key.replace("-", "").replace(":", "").replace(" ", "_")
+
+
+def _sales_for(settings: CatalogSettings, conn: sqlite3.Connection, identity_id: int) -> Dict[str, "_clips.SaleState"]:
+    clips = _clip_settings(settings)
+    folded = _clips.fold_events(_clip_events(conn, settings.venue_id, identity_id), clips.attempts_before_missing)
+    return (folded.get(identity_id) or {}).get("sales", {})
+
+
+def clip_card(settings: CatalogSettings, identity_id: int) -> Dict[str, Any]:
+    """What the card plays: downloaded sales nobody marked "Nije na snimku", newest first, each with its cameras."""
+    clips = _clip_settings(settings)
+    with _open_for_read(settings) as conn:
+        row = conn.execute("SELECT name, code FROM pos_identities WHERE venue_id = ? AND identity_id = ?",
+                           (settings.venue_id, identity_id)).fetchone()
+        if row is None:
+            raise UnknownArticle(identity_id)
+        sales = _sales_for(settings, conn, identity_id)
+        target = _labeling_target(settings, conn, identity_id)
+        sent = {e["detail"].get("seen_event") for e in _clip_events(conn, settings.venue_id, identity_id) if e["action"] == "sent"}
+    status = _clips.read_status(settings.db_path.parent).get(identity_id) if settings.db_path else None
+    shown = []
+    for sale in sorted(sales.values(), key=lambda x: x.key, reverse=True):
+        if sale.status != "downloaded" or sale.not_visible:
+            continue
+        cams = [{"channel": int(ch), "name": clips.camera_name(int(ch)), "ready": ch in sale.previews,
+                 "url": f"/api/catalog/clips/{identity_id}/video/{sale_slug(sale.key)}/{ch}" if ch in sale.previews else None}
+                for ch in sorted(sale.channels, key=int)]
+        shown.append({"sale": sale.key, "slug": sale_slug(sale.key), "label": f"Kucano {_fmt_sale(sale.key)}",
+                      "cameras": cams, "seen": [{"camera": clips.camera_name(int(x["channel"])), "second": x["second"],
+                                                 "evidence_id": x.get("evidence_id"), "sent": x.get("event_id") in sent}
+                                                for x in sale.seen]})
+    if shown:
+        status = "seen" if any(x["seen"] for x in shown) else "ready"
+    elif any(x.not_visible for x in sales.values()):
+        status = "missing"  # every downloaded sale was "Nije na snimku"; the job looks for another sale
+    elif status not in ("waiting", "late", "missing", "deleted"):
+        status = "waiting"
+    to_send = sum(1 for x in shown for y in x["seen"] if not y["sent"])
+    return {"identity_id": identity_id, "name": row[0].strip(), "code": row[1], "sales": shown,
+            "status": status, "status_label": _clips.CLIP_STATUS_LABELS[status],
+            "target": {"model": target[0], "class": target[1]} if target else None, "to_send": to_send}
+
+
+def _find_sale(settings: CatalogSettings, conn: sqlite3.Connection, identity_id: int, slug: str) -> "_clips.SaleState":
+    for sale in _sales_for(settings, conn, identity_id).values():
+        if sale_slug(sale.key) == slug and sale.status == "downloaded":
+            return sale
+    raise UnknownClip(slug)
+
+
+def clip_video(settings: CatalogSettings, identity_id: int, slug: str, channel: int) -> Path:
+    clips = _clip_settings(settings)
+    with _open_for_read(settings) as conn:
+        sale = _find_sale(settings, conn, identity_id, slug)
+    rel = sale.previews.get(str(channel))
+    if not rel:
+        raise UnknownClip(slug)
+    path = (clips.root / rel).resolve()
+    if clips.root.resolve() not in path.parents or not path.is_file():
+        raise UnknownClip(slug)
+    return path
+
+
+def _frame_with_box(clips: "_clips.ClipSettings", sale: "_clips.SaleState", channel: int, second: float,
+                    box: Sequence[float]) -> bytes:
+    """The frame at that second from the full camera file (preview as fallback), the drawn box on it, as JPEG."""
+    import io
+    import subprocess
+    from PIL import Image, ImageDraw
+    sources = [clips.root / sale.channels[str(channel)]] if str(channel) in sale.channels else []
+    if str(channel) in sale.previews:
+        sources.append(clips.root / sale.previews[str(channel)])
+    for src in sources:
+        if not src.is_file():
+            continue
+        try:
+            data = subprocess.run([clips.ffmpeg, "-v", "error", "-ss", f"{second:.2f}", "-i", str(src), "-frames:v", "1",
+                                   "-f", "image2pipe", "-vcodec", "png", "-"], capture_output=True, timeout=120).stdout
+            image = Image.open(io.BytesIO(data)).convert("RGB")
+        except Exception:
+            continue
+        w, h = image.size
+        x, y, bw, bh = box
+        draw = ImageDraw.Draw(image)
+        draw.rectangle([x * w, y * h, (x + bw) * w, (y + bh) * h], outline=(255, 210, 0), width=max(3, w // 400))
+        out = io.BytesIO()
+        image.save(out, format="JPEG", quality=88)
+        return out.getvalue()
+    raise CatalogError("Kadar sa snimka ne može da se pročita.")
+
+
+def mark_seen(settings: CatalogSettings, identity_id: int, slug: str, channel: int, second: Any, box: Any,
+              actor: Any, role: Any) -> Dict[str, Any]:
+    """"Vidim ga": one box on one camera. Saved only as Catalog evidence (waits for the admin, like a pasted
+    screenshot); never RAW, never a dataset."""
+    clips = _clip_settings(settings)
+    person, role = _clean_person(actor, role)
+    try:
+        second = float(second)
+        box = [float(v) for v in box]
+    except (TypeError, ValueError):
+        raise CatalogError("Nacrtaj jedan pravougaonik oko pića.")
+    if len(box) != 4 or box[2] <= 0.005 or box[3] <= 0.005 or box[0] < 0 or box[1] < 0 \
+            or box[0] + box[2] > 1.001 or box[1] + box[3] > 1.001:
+        raise CatalogError("Nacrtaj jedan pravougaonik oko pića.")
+    if not 0 <= second <= clips.window_minutes * 60 + 5:
+        raise CatalogError("To vreme nije na ovom snimku.")
+    with _open_for_read(settings) as conn:
+        sale = _find_sale(settings, conn, identity_id, slug)
+    if str(channel) not in sale.channels:
+        raise UnknownClip(slug)
+    image = _frame_with_box(clips, sale, int(channel), second, box)
+    evidence = add_evidence(settings, identity_id, image, person, role, source="clip")
+    add_clip_events(settings, [{"identity_id": identity_id, "action": "seen", "sale_time": sale.key, "actor": person,
+                                "role": role, "detail": {"channel": int(channel), "second": round(second, 2),
+                                                         "box": [round(v, 4) for v in box],
+                                                         "evidence_id": evidence["evidence_id"]}}], [])
+    return {"evidence": evidence, "card": clip_card(settings, identity_id)}
+
+
+def mark_not_visible(settings: CatalogSettings, identity_id: int, slug: str, actor: Any, role: Any) -> Dict[str, Any]:
+    """"Nije na snimku": this sale is skipped; the card shows the next one, after the last the article says "Nema snimka"
+    and the job fetches another sale if there is one."""
+    person, role = _clean_person(actor, role)
+    with _open_for_read(settings) as conn:
+        sale = _find_sale(settings, conn, identity_id, slug)
+    add_clip_events(settings, [{"identity_id": identity_id, "action": "not_visible", "sale_time": sale.key,
+                                "actor": person, "role": role}], [])
+    return clip_card(settings, identity_id)
+
+
+# ---------------- "Pošalji na označavanje" (ticket 18) ----------------
+
+def _labeling_target(settings: CatalogSettings, conn: sqlite3.Connection, identity_id: int) -> Optional[Tuple[str, str]]:
+    """The class the article goes to (new class or existing), as the tool names its model (its class list file)."""
+    current = _current(conn, settings.venue_id)
+    v = current.get(identity_id)
+    if v is None:
+        return None
+    pair = v.target or (v.links[0] if v.links else None)
+    if not pair:
+        return None
+    model, cls = pair
+    for path in list(settings.source_models_dir.glob("*.yaml")) + list(settings.source_models_dir.glob("*.yml")):
+        if path.stem.lower() == str(model).lower():
+            return path.stem, cls
+    return str(model), cls
+
+
+def send_to_labeling(settings: CatalogSettings, identity_id: int, actor: Any, role: Any) -> Dict[str, Any]:
+    """Cut 10 s before and after every "Vidim ga" (that camera only) into the tool's video list, batch "Za označavanje",
+    with the model and class already chosen. From there the normal labeling, export and ingest path; nothing goes to RAW
+    any other way."""
+    clips = _clip_settings(settings)
+    person, role = _clean_person(actor, role)
+    folder_root = clips.labeling_videos_dir
+    if folder_root is None:
+        raise CatalogError("Folder sa videima za označavanje nije podešen.")
+    for root in settings.forbidden_roots:
+        if _is_within(folder_root.resolve(), Path(root).resolve()):
+            raise CatalogError(f"Isečci ne smeju u {root}")
+    with _open_for_read(settings) as conn:
+        row = conn.execute("SELECT name, code FROM pos_identities WHERE venue_id = ? AND identity_id = ?",
+                           (settings.venue_id, identity_id)).fetchone()
+        if row is None:
+            raise UnknownArticle(identity_id)
+        target = _labeling_target(settings, conn, identity_id)
+        events = _clip_events(conn, settings.venue_id, identity_id)
+        sales = _sales_for(settings, conn, identity_id)
+    if not target:
+        raise CatalogError("Artikal još nema klasu. Prvo izaberi postojeću ili otvori novu klasu.")
+    sent = {e["detail"].get("seen_event") for e in events if e["action"] == "sent"}
+    todo = [(sale, seen) for sale in sales.values() if sale.status == "downloaded" for seen in sale.seen
+            if seen.get("event_id") not in sent]
+    if not todo:
+        raise CatalogError("Nema novih \"Vidim ga\" za slanje. Prvo na snimku označi gde se vidi piće.")
+    batch = folder_root / _clips.LABELING_BATCH
+    batch.mkdir(parents=True, exist_ok=True)
+    session = batch / "_session.json"
+    if not session.exists():
+        session.write_text(json.dumps({"session_id": "katalog (za označavanje)", "opened_at": _now()}, ensure_ascii=False),
+                           encoding="utf-8")
+    model, cls = target
+    name = row[0].strip()
+    code = re.sub(r"[^0-9A-Za-z]+", "", str(row[1] or "")) or "X"
+    made, new_events = [], []
+    for sale, seen in todo:
+        ch = int(seen["channel"])
+        src = clips.root / sale.channels[str(ch)]
+        start = max(0.0, float(seen["second"]) - clips.cut_seconds)
+        ring = datetime.strptime(sale.key, "%Y-%m-%d %H:%M")
+        stamp = (ring + timedelta(seconds=start)).strftime("%Y%m%d%H%M%S")
+        stem = f"BLAZNAVAC_KATALOG_{code}_{clips.camera_token(ch)}_{stamp}"
+        video = batch / f"{stem}.mp4"
+        _clips.cut_clip(clips, src, start, 2 * clips.cut_seconds, video)
+        at = round(float(seen["second"]) - start, 2)
+        hint = {"detected_class": cls, "model": model, "tlwh_norm": seen.get("box"), "at_second": at, "window_seconds": 6,
+                "catalog": True, "preselect": {"model": model, "class": cls}}
+        info = {"case_type": "KATALOG", "target_class": cls,
+                # the tool shows this text as HTML: escape what comes from the till
+                "instruction": f"Novi artikal iz kase: {html.escape(name)}. Označi piće na kadrovima; model "
+                               f"{html.escape(model)} i klasa {html.escape(cls)} su već izabrani."}
+        (batch / f"{stem}_hints.json").write_text(json.dumps(hint, ensure_ascii=False), encoding="utf-8")
+        (batch / f"{stem}_info.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
+        made.append({"video": video.name, "camera": clips.camera_name(ch)})
+        new_events.append({"identity_id": identity_id, "action": "sent", "sale_time": sale.key, "actor": person, "role": role,
+                           "detail": {"seen_event": seen.get("event_id"), "video": video.name, "batch": batch.name,
+                                      "model": model, "class": cls}})
+    add_clip_events(settings, new_events, [])
+    return {"sent": len(made), "videos": [m["camera"] for m in made], "model": model, "class": cls,
+            "where": "Labeler → lista videa → katalog (za označavanje)"}

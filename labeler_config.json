@@ -62,5 +62,10 @@
   ],
   "catalog_clip_secrets_env": "/opt/intellicup/.secrets/nvr.env",
   "catalog_clip_lock": "/tmp/blaznavac_nvr_sync.lock",
-  "catalog_clip_enabled": false
+  "catalog_clip_enabled": false,
+  "catalog_clip_camera_names": {
+    "1": "Šank levo",
+    "2": "Točilica",
+    "3": "Šank desno"
+  }
 }
