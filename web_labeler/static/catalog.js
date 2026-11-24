@@ -1111,9 +1111,39 @@
     return card;
   }
 
-  function renderReleases(next, list) {
-    const nodes = [el("h2", "catalogTitle", "Sledeće izdanje ")];
-    nodes[0].append(el("span", "catalogCount", `poredi se sa: ${next.baseline_label}`));
+  function lockBlock(lock) {
+    const box = el("section", "catalogCardSection");
+    box.append(el("h3", "", "Zaključavanje Mira i Worda"));
+    if (lock.locked) {
+      box.append(el("div", "catalogSubhead", `Zaključano ${formatTime(lock.since)} (izdanje ${lock.release}). Katalog je jedini izvor, Miro i Word su arhiva.`));
+      box.append(el("div", "catalogSubhead", "Tekst koji sam upisuješ na vrh Mira i Worda:"));
+      box.append(el("div", "catalogNoDesc", lock.archive_text));
+    } else {
+      box.append(el("div", "catalogSubhead", "Dugme radi tek kad su ispunjena sva tri uslova. Do tada se Miro i Word vode kao i do sada."));
+      box.append(checkList(lock.conditions.map((c) => ({ ok: c.ok, label: `${c.label}. ${c.detail}`, problems: [] }))));
+    }
+    const form = el("div", "catalogAsk");
+    const note = el("input", "catalogReason");
+    note.placeholder = lock.locked ? "Zašto se vraćaš na Miro i Word?" : "Napomena";
+    const button = el("button", lock.locked ? "btn" : "btn primary", lock.locked ? "Otključaj (povratak)" : "Zaključaj");
+    const msg = el("span", "catalogPasteMsg");
+    button.disabled = !lock.locked && !lock.can_lock;
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        await postJson("/api/catalog/lock", { action: lock.locked ? "unlock" : "lock", actor: person(), role: roleSelect.value, reason: note.value.trim() });
+        showToast(lock.locked ? "Otključano." : "Zaključano.");
+        loadClasses();
+      } catch (e) { msg.textContent = e.message; button.disabled = false; }
+    };
+    form.append(note, button, msg);
+    box.append(form);
+    return box;
+  }
+
+  function renderReleases(next, list, lock) {
+    const nodes = [lockBlock(lock), el("h2", "catalogTitle", "Sledeće izdanje ")];
+    nodes[1].append(el("span", "catalogCount", `poredi se sa: ${next.baseline_label}`));
     nodes.push(el("div", "catalogSubhead",
       "Rad u senci: objavljeno izdanje ide u poseban folder i pipeline ga još ne čita. Mapa, liste i dokumenti u produkciji se ne menjaju."));
     nodes.push(checkList(next.checks));
@@ -1350,8 +1380,9 @@
         return;
       }
       if (view === "releases") {
-        const [next, list] = await Promise.all([getJson("/api/catalog/releases/next"), getJson("/api/catalog/releases")]);
-        if (no === requestNo) renderReleases(next, list);
+        const [next, list, lock] = await Promise.all([getJson("/api/catalog/releases/next"), getJson("/api/catalog/releases"),
+          getJson("/api/catalog/lock")]);
+        if (no === requestNo) renderReleases(next, list, lock);
         return;
       }
       if (view === "modelcards") {

@@ -19,11 +19,11 @@ from web_labeler.catalog import model_cards as _model_cards
 from web_labeler.catalog import releases as _releases
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
            "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings",
            "miro_pages", "miro_suggested", "miro_reviews", "miro_links", "evidence", "evidence_events", "decisions",
-           "map_names", "source_lines", "training_classes", "releases"}
+           "map_names", "source_lines", "training_classes", "releases", "locks"}
 
 _SCHEMA = """
 CREATE TABLE venues (
@@ -290,6 +290,24 @@ CREATE TRIGGER releases_no_delete BEFORE DELETE ON releases
 BEGIN SELECT RAISE(ABORT, 'a published release never changes'); END;
 """
 
+_SCHEMA_V8 = """
+CREATE TABLE locks (
+    lock_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id       TEXT NOT NULL REFERENCES venues(venue_id),
+    action         TEXT NOT NULL CHECK (action IN ('lock', 'unlock')),
+    release_number INTEGER,
+    actor          TEXT NOT NULL,
+    role           TEXT NOT NULL CHECK (role = 'admin'),
+    reason         TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    conditions     TEXT NOT NULL
+);
+CREATE TRIGGER locks_no_update BEFORE UPDATE ON locks
+BEGIN SELECT RAISE(ABORT, 'lock history is append-only'); END;
+CREATE TRIGGER locks_no_delete BEFORE DELETE ON locks
+BEGIN SELECT RAISE(ABORT, 'lock history is append-only'); END;
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -331,6 +349,7 @@ class CatalogSettings:
     model_cards: Optional[_model_cards.ModelCardSources] = None
     release_dir: Optional[Path] = None
     pipeline_map_path: Optional[Path] = None
+    trial_dir: Optional[Path] = None
 
     @classmethod
     def from_config(cls, cfg: Mapping[str, Any], models_dir: Path,
@@ -386,7 +405,8 @@ class CatalogSettings:
                    optional_path("catalog_miro_suggestions_path"), media_dir, dataset_dir,
                    optional_path("catalog_backup_dir"), model_cards,
                    optional_path("catalog_release_dir") or (db_path.parent / "releases" if db_path else None),
-                   optional_path("catalog_pipeline_map_path"))
+                   optional_path("catalog_pipeline_map_path"),
+                   optional_path("catalog_trial_dir") or (db_path.parent / "trial_days" if db_path else None))
 
     @classmethod
     def from_config_file(cls, config_path: Path) -> "CatalogSettings":
@@ -454,10 +474,10 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}"
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}"
                                f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3, 4, 5, 6):
-            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7][version - 1:]
+        elif version in (1, 2, 3, 4, 5, 6, 7):
+            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8][version - 1:]
             conn.executescript(f"BEGIN;{''.join(steps)}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version != SCHEMA_VERSION:
             raise CatalogError(f"Unsupported Catalog database version: {version}")
@@ -1572,6 +1592,7 @@ def _miro_text(kind: str, subject: str, code: Optional[str], payload: Mapping[st
 def _decision_items(conn: sqlite3.Connection, venue: str, where: str = "", args: Sequence[Any] = ()) -> List[Dict[str, Any]]:
     all_decisions = _load_decisions(conn, venue)
     revoked = _decisions.revoked_ids(all_decisions)
+    locked = _is_locked(conn, venue)  # after the lock Miro and Word are an archive: no more sentences to copy
     revokers = {d.target: d.decision_id for d in all_decisions if d.kind == "revoke"}
     names = dict(conn.execute("SELECT article_id, display_name FROM articles WHERE venue_id = ?", (venue,)).fetchall())
     today = _today()
@@ -1586,7 +1607,7 @@ def _decision_items(conn: sqlite3.Connection, venue: str, where: str = "", args:
                 "text": _describe(kind, payload, names), "reason": reason, "evidence": evidence, "actor": actor, "role": role,
                 "created_at": created_at, "valid_from": valid_from, "revoked": decision_id in revoked,
                 "revoked_by": revokers.get(decision_id), "future": valid_from > today,
-                "miro_text": None if decision_id in revoked else _miro_text(kind, subject, code, payload, valid_from, reason, names)}
+                "miro_text": None if decision_id in revoked or locked else _miro_text(kind, subject, code, payload, valid_from, reason, names)}
         if kind == "propose":
             item["status"] = _proposal_status(decision_id, all_decisions)
             item["status_label"] = PROPOSAL_STATUS_LABELS[item["status"]]
@@ -1871,7 +1892,7 @@ def _store_release(settings: CatalogSettings, conn: sqlite3.Connection, kind: st
                  (venue, number, kind, based_on, person, reason, at, decisions_upto,
                   json.dumps(dict(files), ensure_ascii=False, sort_keys=True), json.dumps(sums, sort_keys=True),
                   json.dumps(summary, ensure_ascii=False)))
-    meta = _releases.release_json(number, kind, at, person, reason, based_on, sums)
+    meta = _releases.release_json(number, kind, at, person, reason, based_on, sums, summary.get("decision_changes") or ())
     folder = _write_release_folder(settings, number, files, meta)
     try:
         conn.execute("COMMIT")
@@ -1932,10 +1953,140 @@ def rollback_release(settings: CatalogSettings, number: int, actor: Any, role: A
         failed = [c for c in checks if not c["ok"]]
         if failed:
             raise ReleaseBlocked("Vraćanje nije moguće: " + "; ".join(c["label"].lower() for c in failed) + ".", checks)
-        summary = {"changes": _releases.describe_changes(_releases.parse_files(live["files"]), content)}
+        summary = {"changes": _releases.describe_changes(_releases.parse_files(live["files"]), content),
+                   "decision_changes": target["summary"].get("decision_changes", [])}
         return _store_release(settings, conn, "rollback", number, person, why, target["files"], summary, live["decisions_upto"])
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+# ---------------- Locking Miro and Word (D14) ----------------
+
+LOCK_CONDITIONS = {
+    "map": "Mapa iz Kataloga je ista kao današnja ili je svaka razlika objašnjena",
+    "class_lists": "Liste klasa su iste za svih 5 modela",
+    "trial_day": "Jedan ceo dan kroz uparivanje daje isti rezultat kao stara mapa",
+}
+
+
+def _is_locked(conn: sqlite3.Connection, venue: str) -> bool:
+    row = conn.execute("SELECT action FROM locks WHERE venue_id = ? ORDER BY lock_id DESC LIMIT 1", (venue,)).fetchone()
+    return bool(row and row[0] == "lock")
+
+
+def _trial_reports(settings: CatalogSettings) -> List[Dict[str, Any]]:
+    folder = settings.trial_dir
+    if folder is None or not folder.is_dir():
+        return []
+    out = []
+    for path in sorted(folder.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("release"), int):
+            data["file"] = path.name
+            out.append(data)
+    return out
+
+
+def _lock_conditions(settings: CatalogSettings, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    venue = settings.venue_id
+    rows = _release_rows(conn, venue)
+    live = rows[-1] if rows else None
+    if live is None:
+        none = "Još nijedno izdanje nije objavljeno."
+        return [{"key": k, "label": v, "ok": False, "detail": none} for k, v in LOCK_CONDITIONS.items()]
+    content = _releases.parse_files(live["files"])
+    models = list(content.class_lists)
+    production = _releases.read_production(_production_paths(settings), models)
+    generated = _releases.Generated(live["files"], live["summary"].get("decision_changes", []))
+    parity = _releases.parity(production, generated, content)
+    map_open = [i for i in parity["items"] if i["area"] in ("map", "blacklist", "missing") and not i["explained"]]
+    class_diff = [i for i in parity["items"] if i["area"] == "class_lists"]
+    missing_lists = [m for m in production.missing if m.startswith("lista klasa")]
+    reports = [r for r in _trial_reports(settings) if r.get("release") == live["number"]]
+    passed = [r for r in reports if r.get("complete") and r.get("unexplained") == 0]
+    if passed:
+        best = passed[-1]
+        trial = f"Dan {best.get('day')} ({best.get('run')}): " + ("isto." if best.get("identical") else "razlike su objašnjene odlukama.")
+    elif reports:
+        last = reports[-1]
+        trial = f"Dan {last.get('day')}: {last.get('unexplained')} neobjašnjenih razlika." if last.get("complete") else \
+            f"Dan {last.get('day')}: poređenje nije završeno."
+    else:
+        trial = f"Za izdanje {live['number']} još nema probnog dana."
+    return [
+        {"key": "map", "label": LOCK_CONDITIONS["map"], "ok": not map_open,
+         "detail": f"Izdanje {live['number']}: " + ("sve razlike su objašnjene." if not map_open else f"{len(map_open)} neobjašnjenih razlika.")},
+        {"key": "class_lists", "label": LOCK_CONDITIONS["class_lists"], "ok": not class_diff and not missing_lists and len(models) >= 1,
+         "detail": "Iste." if not class_diff and not missing_lists else f"Razlike: {', '.join(i['text'] for i in class_diff) or ', '.join(missing_lists)}"},
+        {"key": "trial_day", "label": LOCK_CONDITIONS["trial_day"], "ok": bool(passed), "detail": trial},
+    ]
+
+
+def archive_text(day: str, release: Optional[int]) -> str:
+    d = f"{day[8:10]}.{day[5:7]}.{day[0:4]}."
+    return (f"Arhiva, stanje na dan {d} Važeći izvor je Katalog u labeling toolu (izdanje {release}). "
+            "Ovaj dokument se više ne menja; nove odluke se vode samo u Katalogu.")
+
+
+def lock_status(settings: CatalogSettings) -> Dict[str, Any]:
+    venue = settings.venue_id
+    with _open_for_read(settings) as conn:
+        conditions = _lock_conditions(settings, conn)
+        history = [{"action": a, "release": n, "actor": who, "reason": r, "created_at": c} for a, n, who, r, c in conn.execute(
+            "SELECT action, release_number, actor, reason, created_at FROM locks WHERE venue_id = ? ORDER BY lock_id", (venue,))]
+        locked = _is_locked(conn, venue)
+    last = history[-1] if history else None
+    return {"locked": locked, "since": last["created_at"] if locked else None, "release": last["release"] if locked else None,
+            "conditions": conditions, "can_lock": not locked and all(c["ok"] for c in conditions),
+            "archive_text": archive_text(last["created_at"], last["release"]) if locked else None, "history": list(reversed(history))}
+
+
+def _lock_write(settings: CatalogSettings, action: str, actor: Any, role: Any, reason: Any) -> Dict[str, Any]:
+    person, role = _clean_person(actor, role)
+    if role != "admin":
+        raise NotAllowed("Zaključava i otključava samo admin.")
+    why = " ".join(str(reason or "").split())[:500]
+    if not why:
+        raise CatalogError("Upiši kratku napomenu.")
+    venue = settings.venue_id
+    conn = _open_for_write(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        locked = _is_locked(conn, venue)
+        conditions = _lock_conditions(settings, conn)
+        if action == "lock":
+            if locked:
+                raise CatalogError("Već je zaključano.")
+            failed = [c for c in conditions if not c["ok"]]
+            if failed:
+                raise ReleaseBlocked("Zaključavanje nije moguće: " + "; ".join(c["label"].lower() for c in failed) + ".", conditions)
+        elif not locked:
+            raise CatalogError("Nije zaključano.")
+        live = conn.execute("SELECT MAX(number) FROM releases WHERE venue_id = ?", (venue,)).fetchone()[0]
+        at = _now()
+        conn.execute("INSERT INTO locks (venue_id, action, release_number, actor, role, reason, created_at, conditions) "
+                     "VALUES (?, ?, ?, ?, 'admin', ?, ?, ?)",
+                     (venue, action, live, person, why, at, json.dumps(conditions, ensure_ascii=False)))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return lock_status(settings)
+
+
+def lock_catalog(settings: CatalogSettings, actor: Any, role: Any, reason: Any) -> Dict[str, Any]:
+    """Owner's click: from now on the Catalog is the only source and Miro/Word are an archive."""
+    return _lock_write(settings, "lock", actor, role, reason)
+
+
+def unlock_catalog(settings: CatalogSettings, actor: Any, role: Any, reason: Any) -> Dict[str, Any]:
+    """The way back: Miro and Word count again and the Miro/Word sentences return. Recorded, nothing erased."""
+    return _lock_write(settings, "unlock", actor, role, reason)

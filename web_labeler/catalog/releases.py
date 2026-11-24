@@ -431,7 +431,12 @@ def run_checks(new: Content, baseline: Content, generated: Optional[Generated], 
 
 
 def release_json(number: int, kind: str, created_at: str, actor: str, reason: str, based_on: Optional[int],
-                 checksums: Mapping[str, str]) -> str:
+                 checksums: Mapping[str, str], decision_changes: Sequence[Mapping[str, Any]] = ()) -> str:
+    """decision_changes: POS names a Catalog decision changed against the old sources (lets a trial day explain them)."""
+    changes = [{"name": c["name"], "key": c["key"], "before": c["before"], "after": c["after"],
+                "decisions": [{k: d.get(k) for k in ("id", "actor", "reason", "created_at")} for d in c["decisions"]]}
+               for c in decision_changes]
     return json.dumps({"release": number, "kind": kind, "created_at": created_at, "actor": actor, "reason": reason,
                        "based_on": based_on, "note": "Generisano iz Kataloga. Ne menjati ručno.",
-                       "files": dict(sorted(checksums.items()))}, ensure_ascii=False, indent=2) + "\n"
+                       "files": dict(sorted(checksums.items())), "decision_changes": changes},
+                      ensure_ascii=False, indent=2) + "\n"

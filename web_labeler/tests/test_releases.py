@@ -283,6 +283,66 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(store.ReleaseBlocked):
             store.rollback_release(self.settings, 1, "Aleksa", "admin", "nazad")
 
+    # ---- locking Miro and Word (ticket 10) ----
+
+    def trial(self, release, unexplained=0, complete=True):
+        folder = self.tmp / "db" / "trial_days"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{release:04d}_20261125_run_01.json").write_text(json.dumps({
+            "release": release, "day": "20261125", "run": "run_01", "complete": complete,
+            "identical": unexplained == 0, "unexplained": unexplained}), encoding="utf-8")
+
+    def test_lock_needs_all_three_conditions_and_admin(self):
+        status = store.lock_status(self.settings)
+        self.assertFalse(status["can_lock"])
+        self.assertTrue(all(not c["ok"] for c in status["conditions"]))  # no release yet
+        self.decide("ignore", "NEW DRINK", payload={"why": "assortment"})
+        self.publish()
+        meta = json.loads((self.tmp / "releases" / "0001" / "RELEASE.json").read_text())
+        self.assertEqual(meta["decision_changes"][0]["name"], "NEW DRINK")
+        ok = {c["key"]: c["ok"] for c in store.lock_status(self.settings)["conditions"]}
+        self.assertEqual(ok, {"map": True, "class_lists": True, "trial_day": False})
+        with self.assertRaises(store.ReleaseBlocked):
+            store.lock_catalog(self.settings, "Aleksa", "admin", "probam")
+        self.trial(1, unexplained=2)
+        self.assertFalse(store.lock_status(self.settings)["can_lock"])
+        self.trial(2)  # a trial for another release does not count
+        self.assertFalse(store.lock_status(self.settings)["can_lock"])
+        self.trial(1)
+        self.assertTrue(store.lock_status(self.settings)["can_lock"])
+        with self.assertRaises(catalog.NotAllowed):
+            store.lock_catalog(self.settings, "Goca", "labeler", "probam")
+        # a changed class list on disk breaks the class-list condition
+        (self.tmp / "Models" / "Shots.yaml").write_text("names: [RED, AMBER, NEW]\n", encoding="utf-8")
+        self.assertFalse(store.lock_status(self.settings)["can_lock"])
+        (self.tmp / "Models" / "Shots.yaml").write_text("names: [RED, AMBER]\n", encoding="utf-8")
+        self.assertTrue(store.lock_status(self.settings)["can_lock"])
+
+    def test_lock_stops_miro_sentences_and_unlock_brings_them_back(self):
+        self.decide("ignore", "NEW DRINK")
+        self.publish()
+        self.trial(1)
+        sentences = lambda: [d["miro_text"] for d in catalog.list_decisions(self.settings)["items"] if d["kind"] == "ignore"]
+        self.assertTrue(all(sentences()))
+        status = store.lock_catalog(self.settings, "Aleksa", "admin", "uslovi ispunjeni")
+        self.assertTrue(status["locked"])
+        self.assertEqual(status["release"], 1)
+        self.assertTrue(status["archive_text"].startswith("Arhiva, stanje na dan "))
+        self.assertIn("izdanje 1", status["archive_text"])
+        self.assertEqual(sentences(), [None])
+        with self.assertRaises(catalog.CatalogError):
+            store.lock_catalog(self.settings, "Aleksa", "admin", "opet")
+        with self.assertRaises(catalog.NotAllowed):
+            store.unlock_catalog(self.settings, "Goca", "labeler", "nazad")
+        status = store.unlock_catalog(self.settings, "Aleksa", "admin", "povratak")
+        self.assertFalse(status["locked"])
+        self.assertTrue(all(sentences()))
+        self.assertEqual([h["action"] for h in status["history"]], ["unlock", "lock"])
+        conn = sqlite3.connect(str(self.tmp / "db" / "catalog.db"))
+        with self.assertRaises(sqlite3.IntegrityError):
+            conn.execute("DELETE FROM locks")
+        conn.close()
+
     def test_sixth_version_database_is_upgraded_and_needs_one_import(self):
         db = self.tmp / "db6" / "catalog.db"
         db.parent.mkdir()

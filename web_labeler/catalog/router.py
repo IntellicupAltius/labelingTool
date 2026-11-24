@@ -106,6 +106,25 @@ def build_catalog_router(settings: CatalogSettings) -> APIRouter:
         except CatalogError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    @router.get("/lock")
+    def catalog_lock_status() -> Dict[str, Any]:
+        try:
+            return store.lock_status(settings)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.post("/lock")
+    def catalog_lock(req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        action = store.unlock_catalog if req.get("action") == "unlock" else store.lock_catalog
+        try:
+            return action(settings, req.get("actor"), req.get("role"), req.get("reason"))
+        except NotAllowed as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except store.ReleaseBlocked as e:
+            raise blocked(e)
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     @router.get("/status")
     def catalog_status() -> Dict[str, Any]:
         return store.catalog_status(settings)
