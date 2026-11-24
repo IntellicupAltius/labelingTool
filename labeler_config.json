@@ -50,5 +50,6 @@
   "catalog_backup_dir": "/media/intellicup/Transcend/intellicup_catalog_backups/blaznavac",
   "catalog_promotions_path": "~/intellicup_storage/model_history/promotions.jsonl",
   "catalog_training_root": "~/Projects/IntelliCup/training_pipeline/config",
-  "catalog_training_archives_dir": "/opt/intellicup/datasets/temp_archives"
+  "catalog_training_archives_dir": "/opt/intellicup/datasets/temp_archives",
+  "catalog_pipeline_map_path": "~/Projects/intellicup_deep_sort/mapping/pos_to_internal_mapping.yaml"
 }

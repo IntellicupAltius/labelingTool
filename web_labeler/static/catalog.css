@@ -126,3 +126,10 @@
 .catalogTable tr.selected td { background: var(--panel); }
 .catalogCardSection.wide { grid-column: span 2; overflow-x: auto; }
 @media (max-width: 760px) { .catalogCardSection.wide { grid-column: auto; } }
+.catalogChecks { display: grid; gap: 4px; margin: 8px 0 12px; }
+.catalogCheck { padding: 6px 10px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border); font-weight: 600; }
+.catalogCheck.ok { color: #86efac; }
+.catalogCheck.bad { color: #fca5a5; border-color: var(--danger); }
+.catalogCheck ul { margin: 4px 0 0; padding-left: 18px; color: var(--text); font-weight: 400; line-height: 1.5; }
+.catalogChangeList { margin: 0 0 12px; padding-left: 18px; line-height: 1.55; }
+.catalogChangeList li.warn { color: #fbbf24; }

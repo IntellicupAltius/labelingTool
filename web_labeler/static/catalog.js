@@ -30,6 +30,7 @@
   const viewArticles = document.getElementById("catalogViewArticles");
   const viewDecisions = document.getElementById("catalogViewDecisions");
   const viewModelCards = document.getElementById("catalogViewModelCards");
+  const viewReleases = document.getElementById("catalogViewReleases");
   const NOT_RECORDED = "nije zabeleženo";
   let openCardFile = null;
   let cardRetries = 0;
@@ -298,7 +299,10 @@
       response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     } catch (_) { throw new Error("Server trenutno nije dostupan. Pokušaj ponovo."); }
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.detail || "Nije sačuvano.");
+    if (!response.ok) {
+      const detail = data.detail && typeof data.detail === "object" ? data.detail.message : data.detail;
+      throw new Error(detail || "Nije sačuvano.");
+    }
     return data;
   }
 
@@ -1020,6 +1024,119 @@
     body.replaceChildren(...nodes);
   }
 
+  // ---------------- Releases ----------------
+
+  function checkList(checks) {
+    const list = el("div", "catalogChecks");
+    for (const c of checks) {
+      const row = el("div", c.ok ? "catalogCheck ok" : "catalogCheck bad", `${c.ok ? "✔" : "✖"} ${c.label}`);
+      if (!c.ok) {
+        const ul = el("ul");
+        c.problems.slice(0, 30).forEach((p) => ul.append(el("li", "", p)));
+        if (c.problems.length > 30) ul.append(el("li", "", `i još ${c.problems.length - 30}`));
+        row.append(ul);
+      }
+      list.append(row);
+    }
+    return list;
+  }
+
+  function changeList(changes, empty) {
+    if (!changes.length) return el("div", "catalogHint small", empty);
+    const ul = el("ul", "catalogChangeList");
+    changes.forEach((c) => ul.append(el("li", c.kind === "lost" ? "warn" : "", c.text)));
+    return ul;
+  }
+
+  function parityBlock(parity) {
+    const box = el("details", "catalogGroup");
+    box.open = parity.unexplained > 0;
+    const head = parity.identical ? "Istovetno sa današnjim fajlovima"
+      : `Razlike od današnjih fajlova: ${parity.items.length}, neobjašnjeno: ${parity.unexplained}`;
+    box.append(el("summary", "", head));
+    const counts = Object.entries(parity.counts).map(([area, n]) => n ? null : area).filter(Boolean);
+    if (counts.length) box.append(el("div", "catalogSubhead", "Bez ijedne razlike: " + counts.map((a) => ({
+      map: "mapa za pipeline", blacklist: "lista za ignorisanje", class_lists: "liste klasa", training: "spajanja i izbacivanja",
+      documented: "dokumentovane klase" })[a]).join(", ") + "."));
+    for (const item of parity.items) {
+      const card = el("div", `catalogFinding ${item.explained ? "" : "high"}`);
+      card.append(el("div", "catalogFindingModel", item.area_label));
+      card.append(el("div", "catalogFindingTitle", item.text));
+      card.append(el("p", "", item.why));
+      if (item.details && item.details.length) {
+        const ul = el("ul");
+        item.details.forEach((d) => ul.append(el("li", "", d)));
+        card.append(ul);
+      }
+      box.append(card);
+    }
+    return box;
+  }
+
+  function releaseRow(r) {
+    const card = el("div", `catalogFinding ${r.live ? "medium" : ""}`);
+    const kind = r.kind === "rollback" ? `vraćeno na izdanje ${r.based_on}` : "objava";
+    card.append(el("div", "catalogFindingTitle", `Izdanje ${r.number}${r.live ? " (važeće)" : ""}`));
+    card.append(el("div", "catalogFindingModel", `${formatTime(r.created_at)}, ${r.actor}, ${kind}`));
+    card.append(el("p", "", r.reason));
+    if (r.intact === false) card.append(el("div", "catalogNoDesc", "Fajlovi na disku se ne slažu sa zapisom izdanja. Javi administratoru."));
+    const changes = el("details");
+    changes.append(el("summary", "", `Promene (${r.changes.length})`), changeList(r.changes, "Bez promena u mapi i listama."));
+    const files = el("details");
+    files.append(el("summary", "", `Fajlovi (${r.files.length})`));
+    const ul = el("ul");
+    for (const f of r.files) {
+      const li = el("li");
+      const a = el("a", "", f.path);
+      a.href = `/api/catalog/releases/${r.number}/files/${f.path.split("/").map(encodeURIComponent).join("/")}`;
+      a.target = "_blank";
+      li.append(a);
+      ul.append(li);
+    }
+    files.append(ul);
+    card.append(changes, files);
+    if (!r.live) {
+      const back = el("button", "btn small", "Vrati na ovo izdanje");
+      back.onclick = () => askReason(card, "Zašto se vraćaš na ovo izdanje?", async (reason) => {
+        await postJson(`/api/catalog/releases/${r.number}/rollback`, { actor: person(), role: roleSelect.value, reason });
+      });
+      card.append(back);
+    }
+    return card;
+  }
+
+  function renderReleases(next, list) {
+    const nodes = [el("h2", "catalogTitle", "Sledeće izdanje ")];
+    nodes[0].append(el("span", "catalogCount", `poredi se sa: ${next.baseline_label}`));
+    nodes.push(el("div", "catalogSubhead",
+      "Rad u senci: objavljeno izdanje ide u poseban folder i pipeline ga još ne čita. Mapa, liste i dokumenti u produkciji se ne menjaju."));
+    nodes.push(checkList(next.checks));
+    nodes.push(el("h3", "catalogVarHead", "Šta se menja"));
+    nodes.push(changeList(next.changes, next.same_as_live ? "Isto kao važeće izdanje." : "Nema promena."));
+    nodes.push(parityBlock(next.parity));
+    const form = el("div", "catalogAsk");
+    const note = el("input", "catalogReason");
+    note.placeholder = "Napomena: šta ovo izdanje donosi";
+    const publish = el("button", "btn primary", "Objavi izdanje");
+    const msg = el("span", "catalogPasteMsg");
+    publish.disabled = !next.can_publish;
+    if (!next.can_publish) msg.textContent = next.same_as_live ? "Nema šta da se objavi." : "Objava nije moguća dok provere ne prođu.";
+    publish.onclick = async () => {
+      publish.disabled = true;
+      try {
+        const r = await postJson("/api/catalog/releases", { actor: person(), role: roleSelect.value, reason: note.value.trim() });
+        showToast(`Izdanje ${r.number} je objavljeno.`);
+        loadClasses();
+      } catch (e) { msg.textContent = e.message; publish.disabled = false; }
+    };
+    form.append(note, publish, msg);
+    nodes.push(form);
+    nodes.push(el("h2", "catalogTitle", "Objavljena izdanja"));
+    if (!list.releases.length) nodes.push(el("div", "catalogHint small", "Još nijedno izdanje nije objavljeno."));
+    list.releases.forEach((r) => nodes.push(releaseRow(r)));
+    body.replaceChildren(...nodes);
+  }
+
   // ---------------- Model cards (read only) ----------------
 
   function shown(v, fmt) {
@@ -1226,6 +1343,11 @@
         if (no === requestNo) renderMiro(data);
         return;
       }
+      if (view === "releases") {
+        const [next, list] = await Promise.all([getJson("/api/catalog/releases/next"), getJson("/api/catalog/releases")]);
+        if (no === requestNo) renderReleases(next, list);
+        return;
+      }
       if (view === "modelcards") {
         const model = modelSelect.value;
         const data = await getJson("/api/catalog/model-cards");
@@ -1264,6 +1386,7 @@
     viewArticles.classList.toggle("primary", view === "articles");
     viewDecisions.classList.toggle("primary", view === "decisions");
     viewModelCards.classList.toggle("primary", view === "modelcards");
+    viewReleases.classList.toggle("primary", view === "releases");
     selectedVariation = null;
     openCardFile = null;
     cardRetries = 0;
@@ -1308,7 +1431,8 @@
     viewEvidence.classList.toggle("hidden", !admin);
     viewDecisions.classList.toggle("hidden", !admin);
     viewModelCards.classList.toggle("hidden", !admin);
-    if (!admin && ["report", "miro", "evidence", "decisions", "modelcards"].includes(view)) setView("classes");
+    viewReleases.classList.toggle("hidden", !admin);
+    if (!admin && ["report", "miro", "evidence", "decisions", "modelcards", "releases"].includes(view)) setView("classes");
     else if (openArticle !== null && !panel.classList.contains("hidden")) showArticle(openArticle);
     else if (!panel.classList.contains("hidden")) loadClasses();
   }
@@ -1328,6 +1452,8 @@
   viewReport.onclick = () => setView("report");
   viewModelCards.classList.toggle("hidden", roleSelect.value !== "admin");
   viewModelCards.onclick = () => setView("modelcards");
+  viewReleases.classList.toggle("hidden", roleSelect.value !== "admin");
+  viewReleases.onclick = () => setView("releases");
   modelSelect.onchange = () => { selectedClass = null; selectedVariation = null; openCardFile = null; loadClasses(); };
   viewClasses.onclick = () => setView("classes");
   viewUnclassified.onclick = () => setView("unclassified");

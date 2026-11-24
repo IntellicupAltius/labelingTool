@@ -40,6 +40,7 @@ class RulesPlan:
     texts: List[Dict[str, Any]]
     findings: List[Dict[str, Any]]
     report: Dict[str, Any]
+    training_classes: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # model -> `classes:` of the training config
 
 
 def _read_yaml(path: Optional[Path]) -> Optional[Dict[str, Any]]:
@@ -250,6 +251,7 @@ def build_rules_plan(sources: RuleSources, class_lists: Mapping[str, List[str]],
     classes: Dict[str, Dict[str, Dict[str, Any]]] = {}
     texts: List[Dict[str, Any]] = []
     findings: List[Dict[str, Any]] = []
+    training_classes: Dict[str, Dict[str, Any]] = {}
     for model_name, names in sorted(class_lists.items()):
         model = model_name.lower()
         config = _read_yaml(sources.training_config_dir / f"{model}.yaml")
@@ -259,6 +261,9 @@ def build_rules_plan(sources: RuleSources, class_lists: Mapping[str, List[str]],
                                      [(SRC_CONFIG, "fajl nije pronađen ili nije ispravan")]))
             config = {}
         excluded, target, groups = resolve_training(names, config)
+        if isinstance(config.get("classes"), dict):
+            training_classes[model] = {k: config["classes"][k] for k in ("exclude", "exclude_prefixes", "unite")
+                                       if k in config["classes"]}
         live_data = _read_yaml(sources.live_models_dir / model / "active_classes.yaml") if sources.live_models_dir else None
         live = {str(n) for n in (live_data or {}).get("names") or [] if str(n) != "background"} or None
 
@@ -363,4 +368,4 @@ def build_rules_plan(sources: RuleSources, class_lists: Mapping[str, List[str]],
     order = {HIGH: 0, MEDIUM: 1, INFO: 2}
     findings.sort(key=lambda f: (order[f["severity"]], f["model"] or "", f["class"] or "", f["title"]))
     counts = {k: sum(f["severity"] == k for f in findings) for k in order}
-    return RulesPlan(classes, texts, findings, {"findings": counts, "rule_texts": len(texts)})
+    return RulesPlan(classes, texts, findings, {"findings": counts, "rule_texts": len(texts)}, training_classes)

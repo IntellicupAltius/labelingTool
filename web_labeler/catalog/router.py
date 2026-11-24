@@ -52,6 +52,60 @@ def build_catalog_router(settings: CatalogSettings) -> APIRouter:
                 pass
         return {"refreshing": stale, "snapshot": snapshot}
 
+    def blocked(e: store.ReleaseBlocked) -> HTTPException:
+        return HTTPException(status_code=409, detail={"message": str(e), "checks": e.checks})
+
+    @router.get("/releases")
+    def catalog_releases() -> Dict[str, Any]:
+        try:
+            return store.list_releases(settings)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/releases/next")
+    def catalog_next_release() -> Dict[str, Any]:
+        try:
+            return store.next_release(settings)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @router.get("/releases/{number}/files/{path:path}")
+    def catalog_release_file(number: int, path: str) -> Response:
+        try:
+            return Response(store.release_file(settings, number, path), media_type="text/plain; charset=utf-8")
+        except store.UnknownRelease:
+            raise HTTPException(status_code=404, detail="Taj fajl ne postoji u tom izdanju.")
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.post("/releases")
+    def catalog_publish(req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        try:
+            return store.publish_release(settings, req.get("actor"), req.get("role"), req.get("reason"))
+        except NotAllowed as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except store.ReleaseBlocked as e:
+            raise blocked(e)
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.post("/releases/{number}/rollback")
+    def catalog_rollback(number: int, req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        try:
+            return store.rollback_release(settings, number, req.get("actor"), req.get("role"), req.get("reason"))
+        except NotAllowed as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except store.UnknownRelease:
+            raise HTTPException(status_code=404, detail="To izdanje ne postoji.")
+        except store.ReleaseBlocked as e:
+            raise blocked(e)
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     @router.get("/status")
     def catalog_status() -> Dict[str, Any]:
         return store.catalog_status(settings)

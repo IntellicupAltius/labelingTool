@@ -111,6 +111,7 @@ class MapEntry:
     notes: Optional[str]
     links: List[Dict[str, Any]]
     keys: List[str]
+    names: List[str] = field(default_factory=list)  # pos_name + aliases as written, for the generated map
 
 
 def read_article_map(path: Path) -> Tuple[List[MapEntry], Dict[str, int], List[str]]:
@@ -127,7 +128,7 @@ def read_article_map(path: Path) -> Tuple[List[MapEntry], Dict[str, int], List[s
                   "note": m.get("note")} for m in (raw.get("mappings") or []) if m.get("model") and m.get("class")]
         names = [str(raw.get("pos_name", ""))] + [str(a) for a in (raw.get("aliases") or [])]
         entry = MapEntry(names[0], str(raw.get("status", "incl")), raw.get("mapping_mode"), raw.get("provisional"),
-                         raw.get("price_rsd"), raw.get("notes"), links, [])
+                         raw.get("price_rsd"), raw.get("notes"), links, [], [n.strip() for n in names if n.strip()])
         index = len(entries)
         entries.append(entry)
         for name in names:
@@ -228,6 +229,7 @@ class AssortmentPlan:
     entries: List[MapEntry]
     owner: Dict[str, int]
     report: Dict[str, Any]
+    blacklist_lines: List[str] = field(default_factory=list)  # the file as written, comments included
 
 
 def _baseline_report(baseline: Dict[str, Any], read: PosRead, states: Dict[Pair, str], entries: List[MapEntry],
@@ -270,4 +272,5 @@ def build_plan(pos_dir: Path, adapter: str, article_map: Path, blacklist_path: P
     }
     if baseline:
         report["baseline"] = _baseline_report(baseline, read, states, entries, owner, blacklist, active_days)
-    return AssortmentPlan(stats, states, groups, entries, owner, report)
+    lines = Path(blacklist_path).read_text(encoding="utf-8").splitlines()
+    return AssortmentPlan(stats, states, groups, entries, owner, report, lines)

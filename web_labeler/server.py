@@ -323,10 +323,13 @@ def create_app() -> FastAPI:
                       "raw_base_path", "raw_review_dir", "relabel_batches_dir", "article_map_path",
                       "analyzer_models_root", "analyzer_raw_root", "analyzer_models_python", "metrics_python",
                       "catalog_db_path", "catalog_venue_id", "catalog_venue_name", "catalog_media_dir",
-                      "catalog_dataset_dir", "catalog_live_models_dir", "catalog_promotions_path",
-                      "catalog_training_root", "catalog_training_archives_dir", "catalog_training_tenant"):
+                      "catalog_dataset_dir"):
                 if isinstance(cfg.get(k), str) and cfg.get(k).strip():
                     merged[k] = cfg[k].strip()
+            # The Catalog reads its own settings (paths, venue data, dicts): pass every catalog_* key through.
+            for k, v in cfg.items():
+                if k.startswith("catalog_") and k not in merged and v not in (None, ""):
+                    merged[k] = v.strip() if isinstance(v, str) else v
             if isinstance(cfg.get("bar_counter_options"), list) and cfg.get("bar_counter_options"):
                 merged["bar_counter_options"] = cfg["bar_counter_options"]
             return merged

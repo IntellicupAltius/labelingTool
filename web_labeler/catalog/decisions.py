@@ -33,6 +33,8 @@ class Variation:
     links: List[Tuple[str, str]] = field(default_factory=list)
     decided: bool = False
     source_article_id: int = 0
+    last_decision: int = 0
+    awaiting_release: bool = False
 
 
 @dataclass
@@ -86,19 +88,20 @@ def apply(variations: Dict[int, Variation], decisions: List[Decision], as_of: st
             v.provisional = d.payload.get("provisional") or None
             v.state = "tracked" if v.links else "pending"
             v.not_verified = bool(v.links)
-            v.decided = True
+            v.decided, v.last_decision = True, max(v.last_decision, d.decision_id)
         elif d.kind == "provisional":
             v = variations.get(d.identity_id)
             if v is not None:
                 v.provisional = d.payload.get("provisional") or None
-                v.decided = True
+                v.decided, v.last_decision = True, max(v.last_decision, d.decision_id)
         elif d.kind == "ignore":
             target = resolve(d.article_id, merges)
             for v in variations.values():
                 if v.article_id == target:
                     v.state, v.links, v.decided = "ignored", [], True
+                    v.last_decision = max(v.last_decision, d.decision_id)
         elif d.kind == "merge":
             for v in variations.values():
                 if v.source_article_id == d.article_id:
-                    v.decided = True
+                    v.decided, v.last_decision = True, max(v.last_decision, d.decision_id)
     return merges

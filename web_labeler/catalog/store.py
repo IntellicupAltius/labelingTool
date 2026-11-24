@@ -16,12 +16,14 @@ from web_labeler.catalog import decisions as _decisions
 from web_labeler.catalog import examples as _examples
 from web_labeler.catalog import miro as _miro
 from web_labeler.catalog import model_cards as _model_cards
+from web_labeler.catalog import releases as _releases
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
            "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings",
-           "miro_pages", "miro_suggested", "miro_reviews", "miro_links", "evidence", "evidence_events", "decisions"}
+           "miro_pages", "miro_suggested", "miro_reviews", "miro_links", "evidence", "evidence_events", "decisions",
+           "map_names", "source_lines", "training_classes", "releases"}
 
 _SCHEMA = """
 CREATE TABLE venues (
@@ -246,6 +248,48 @@ CREATE TRIGGER decisions_no_delete BEFORE DELETE ON decisions
 BEGIN SELECT RAISE(ABORT, 'decisions are append-only'); END;
 """
 
+_SCHEMA_V7 = """
+CREATE TABLE map_names (
+    entry_id INTEGER NOT NULL REFERENCES map_entries(entry_id),
+    position INTEGER NOT NULL,
+    name     TEXT NOT NULL,
+    PRIMARY KEY (entry_id, position)
+);
+CREATE TABLE source_lines (
+    venue_id TEXT NOT NULL,
+    source   TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    line     TEXT NOT NULL,
+    PRIMARY KEY (venue_id, source, position)
+);
+CREATE TABLE training_classes (
+    venue_id  TEXT NOT NULL,
+    model_key TEXT NOT NULL,
+    config    TEXT NOT NULL,
+    PRIMARY KEY (venue_id, model_key)
+);
+CREATE TABLE releases (
+    release_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id       TEXT NOT NULL REFERENCES venues(venue_id),
+    number         INTEGER NOT NULL CHECK (number >= 1),
+    kind           TEXT NOT NULL CHECK (kind IN ('publish', 'rollback')),
+    based_on       INTEGER,
+    actor          TEXT NOT NULL,
+    role           TEXT NOT NULL CHECK (role = 'admin'),
+    reason         TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    decisions_upto INTEGER NOT NULL DEFAULT 0,
+    files          TEXT NOT NULL,
+    checksums      TEXT NOT NULL,
+    summary        TEXT NOT NULL,
+    UNIQUE (venue_id, number)
+);
+CREATE TRIGGER releases_no_update BEFORE UPDATE ON releases
+BEGIN SELECT RAISE(ABORT, 'a published release never changes'); END;
+CREATE TRIGGER releases_no_delete BEFORE DELETE ON releases
+BEGIN SELECT RAISE(ABORT, 'a published release never changes'); END;
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -285,6 +329,8 @@ class CatalogSettings:
     dataset_dir: Optional[Path] = None
     backup_dir: Optional[Path] = None
     model_cards: Optional[_model_cards.ModelCardSources] = None
+    release_dir: Optional[Path] = None
+    pipeline_map_path: Optional[Path] = None
 
     @classmethod
     def from_config(cls, cfg: Mapping[str, Any], models_dir: Path,
@@ -338,7 +384,9 @@ class CatalogSettings:
                    rule_sources, optional_path("catalog_miro_dir"),
                    {str(k): str(v) for k, v in miro_files.items()} if isinstance(miro_files, dict) else None,
                    optional_path("catalog_miro_suggestions_path"), media_dir, dataset_dir,
-                   optional_path("catalog_backup_dir"), model_cards)
+                   optional_path("catalog_backup_dir"), model_cards,
+                   optional_path("catalog_release_dir") or (db_path.parent / "releases" if db_path else None),
+                   optional_path("catalog_pipeline_map_path"))
 
     @classmethod
     def from_config_file(cls, config_path: Path) -> "CatalogSettings":
@@ -406,10 +454,10 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}"
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}"
                                f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3, 4, 5):
-            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6][version - 1:]
+        elif version in (1, 2, 3, 4, 5, 6):
+            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7][version - 1:]
             conn.executescript(f"BEGIN;{''.join(steps)}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version != SCHEMA_VERSION:
             raise CatalogError(f"Unsupported Catalog database version: {version}")
@@ -442,6 +490,7 @@ def _apply_assortment(conn: sqlite3.Connection, venue: str, plan: _assortment.As
     norm = _assortment.normalize_name
     old_entries = [r[0] for r in conn.execute("SELECT entry_id FROM map_entries WHERE venue_id = ?", (venue,))]
     conn.executemany("DELETE FROM class_links WHERE entry_id = ?", [(i,) for i in old_entries])
+    conn.executemany("DELETE FROM map_names WHERE entry_id = ?", [(i,) for i in old_entries])
     conn.execute("DELETE FROM map_keys WHERE venue_id = ?", (venue,))
     conn.execute("DELETE FROM map_entries WHERE venue_id = ?", (venue,))
     entry_ids: List[int] = []
@@ -455,6 +504,11 @@ def _apply_assortment(conn: sqlite3.Connection, venue: str, plan: _assortment.As
                          [(cur.lastrowid, i, l["model"], l["class"], l["priority"], l["note"]) for i, l in enumerate(e.links)])
         conn.executemany("INSERT INTO map_keys (venue_id, norm_name, entry_id) VALUES (?, ?, ?)",
                          [(venue, k, cur.lastrowid) for k in e.keys])
+        conn.executemany("INSERT INTO map_names (entry_id, position, name) VALUES (?, ?, ?)",
+                         [(cur.lastrowid, i, n) for i, n in enumerate(e.names)])
+    conn.execute("DELETE FROM source_lines WHERE venue_id = ? AND source = 'blacklist'", (venue,))
+    conn.executemany("INSERT INTO source_lines (venue_id, source, position, line) VALUES (?, 'blacklist', ?, ?)",
+                     [(venue, i, line) for i, line in enumerate(plan.blacklist_lines)])
 
     known_pairs = {(c, n): a for c, n, a in conn.execute(
         "SELECT code, name, article_id FROM pos_identities WHERE venue_id = ? AND code IS NOT NULL", (venue,))}
@@ -542,8 +596,11 @@ def _apply_assortment(conn: sqlite3.Connection, venue: str, plan: _assortment.As
 
 
 def _apply_rules(conn: sqlite3.Connection, venue: str, plan: _rules.RulesPlan) -> None:
-    for table in ("class_training", "class_rule_texts", "source_findings"):
+    for table in ("class_training", "class_rule_texts", "source_findings", "training_classes"):
         conn.execute(f"DELETE FROM {table} WHERE venue_id = ?", (venue,))
+    conn.executemany("INSERT INTO training_classes (venue_id, model_key, config) VALUES (?, ?, ?)",
+                     [(venue, model, json.dumps(cfg, ensure_ascii=False, sort_keys=True))
+                      for model, cfg in plan.training_classes.items()])
     conn.executemany("INSERT INTO class_training (venue_id, model_key, class_id, trained_name, state) VALUES (?, ?, ?, ?, ?)",
                      [(venue, model, row["class_id"], row["trained_name"], row["state"])
                       for model, rows in plan.classes.items() for row in rows.values()])
@@ -771,7 +828,7 @@ def _variation(v: _decisions.Variation, evidence: Optional[Mapping[int, Dict[str
         tags.append("sve stornirano")
     if ev["pending"]:
         tags.append("slika čeka potvrdu")
-    if v.decided:
+    if v.awaiting_release:
         tags.append("ručna odluka, čeka izdanje")
     image = None if ev["confirmed"] is None else {"evidence_id": ev["confirmed"], "url": _evidence_url(ev["confirmed"]),
                                                   "source_label": EVIDENCE_SOURCE_LABEL}
@@ -828,6 +885,9 @@ def _current(conn: sqlite3.Connection, venue: str, as_of: Optional[str] = None) 
         result[identity_id] = _decisions.Variation(identity_id, article_id, code, name, state, sold, last_sale,
                                                    bool(not_verified), provisional, mode, links)
     _decisions.apply(result, _load_decisions(conn, venue), as_of or _today())
+    released = conn.execute("SELECT MAX(decisions_upto) FROM releases WHERE venue_id = ?", (venue,)).fetchone()[0] or 0
+    for v in result.values():
+        v.awaiting_release = v.decided and v.last_decision > released
     return result
 
 
@@ -1605,3 +1665,268 @@ def article_card(settings: CatalogSettings, article_id: int, as_of: Optional[str
 def list_evidence_conn(conn: sqlite3.Connection, venue: str, identity_id: int) -> List[Dict[str, Any]]:
     rows = conn.execute(_EVIDENCE_SELECT + "AND e.identity_id = ? ORDER BY e.evidence_id DESC", (venue, identity_id)).fetchall()
     return [_evidence_item(conn, r) for r in rows]
+
+
+# ---------------- Releases ----------------
+
+RELEASE_LIVE_LABEL = "važeće izdanje"
+PRODUCTION_LABEL = "današnji fajlovi"
+
+
+class UnknownRelease(Exception):
+    pass
+
+
+class ReleaseBlocked(Exception):
+    """A check failed; nothing was published. `checks` says which."""
+
+    def __init__(self, message: str, checks: List[Dict[str, Any]]):
+        super().__init__(message)
+        self.checks = checks
+
+
+def _production_paths(settings: CatalogSettings) -> _releases.ProductionPaths:
+    rules = settings.rule_sources
+    return _releases.ProductionPaths(settings.pipeline_map_path, settings.blacklist_path, settings.source_models_dir,
+                                     rules.training_config_dir if rules else None, rules.documented_dir if rules else None)
+
+
+def _live_classes(settings: CatalogSettings, models: Iterable[str]) -> Dict[str, Optional[set]]:
+    root = settings.model_cards.models_dir if settings.model_cards else (
+        settings.rule_sources.live_models_dir if settings.rule_sources else None)
+    out: Dict[str, Optional[set]] = {}
+    for model in {m.lower() for m in models}:
+        data = _rules._read_yaml(root / model / "active_classes.yaml") if root else None
+        names = (data or {}).get("names")
+        out[model] = {str(n) for n in names if str(n) != "background"} if isinstance(names, list) else None
+    return out
+
+
+def _release_sources(conn: sqlite3.Connection, venue: str) -> _releases.ReleaseSources:
+    entries = []
+    rows = conn.execute("SELECT entry_id, status FROM map_entries WHERE venue_id = ? ORDER BY entry_id", (venue,)).fetchall()
+    for entry_id, status in rows:
+        names = [n for n, in conn.execute("SELECT name FROM map_names WHERE entry_id = ? ORDER BY position", (entry_id,))]
+        links = [(m, c) for m, c in conn.execute(
+            "SELECT model_key, class_name FROM class_links WHERE entry_id = ? ORDER BY position", (entry_id,))]
+        entries.append(_releases.MapSource(status, names, links))
+    if rows and not any(e.names for e in entries):
+        raise CatalogError("Pokreni uvoz još jednom: ova verzija Kataloga čuva imena iz mape tačno kako su napisana.")
+    blacklist = [l for l, in conn.execute("SELECT line FROM source_lines WHERE venue_id = ? AND source = 'blacklist' "
+                                          "ORDER BY position", (venue,))]
+    current = _current(conn, venue)
+    decisions = _load_decisions(conn, venue)
+    active = _decisions.in_force(decisions, _today())
+    merges = _decisions.merge_map(active)
+    info = {i: {"id": i, "actor": a, "reason": r, "created_at": c} for i, a, r, c in conn.execute(
+        "SELECT decision_id, actor, reason, created_at FROM decisions WHERE venue_id = ?", (venue,))}
+    by_identity: Dict[int, List[Dict[str, Any]]] = {}
+    by_article: Dict[int, List[Dict[str, Any]]] = {}
+    for d in active:
+        if d.kind == "classes" and d.identity_id is not None:
+            by_identity.setdefault(d.identity_id, []).append(info[d.decision_id])
+        elif d.kind == "ignore" and d.article_id is not None:
+            by_article.setdefault(_decisions.resolve(d.article_id, merges), []).append(info[d.decision_id])
+    variations = [_releases.VariationState(v.identity_id, v.article_id, v.code, v.name, v.state, list(v.links),
+                                           by_identity.get(v.identity_id, []) + by_article.get(v.article_id, []))
+                  for v in current.values()]
+    classes: Dict[str, List[str]] = {}
+    for model, name in conn.execute("SELECT model_key, name FROM classes WHERE venue_id = ? ORDER BY model_key, class_id", (venue,)):
+        classes.setdefault(model, []).append(name)
+    training = {m: json.loads(c) for m, c in conn.execute("SELECT model_key, config FROM training_classes WHERE venue_id = ?", (venue,))}
+    return _releases.ReleaseSources(entries, blacklist, variations, classes, training)
+
+
+def _release_rows(conn: sqlite3.Connection, venue: str) -> List[Dict[str, Any]]:
+    rows = conn.execute("SELECT number, kind, based_on, actor, reason, created_at, decisions_upto, files, checksums, summary "
+                        "FROM releases WHERE venue_id = ? ORDER BY number", (venue,)).fetchall()
+    return [{"number": n, "kind": k, "based_on": b, "actor": a, "reason": r, "created_at": c, "decisions_upto": u,
+             "files": json.loads(f), "checksums": json.loads(cs), "summary": json.loads(sm)}
+            for n, k, b, a, r, c, u, f, cs, sm in rows]
+
+
+def _prepare(settings: CatalogSettings, conn: sqlite3.Connection) -> Dict[str, Any]:
+    venue = settings.venue_id
+    src = _release_sources(conn, venue)
+    generated = _releases.generate(src)
+    new = _releases.parse_files(generated.files)
+    production = _releases.read_production(_production_paths(settings), src.classes)
+    releases = _release_rows(conn, venue)
+    live = releases[-1] if releases else None
+    baseline = _releases.parse_files(live["files"]) if live else production
+    checks = _releases.run_checks(new, baseline, generated, src, _live_classes(settings, src.classes))
+    same = live is not None and live["files"] == generated.files
+    return {"generated": generated, "new": new, "production": production, "live": live, "baseline": baseline,
+            "checks": checks, "same_as_live": same,
+            "decisions_upto": conn.execute("SELECT IFNULL(MAX(decision_id), 0) FROM decisions WHERE venue_id = ?",
+                                           (venue,)).fetchone()[0]}
+
+
+def _public(row: Dict[str, Any], current: Optional[int], intact: Optional[bool] = None) -> Dict[str, Any]:
+    return {k: row[k] for k in ("number", "kind", "based_on", "actor", "reason", "created_at")} | {
+        "live": row["number"] == current, "changes": row["summary"].get("changes", []),
+        "files": [{"path": p, "sha256": h} for p, h in sorted(row["checksums"].items())], "intact": intact}
+
+
+def next_release(settings: CatalogSettings) -> Dict[str, Any]:
+    """The release that would be published now: changes, checks and parity with today's files. Changes nothing."""
+    with _open_for_read(settings) as conn:
+        prep = _prepare(settings, conn)
+    live = prep["live"]
+    changes = _releases.describe_changes(prep["baseline"], prep["new"])
+    ok = all(c["ok"] for c in prep["checks"])
+    return {"baseline_label": f"{RELEASE_LIVE_LABEL} {live['number']}" if live else PRODUCTION_LABEL,
+            "live_number": live["number"] if live else None, "changes": changes, "checks": prep["checks"],
+            "same_as_live": prep["same_as_live"], "can_publish": ok and not prep["same_as_live"],
+            "parity": _releases.parity(prep["production"], prep["generated"], prep["new"]),
+            "decision_changes": prep["generated"].changes,
+            "files": [{"path": p, "sha256": _releases.checksum(t)} for p, t in sorted(prep["generated"].files.items())]}
+
+
+def _verify_on_disk(settings: CatalogSettings, row: Dict[str, Any]) -> Optional[bool]:
+    if settings.release_dir is None:
+        return None
+    folder = settings.release_dir / f"{row['number']:04d}"
+    if not folder.is_dir():
+        return False
+    try:
+        return all((folder / p).is_file() and _releases.checksum((folder / p).read_text(encoding="utf-8")) == h
+                   for p, h in row["checksums"].items())
+    except OSError:
+        return False
+
+
+def list_releases(settings: CatalogSettings) -> Dict[str, Any]:
+    with _open_for_read(settings) as conn:
+        rows = _release_rows(conn, settings.venue_id)
+    current = rows[-1]["number"] if rows else None
+    return {"live_number": current, "release_dir": str(settings.release_dir) if settings.release_dir else None,
+            "releases": [_public(r, current, _verify_on_disk(settings, r)) for r in reversed(rows)]}
+
+
+def release_file(settings: CatalogSettings, number: int, path: str) -> str:
+    with _open_for_read(settings) as conn:
+        rows = [r for r in _release_rows(conn, settings.venue_id) if r["number"] == number]
+    if not rows or path not in rows[0]["files"]:
+        raise UnknownRelease(f"{number}/{path}")
+    return rows[0]["files"][path]
+
+
+def _write_release_folder(settings: CatalogSettings, number: int, files: Mapping[str, str], meta: str) -> Path:
+    root = settings.release_dir
+    if root is None:
+        raise CatalogError("Folder za izdanja nije podešen.")
+    for forbidden in settings.forbidden_roots:
+        if _is_within(root.resolve(), forbidden):
+            raise CatalogError(f"Izdanja ne smeju u {forbidden}")
+    production = [p for p in (settings.pipeline_map_path, settings.blacklist_path) if p]
+    if any(p.resolve().parent == root.resolve() for p in production):
+        raise CatalogError("Folder za izdanja ne sme biti folder produkcionih fajlova.")
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / f"{number:04d}"
+    if target.exists():
+        raise CatalogError(f"Izdanje {number} već postoji na disku i ne menja se.")
+    tmp = root / f".{number:04d}.tmp{os.getpid()}"
+    for path, text in list(files.items()) + [("RELEASE.json", meta)]:
+        out = tmp / path
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+        out.chmod(0o444)
+    for folder in sorted({p for p in tmp.rglob("*") if p.is_dir()} | {tmp}, key=lambda p: -len(p.parts)):
+        folder.chmod(0o555)
+    os.rename(tmp, target)
+    pointer = root / ".CURRENT.tmp"
+    pointer.write_text(f"{number}\n", encoding="utf-8")
+    os.replace(pointer, root / "CURRENT")
+    return target
+
+
+def _remove_folder(path: Path) -> None:
+    import shutil
+    for p in [path] + list(path.rglob("*")):
+        try:
+            p.chmod(0o755 if p.is_dir() else 0o644)
+        except OSError:
+            pass
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _store_release(settings: CatalogSettings, conn: sqlite3.Connection, kind: str, based_on: Optional[int], person: str,
+                   reason: str, files: Mapping[str, str], summary: Dict[str, Any], decisions_upto: int) -> Dict[str, Any]:
+    venue = settings.venue_id
+    number = conn.execute("SELECT IFNULL(MAX(number), 0) + 1 FROM releases WHERE venue_id = ?", (venue,)).fetchone()[0]
+    at = _now()
+    sums = {p: _releases.checksum(t) for p, t in files.items()}
+    conn.execute("INSERT INTO releases (venue_id, number, kind, based_on, actor, role, reason, created_at, decisions_upto, "
+                 "files, checksums, summary) VALUES (?, ?, ?, ?, ?, 'admin', ?, ?, ?, ?, ?, ?)",
+                 (venue, number, kind, based_on, person, reason, at, decisions_upto,
+                  json.dumps(dict(files), ensure_ascii=False, sort_keys=True), json.dumps(sums, sort_keys=True),
+                  json.dumps(summary, ensure_ascii=False)))
+    meta = _releases.release_json(number, kind, at, person, reason, based_on, sums)
+    folder = _write_release_folder(settings, number, files, meta)
+    try:
+        conn.execute("COMMIT")
+    except sqlite3.Error:
+        _remove_folder(folder)
+        raise
+    return {"number": number, "kind": kind, "based_on": based_on, "created_at": at, "folder": str(folder)}
+
+
+def _admin(actor: Any, role: Any, reason: Any) -> Tuple[str, str]:
+    person, role = _clean_person(actor, role)
+    if role != "admin":
+        raise NotAllowed("Izdanje objavljuje samo admin.")
+    why = " ".join(str(reason or "").split())[:500]
+    if not why:
+        raise CatalogError("Upiši kratku napomenu: šta ovo izdanje donosi.")
+    return person, why
+
+
+def publish_release(settings: CatalogSettings, actor: Any, role: Any, reason: Any) -> Dict[str, Any]:
+    """Publish the next release into the release folder. The pipeline does not read it yet (shadow)."""
+    person, why = _admin(actor, role, reason)
+    conn = _open_for_write(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        prep = _prepare(settings, conn)
+        failed = [c for c in prep["checks"] if not c["ok"]]
+        if failed:
+            raise ReleaseBlocked("Objava nije moguća: " + "; ".join(c["label"].lower() for c in failed) + ".", prep["checks"])
+        if prep["same_as_live"]:
+            raise CatalogError("Nema promena u odnosu na važeće izdanje.")
+        summary = {"changes": _releases.describe_changes(prep["baseline"], prep["new"]),
+                   "decision_changes": prep["generated"].changes}
+        return _store_release(settings, conn, "publish", None, person, why, prep["generated"].files, summary,
+                              prep["decisions_upto"])
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def rollback_release(settings: CatalogSettings, number: int, actor: Any, role: Any, reason: Any) -> Dict[str, Any]:
+    """A new release with exactly the files of an older one. Nothing is erased; the step stays in the list."""
+    person, why = _admin(actor, role, reason)
+    conn = _open_for_write(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = _release_rows(conn, settings.venue_id)
+        target = next((r for r in rows if r["number"] == number), None)
+        if target is None:
+            raise UnknownRelease(number)
+        live = rows[-1]
+        if target["files"] == live["files"]:
+            raise CatalogError("To izdanje je već važeće.")
+        content = _releases.parse_files(target["files"])
+        checks = _releases.run_checks(content, content, None, None, _live_classes(settings, content.class_lists))
+        failed = [c for c in checks if not c["ok"]]
+        if failed:
+            raise ReleaseBlocked("Vraćanje nije moguće: " + "; ".join(c["label"].lower() for c in failed) + ".", checks)
+        summary = {"changes": _releases.describe_changes(_releases.parse_files(live["files"]), content)}
+        return _store_release(settings, conn, "rollback", number, person, why, target["files"], summary, live["decisions_upto"])
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
