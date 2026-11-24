@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,11 +20,12 @@ from web_labeler.catalog import model_cards as _model_cards
 from web_labeler.catalog import releases as _releases
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
            "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings",
            "miro_pages", "miro_suggested", "miro_reviews", "miro_links", "evidence", "evidence_events", "decisions",
-           "map_names", "source_lines", "training_classes", "releases", "locks"}
+           "map_names", "source_lines", "training_classes", "releases", "locks",
+           "pos_files", "pos_file_rows", "findings", "finding_events"}
 
 _SCHEMA = """
 CREATE TABLE venues (
@@ -308,6 +310,77 @@ CREATE TRIGGER locks_no_delete BEFORE DELETE ON locks
 BEGIN SELECT RAISE(ABORT, 'lock history is append-only'); END;
 """
 
+_SCHEMA_V9 = """
+CREATE TABLE pos_files (
+    file_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id    TEXT NOT NULL REFERENCES venues(venue_id),
+    file_name   TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    received_at TEXT NOT NULL,
+    report_day  TEXT,
+    name_day    TEXT,
+    ring_first  TEXT,
+    ring_last   TEXT,
+    rows_total  INTEGER NOT NULL,
+    rows_paid   INTEGER NOT NULL,
+    rows_unpaid INTEGER NOT NULL,
+    bad_rows    INTEGER NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('ok', 'bad')),
+    baseline    INTEGER NOT NULL DEFAULT 0 CHECK (baseline IN (0, 1)),
+    UNIQUE (venue_id, sha256)
+);
+CREATE INDEX pos_files_day ON pos_files (venue_id, report_day);
+CREATE TABLE pos_file_rows (
+    file_id   INTEGER NOT NULL REFERENCES pos_files(file_id),
+    row_key   TEXT NOT NULL,
+    count     INTEGER NOT NULL,
+    code      TEXT NOT NULL,
+    name      TEXT NOT NULL,
+    ring_time TEXT NOT NULL,
+    quantity  REAL NOT NULL,
+    price     REAL NOT NULL,
+    PRIMARY KEY (file_id, row_key)
+);
+CREATE TABLE findings (
+    finding_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id   TEXT NOT NULL REFERENCES venues(venue_id),
+    kind       TEXT NOT NULL,
+    day        TEXT,
+    file_id    INTEGER REFERENCES pos_files(file_id),
+    title      TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    data       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE finding_events (
+    event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id   TEXT NOT NULL,
+    finding_id INTEGER NOT NULL REFERENCES findings(finding_id),
+    action     TEXT NOT NULL CHECK (action IN ('applied', 'denied', 'reopened')),
+    actor      TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    reason     TEXT,
+    at         TEXT NOT NULL
+);
+CREATE TRIGGER pos_files_no_delete BEFORE DELETE ON pos_files
+BEGIN SELECT RAISE(ABORT, 'received POS reports are never deleted'); END;
+CREATE TRIGGER pos_files_no_update BEFORE UPDATE ON pos_files
+BEGIN SELECT RAISE(ABORT, 'received POS reports never change'); END;
+CREATE TRIGGER pos_file_rows_no_change BEFORE UPDATE ON pos_file_rows
+BEGIN SELECT RAISE(ABORT, 'received POS rows never change'); END;
+CREATE TRIGGER pos_file_rows_no_delete BEFORE DELETE ON pos_file_rows
+BEGIN SELECT RAISE(ABORT, 'received POS rows never change'); END;
+CREATE TRIGGER findings_no_update BEFORE UPDATE ON findings
+BEGIN SELECT RAISE(ABORT, 'findings never change; decisions are events'); END;
+CREATE TRIGGER findings_no_delete BEFORE DELETE ON findings
+BEGIN SELECT RAISE(ABORT, 'findings are never deleted'); END;
+CREATE TRIGGER finding_events_no_update BEFORE UPDATE ON finding_events
+BEGIN SELECT RAISE(ABORT, 'finding history is append-only'); END;
+CREATE TRIGGER finding_events_no_delete BEFORE DELETE ON finding_events
+BEGIN SELECT RAISE(ABORT, 'finding history is append-only'); END;
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -474,10 +547,10 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}"
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}"
                                f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3, 4, 5, 6, 7):
-            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8][version - 1:]
+        elif version in (1, 2, 3, 4, 5, 6, 7, 8):
+            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8, _SCHEMA_V9][version - 1:]
             conn.executescript(f"BEGIN;{''.join(steps)}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version != SCHEMA_VERSION:
             raise CatalogError(f"Unsupported Catalog database version: {version}")
@@ -2090,3 +2163,188 @@ def lock_catalog(settings: CatalogSettings, actor: Any, role: Any, reason: Any) 
 def unlock_catalog(settings: CatalogSettings, actor: Any, role: Any, reason: Any) -> Dict[str, Any]:
     """The way back: Miro and Word count again and the Miro/Word sentences return. Recorded, nothing erased."""
     return _lock_write(settings, "unlock", actor, role, reason)
+
+
+# ---------------- POS report intake (ticket 11) ----------------
+
+from web_labeler.catalog import pos_intake as _pos  # noqa: E402
+
+FINDING_STATUS_LABELS = {"open": "Čeka odluku", "applied": "Primenjeno", "denied": "Odbijeno"}
+FINDING_ACTIONS = {"changed_file": ("Koristi novu verziju", "Zadrži staru verziju"),
+                   "name_mismatch": ("U redu, važi datum iz fajla", "Proveriti sa lokalom"),
+                   "bad_file": ("Viđeno", "Proveriti sa lokalom")}
+
+
+class UnknownFinding(Exception):
+    pass
+
+
+def _finding_status(conn: sqlite3.Connection, finding_id: int) -> str:
+    row = conn.execute("SELECT action FROM finding_events WHERE finding_id = ? ORDER BY event_id DESC LIMIT 1",
+                       (finding_id,)).fetchone()
+    return "open" if row is None or row[0] == "reopened" else row[0]
+
+
+def _add_finding(conn: sqlite3.Connection, venue: str, kind: str, day: Optional[str], file_id: Optional[int],
+                 title: str, text: str, data: Mapping[str, Any], at: str) -> None:
+    conn.execute("INSERT INTO findings (venue_id, kind, day, file_id, title, text, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                 (venue, kind, day, file_id, title, text, json.dumps(dict(data), ensure_ascii=False), at))
+
+
+def _active_file(conn: sqlite3.Connection, venue: str, day: str) -> Optional[int]:
+    """The version of a day that counts: the newest good one, unless the admin chose to keep an older one."""
+    for file_id, in conn.execute("SELECT file_id FROM pos_files WHERE venue_id = ? AND report_day = ? AND status = 'ok' "
+                                 "ORDER BY file_id DESC", (venue, day)):
+        denied = [f for f, in conn.execute("SELECT finding_id FROM findings WHERE venue_id = ? AND kind = 'changed_file' "
+                                           "AND file_id = ?", (venue, file_id)) if _finding_status(conn, f) == "denied"]
+        if not denied:
+            return file_id
+    return None
+
+
+def receive_pos_reports(settings: CatalogSettings, now: Optional[datetime] = None,
+                        settle_seconds: int = _pos.SETTLE_SECONDS) -> Dict[str, Any]:
+    """Read new, complete POS reports into the Catalog. The drop folder, the map and RAW are never touched.
+
+    The first run only records what is already there (baseline, no findings), so old days do not flood the list.
+    """
+    if not settings.pos_dir or not settings.pos_adapter:
+        raise CatalogError("POS folder is not configured (catalog_pos_dir, catalog_pos_adapter)")
+    if settings.media_dir is None:
+        raise CatalogError("Catalog media folder is not configured")
+    now = now or datetime.now()
+    venue = settings.venue_id
+    conn = _open_for_write(settings)
+    report: Dict[str, Any] = {"received": [], "waiting": [], "findings": 0, "baseline": False}
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("INSERT OR IGNORE INTO venues (venue_id, name, created_at) VALUES (?, ?, ?)",
+                     (venue, settings.venue_name or venue, _now()))
+        known = {sha for sha, in conn.execute("SELECT sha256 FROM pos_files WHERE venue_id = ?", (venue,))}
+        baseline = not known
+        report["baseline"] = baseline
+        ready, report["waiting"] = _pos.find_new(settings.pos_dir, settings.pos_adapter, known, now, settle_seconds)
+        copies = []
+        for path in ready:
+            item = _pos.read_report(path, settings.pos_adapter)
+            if item.sha256 in known:  # same bytes under another name
+                continue
+            known.add(item.sha256)
+            at = _now()
+            first, last = item.ring_span
+            previous = _active_file(conn, venue, item.report_day) if item.report_day else None
+            file_id = conn.execute(
+                "INSERT INTO pos_files (venue_id, file_name, sha256, size, received_at, report_day, name_day, ring_first, ring_last, "
+                "rows_total, rows_paid, rows_unpaid, bad_rows, status, baseline) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (venue, item.name, item.sha256, item.size, at, item.report_day, item.name_day, first, last, item.rows_total,
+                 item.rows_paid, item.rows_unpaid, len(item.bad_rows), "bad" if item.error else "ok", int(baseline))).lastrowid
+            conn.executemany("INSERT INTO pos_file_rows (file_id, row_key, count, code, name, ring_time, quantity, price) "
+                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                             [(file_id, json.dumps(list(key), ensure_ascii=False), count, r.code, r.name,
+                               r.ring_time.isoformat(sep=" "), r.quantity, r.price) for key, (count, r) in item.rows.items()])
+            copies.append((path, settings.media_dir / "pos" / f"{item.sha256}{path.suffix}"))
+            report["received"].append({"file": item.name, "day": item.report_day, "rows": item.rows_paid,
+                                       "status": "bad" if item.error else "ok"})
+            if baseline:
+                continue
+            day_text = _pos.fmt_day(item.report_day)
+            if item.error:
+                _add_finding(conn, venue, "bad_file", item.report_day, file_id, f"Neispravan POS izveštaj: {item.name}",
+                             item.error + " Ne koristi se.", {"file": item.name}, at)
+            if item.name_day and item.report_day and item.name_day != item.report_day:
+                _add_finding(conn, venue, "name_mismatch", item.report_day, file_id,
+                             f"Ime fajla i datum se ne slažu: {item.name}",
+                             f"Ime fajla kaže {_pos.fmt_day(item.name_day)}, a u fajlu piše {day_text} Važi datum iz fajla.",
+                             {"file": item.name, "name_day": item.name_day}, at)
+            if previous is not None and not item.error:
+                old_name, = conn.execute("SELECT file_name FROM pos_files WHERE file_id = ?", (previous,)).fetchone()
+                old_keys = [tuple(json.loads(k)) for k, in conn.execute("SELECT row_key FROM pos_file_rows WHERE file_id = ?", (previous,))]
+                diff = _pos.compare_versions(old_keys, item)
+                _add_finding(conn, venue, "changed_file", item.report_day, file_id, f"Izmenjen izveštaj za {day_text}",
+                             f"Stigla je nova verzija ({item.name}) za dan koji već postoji ({old_name}): "
+                             f"{diff['only_new']} novih redova, {diff['only_old']} redova kojih više nema, {diff['both']} istih. "
+                             "Važi nova verzija dok ne odlučiš drugačije; obe verzije su sačuvane.",
+                             dict(diff, previous_file_id=previous, file=item.name, previous_file=old_name), at)
+            if item.bad_rows and not item.error:
+                _add_finding(conn, venue, "bad_file", item.report_day, file_id, f"Neki redovi nisu pročitani: {item.name}",
+                             f"{len(item.bad_rows)} redova ne može da se pročita i ne računa se. Ostatak izveštaja važi.",
+                             {"file": item.name, "rows": item.bad_rows[:20]}, at)
+        report["findings"] = conn.execute("SELECT COUNT(*) FROM findings WHERE venue_id = ?", (venue,)).fetchone()[0]
+        for source, target in copies:  # every received version is kept in the Catalog's own folder
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                import shutil
+                shutil.copy2(source, target)
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    return report
+
+
+def list_findings(settings: CatalogSettings, status: Optional[str] = "open") -> Dict[str, Any]:
+    venue = settings.venue_id
+    with _open_for_read(settings) as conn:
+        rows = conn.execute("SELECT finding_id, kind, day, file_id, title, text, data, created_at FROM findings "
+                            "WHERE venue_id = ? ORDER BY finding_id DESC", (venue,)).fetchall()
+        items = []
+        for finding_id, kind, day, file_id, title, text, data, created_at in rows:
+            state = _finding_status(conn, finding_id)
+            if status and status != "all" and state != status:
+                continue
+            history = [{"action": a, "actor": who, "role": r, "reason": why, "at": at} for a, who, r, why, at in conn.execute(
+                "SELECT action, actor, role, reason, at FROM finding_events WHERE finding_id = ? ORDER BY event_id", (finding_id,))]
+            apply_label, deny_label = FINDING_ACTIONS.get(kind, ("Primeni", "Odbij"))
+            items.append({"finding_id": finding_id, "kind": kind, "day": day, "title": title, "text": text,
+                          "data": json.loads(data), "created_at": created_at, "status": state,
+                          "status_label": FINDING_STATUS_LABELS[state], "apply_label": apply_label, "deny_label": deny_label,
+                          "history": history})
+        counts = Counter(_finding_status(conn, f) for f, in conn.execute("SELECT finding_id FROM findings WHERE venue_id = ?", (venue,)))
+    return {"items": items, "counts": {k: counts.get(k, 0) for k in FINDING_STATUS_LABELS}}
+
+
+def decide_finding(settings: CatalogSettings, finding_id: int, action: str, actor: Any, role: Any, reason: Any = "") -> Dict[str, Any]:
+    """Apply, deny or reopen (change later) a finding. Admin only; every step stays in its history."""
+    person, role = _clean_person(actor, role)
+    if role != "admin":
+        raise NotAllowed("O nalazima odlučuje admin.")
+    if action not in ("applied", "denied", "reopened"):
+        raise CatalogError("Odluka mora biti primeni, odbij ili vrati na odluku.")
+    venue = settings.venue_id
+    conn = _open_for_write(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM findings WHERE venue_id = ? AND finding_id = ?", (venue, finding_id)).fetchone() is None:
+            raise UnknownFinding(finding_id)
+        state = _finding_status(conn, finding_id)
+        if (action == "reopened") == (state == "open"):
+            raise CatalogError("Nalaz već čeka odluku." if action == "reopened" else "O ovom nalazu je već odlučeno; prvo ga vrati na odluku.")
+        conn.execute("INSERT INTO finding_events (venue_id, finding_id, action, actor, role, reason, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (venue, finding_id, action, person, role, " ".join(str(reason or "").split())[:500] or None, _now()))
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    return next(i for i in list_findings(settings, "all")["items"] if i["finding_id"] == finding_id)
+
+
+def list_pos_days(settings: CatalogSettings) -> Dict[str, Any]:
+    """Received reports per day and which version counts (base for the day table, ticket 13)."""
+    venue = settings.venue_id
+    with _open_for_read(settings) as conn:
+        days: Dict[str, Dict[str, Any]] = {}
+        for file_id, name, day, rows, status, received, baseline in conn.execute(
+                "SELECT file_id, file_name, report_day, rows_paid, status, received_at, baseline FROM pos_files "
+                "WHERE venue_id = ? ORDER BY file_id", (venue,)):
+            entry = days.setdefault(day or "?", {"day": day, "versions": []})
+            entry["versions"].append({"file_id": file_id, "file": name, "rows": rows, "status": status,
+                                      "received_at": received, "baseline": bool(baseline)})
+        for entry in days.values():
+            entry["active_file_id"] = _active_file(conn, venue, entry["day"]) if entry["day"] else None
+    return {"days": sorted(days.values(), key=lambda d: d["day"] or "", reverse=True)}

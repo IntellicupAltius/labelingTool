@@ -5,6 +5,7 @@
     python -m web_labeler.catalog backups             # list the copies
     python -m web_labeler.catalog restore <file.db>   # put a copy back (stop the tool first)
     python -m web_labeler.catalog model-cards         # rebuild the read-only model cards (the tool also starts it)
+    python -m web_labeler.catalog pos-watch          # read new complete POS reports (report only; cron every 5 min later)
     python -m web_labeler.catalog transfer <old.db> [--skip "Proba (Claude)"] [--dry-run]
                                                       # carry manual work from another Catalog DB into this one, once
 """
@@ -24,7 +25,7 @@ from web_labeler.catalog.store import CatalogError, CatalogSettings, import_cata
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m web_labeler.catalog")
-    parser.add_argument("command", choices=["import", "backup", "backups", "restore", "model-cards", "transfer"])
+    parser.add_argument("command", choices=["import", "backup", "backups", "restore", "model-cards", "transfer", "pos-watch"])
     parser.add_argument("file", nargs="?")
     parser.add_argument("--skip", action="append", default=[], help="transfer: leave out everything by this person (test entries)")
     parser.add_argument("--dry-run", action="store_true", help="transfer: show what would move, change nothing")
@@ -35,6 +36,9 @@ def main() -> int:
         settings = CatalogSettings.from_config_file(config_path)
         if args.command == "import":
             report = import_catalog(settings)
+        elif args.command == "pos-watch":
+            from web_labeler.catalog.store import receive_pos_reports
+            report = receive_pos_reports(settings)
         elif args.command == "transfer":
             if not args.file:
                 raise CatalogError("Name the Catalog database to carry the work from")

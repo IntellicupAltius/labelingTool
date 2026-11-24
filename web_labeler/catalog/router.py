@@ -125,6 +125,32 @@ def build_catalog_router(settings: CatalogSettings) -> APIRouter:
         except CatalogError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    @router.get("/findings")
+    def catalog_findings(status: Optional[str] = Query("open")) -> Dict[str, Any]:
+        try:
+            return store.list_findings(settings, status)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.post("/findings/{finding_id}")
+    def catalog_decide_finding(finding_id: int, req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        try:
+            return store.decide_finding(settings, finding_id, str(req.get("action") or ""), req.get("actor"), req.get("role"),
+                                        req.get("reason"))
+        except NotAllowed as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except store.UnknownFinding:
+            raise HTTPException(status_code=404, detail="Taj nalaz ne postoji.")
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @router.get("/pos-days")
+    def catalog_pos_days() -> Dict[str, Any]:
+        try:
+            return store.list_pos_days(settings)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
     @router.get("/status")
     def catalog_status() -> Dict[str, Any]:
         return store.catalog_status(settings)

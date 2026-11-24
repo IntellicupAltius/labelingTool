@@ -31,6 +31,9 @@
   const viewDecisions = document.getElementById("catalogViewDecisions");
   const viewModelCards = document.getElementById("catalogViewModelCards");
   const viewReleases = document.getElementById("catalogViewReleases");
+  const viewFindings = document.getElementById("catalogViewFindings");
+  const FINDING_FILTERS = [["open", "Čeka odluku"], ["all", "Sve"]];
+  let findingFilter = "open";
   const NOT_RECORDED = "nije zabeleženo";
   let openCardFile = null;
   let cardRetries = 0;
@@ -1030,6 +1033,41 @@
     body.replaceChildren(...nodes);
   }
 
+  // ---------------- Findings (POS intake) ----------------
+
+  function renderFindings(data) {
+    const title = el("h2", "catalogTitle", "Nalazi ");
+    title.append(el("span", "catalogCount", `${data.counts.open} čeka odluku`));
+    const intro = el("div", "catalogSubhead", "Sve što je program primetio u POS izveštajima. Ništa se ne menja samo; odluka se može kasnije promeniti.");
+    const filters = el("div", "catalogViews");
+    for (const [key, label] of FINDING_FILTERS) {
+      const b = el("button", key === findingFilter ? "btn primary small" : "btn small", label);
+      b.onclick = () => { findingFilter = key; loadClasses(); };
+      filters.append(b);
+    }
+    const nodes = [title, intro, filters];
+    if (!data.items.length) nodes.push(el("div", "catalogHint", "Nema nalaza."));
+    for (const f of data.items) {
+      const card = el("div", `catalogFinding ${f.status === "open" ? "medium" : ""}`);
+      card.append(el("div", "catalogFindingTitle", f.title), el("p", "", f.text));
+      card.append(el("span", f.status === "open" ? "catalogTag warn" : "catalogTag", f.status_label));
+      for (const h of f.history) card.append(el("div", "catalogSubhead", `${formatTime(h.at)}, ${h.actor}: ${({ applied: "primenjeno", denied: "odbijeno", reopened: "vraćeno na odluku" })[h.action]}${h.reason ? ` (${h.reason})` : ""}`));
+      const buttons = el("div", "catalogMiroButtons");
+      const act = (label, action, primary) => {
+        const b = el("button", primary ? "btn primary small" : "btn small", label);
+        b.onclick = () => askReason(card, "Napomena (nije obavezno)", async (reason) => {
+          await postJson(`/api/catalog/findings/${f.finding_id}`, { action, actor: person(), role: roleSelect.value, reason });
+        });
+        return b;
+      };
+      if (f.status === "open") buttons.append(act(f.apply_label, "applied", true), act(f.deny_label, "denied", false));
+      else buttons.append(act("Promeni odluku", "reopened", false));
+      card.append(buttons);
+      nodes.push(card);
+    }
+    body.replaceChildren(...nodes);
+  }
+
   // ---------------- Releases ----------------
 
   function checkList(checks) {
@@ -1379,6 +1417,11 @@
         if (no === requestNo) renderMiro(data);
         return;
       }
+      if (view === "findings") {
+        const data = await getJson(`/api/catalog/findings?status=${findingFilter}`);
+        if (no === requestNo) renderFindings(data);
+        return;
+      }
       if (view === "releases") {
         const [next, list, lock] = await Promise.all([getJson("/api/catalog/releases/next"), getJson("/api/catalog/releases"),
           getJson("/api/catalog/lock")]);
@@ -1424,6 +1467,7 @@
     viewDecisions.classList.toggle("primary", view === "decisions");
     viewModelCards.classList.toggle("primary", view === "modelcards");
     viewReleases.classList.toggle("primary", view === "releases");
+    viewFindings.classList.toggle("primary", view === "findings");
     selectedVariation = null;
     openCardFile = null;
     cardRetries = 0;
@@ -1469,7 +1513,8 @@
     viewDecisions.classList.toggle("hidden", !admin);
     viewModelCards.classList.toggle("hidden", !admin);
     viewReleases.classList.toggle("hidden", !admin);
-    if (!admin && ["report", "miro", "evidence", "decisions", "modelcards", "releases"].includes(view)) setView("classes");
+    viewFindings.classList.toggle("hidden", !admin);
+    if (!admin && ["report", "miro", "evidence", "decisions", "modelcards", "releases", "findings"].includes(view)) setView("classes");
     else if (openArticle !== null && !panel.classList.contains("hidden")) showArticle(openArticle);
     else if (!panel.classList.contains("hidden")) loadClasses();
   }
@@ -1491,6 +1536,8 @@
   viewModelCards.onclick = () => setView("modelcards");
   viewReleases.classList.toggle("hidden", roleSelect.value !== "admin");
   viewReleases.onclick = () => setView("releases");
+  viewFindings.classList.toggle("hidden", roleSelect.value !== "admin");
+  viewFindings.onclick = () => setView("findings");
   modelSelect.onchange = () => { selectedClass = null; selectedVariation = null; openCardFile = null; loadClasses(); };
   viewClasses.onclick = () => setView("classes");
   viewUnclassified.onclick = () => setView("unclassified");
