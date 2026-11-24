@@ -11,6 +11,11 @@
   const viewClasses = document.getElementById("catalogViewClasses");
   const viewUnclassified = document.getElementById("catalogViewUnclassified");
   const viewReport = document.getElementById("catalogViewReport");
+  const viewMiro = document.getElementById("catalogViewMiro");
+  const viewer = document.getElementById("catalogViewer");
+  const MIRO_FILTERS = [["all", "Sve"], ["waiting", "Čeka potvrdu"], ["confirmed", "Potvrđeno"], ["none", "Bez klase"]];
+  let miroFilter = "waiting";
+  let exampleSeed = Math.floor(Math.random() * 1e9);
   let requestNo = 0;
   let view = "classes";
   let selectedClass = null;
@@ -56,7 +61,7 @@
   function variationsTable(items, withState) {
     const table = el("table", "catalogTable");
     const head = el("tr");
-    for (const title of ["Artikal", "Šifra", "Prodato", "Poslednja prodaja", withState ? "Stanje" : "Oznake"]) {
+    for (const title of ["Artikal", "Šifra", "Prodato", "Poslednja prodaja", withState ? "Stanje" : "Oznake", "Slika"]) {
       const th = el("th", title === "Prodato" ? "num" : "", title);
       head.append(th);
     }
@@ -73,7 +78,8 @@
         tags.append(chip);
       }
       row.append(el("td", "", v.name), el("td", "", v.code || "nema"),
-        el("td", "num", v.code ? formatQty(v.sold) : "nema"), el("td", "", formatDate(v.last_sale)), tags);
+        el("td", "num", v.code ? formatQty(v.sold) : "nema"), el("td", "", formatDate(v.last_sale)), tags,
+        el("td", v.image ? "" : "catalogNoImage", v.image ? "ima" : "nema slike"));
       tbody.append(row);
     }
     table.append(thead, tbody);
@@ -121,7 +127,7 @@
       facts.append(el("span", "catalogTag", `U modelu: ${data.trained_name}`));
     }
     if (data.united) facts.append(el("span", "catalogTag", `Labeleri crtaju posebno: ${data.drawn_as.join(", ")}`));
-    const parts = [title, facts, renderRuleSections(data)];
+    const parts = [title, facts, renderMiroBlock(data), renderExamplesBlock(data), renderRuleSections(data)];
     if (roleSelect.value === "admin" && data.findings.length) {
       const box = el("div", "catalogRule");
       box.append(el("h3", "", "Neslaganja izvora"));
@@ -134,6 +140,178 @@
     parts.push(data.variations.length ? variationsTable(data.variations, false)
       : el("div", "catalogHint", "Nijedan POS artikal nije vezan za ovu klasu."));
     target.replaceChildren(...parts);
+  }
+
+  function openViewer(src, caption) {
+    viewer.querySelector("img").src = src;
+    viewer.querySelector("figcaption").textContent = caption;
+    viewer.classList.remove("hidden");
+  }
+  viewer.onclick = () => { viewer.classList.add("hidden"); viewer.querySelector("img").removeAttribute("src"); };
+
+  function sourceBadge(text) { return el("span", "catalogBadge", text); }
+
+  function pageCaption(p) { return `${p.model}, strana ${p.page_no}`; }
+
+  function miroThumb(p, big) {
+    const fig = el("figure", big ? "catalogPage big" : "catalogPage");
+    const img = el("img");
+    img.loading = "lazy";
+    img.src = p.image_url;
+    img.alt = `${p.source_label}: ${pageCaption(p)}`;
+    img.onclick = () => openViewer(p.image_url, `${p.source_label}, ${pageCaption(p)}`);
+    const cap = el("figcaption");
+    cap.append(sourceBadge(p.source_label), document.createTextNode(` ${pageCaption(p)}`));
+    if (!p.confirmed) cap.append(el("span", "catalogTag warn", "predlog, admin još nije potvrdio"));
+    fig.append(img, cap);
+    return fig;
+  }
+
+  function renderMiroBlock(data) {
+    const box = el("div", "catalogImages");
+    box.append(el("h3", "", "Stara Miro strana"));
+    if (!data.miro_pages.length) {
+      box.append(el("div", "catalogHint small", "Nijedna stara Miro strana nije vezana za ovu klasu."));
+      return box;
+    }
+    const row = el("div", "catalogPageRow");
+    data.miro_pages.forEach((p) => row.append(miroThumb(p, true)));
+    box.append(row);
+    return box;
+  }
+
+  function renderExamplesBlock(data) {
+    const box = el("div", "catalogImages");
+    const head = el("h3", "", "Primeri iz dataseta ");
+    const again = el("button", "btn small", "Drugi primeri");
+    head.append(again);
+    const note = el("div", "catalogSubhead", "Nasumični isečci iz dataseta. Pokazuju klasu, ne određen POS artikal.");
+    const row = el("div", "catalogExampleRow");
+    box.append(head, note, row);
+    const load = async () => {
+      row.replaceChildren(el("div", "catalogHint small", "Učitavam…"));
+      try {
+        const url = `/api/catalog/models/${encodeURIComponent(data.model)}/classes/${encodeURIComponent(data.class)}/examples?count=6&seed=${exampleSeed}`;
+        const ex = await getJson(url);
+        if (!ex.available) { row.replaceChildren(el("div", "catalogHint small", "Dataset nije dostupan na ovom računaru.")); again.hidden = true; return; }
+        if (!ex.examples.length) { row.replaceChildren(el("div", "catalogHint small", "Nema primera u datasetu za ovu klasu.")); again.hidden = true; return; }
+        row.replaceChildren(...ex.examples.map((e) => {
+          const fig = el("figure", "catalogExample");
+          const img = el("img");
+          img.loading = "lazy";
+          img.src = e.url;
+          img.alt = e.source_label;
+          img.onclick = () => openViewer(e.url, `${e.source_label}, klasa ${data.class}`);
+          const cap = el("figcaption");
+          cap.append(sourceBadge(e.source_label));
+          fig.append(img, cap);
+          return fig;
+        }));
+      } catch (e) {
+        row.replaceChildren(el("div", "catalogHint small", e.message));
+      }
+    };
+    again.onclick = () => { exampleSeed = Math.floor(Math.random() * 1e9); load(); };
+    load();
+    return box;
+  }
+
+  async function postJson(url, payload) {
+    let response;
+    try {
+      response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    } catch (_) { throw new Error("Server trenutno nije dostupan. Pokušaj ponovo."); }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "Nije sačuvano.");
+    return data;
+  }
+
+  function miroMatches(p) {
+    if (miroFilter === "waiting") return !p.confirmed;
+    if (miroFilter === "confirmed") return p.confirmed;
+    if (miroFilter === "none") return !p.classes.length;
+    return true;
+  }
+
+  function miroCard(p, classes, onSaved) {
+    const card = el("div", p.confirmed ? "catalogMiroCard done" : "catalogMiroCard");
+    card.append(miroThumb(p, false));
+    const side = el("div", "catalogMiroSide");
+    side.append(el("div", "catalogMiroStatus", p.confirmed ? "Potvrđeno" : "Čeka potvrdu"));
+    if (p.heading) side.append(el("div", "catalogMiroHeading", `Na strani piše: ${p.heading}`));
+    if (p.low_confidence) side.append(el("span", "catalogTag warn", "predlog nije siguran"));
+    if (p.note) side.append(el("div", "catalogSubhead", p.note));
+    if (!p.confirmed) {
+      side.append(el("div", "catalogSubhead", p.suggested.length ? `Predlog: ${p.suggested.join(", ")}` : "Nema predloga."));
+    }
+    const chosen = new Set(p.classes);
+    const chips = el("div", "catalogChips");
+    const drawChips = () => {
+      chips.replaceChildren();
+      if (!chosen.size) chips.append(el("span", "catalogHint small", "Bez klase"));
+      for (const name of [...chosen].sort()) {
+        const chip = el("span", "catalogChip", name);
+        const x = el("button", "", "×");
+        x.title = "Ukloni";
+        x.onclick = () => { chosen.delete(name); drawChips(); };
+        chip.append(x);
+        chips.append(chip);
+      }
+    };
+    drawChips();
+    const add = el("select", "catalogAdd");
+    add.append(new Option("Dodaj klasu…", ""), ...(classes[p.model] || []).map((n) => new Option(n, n)));
+    add.onchange = () => { if (add.value) chosen.add(add.value); add.value = ""; drawChips(); };
+    const buttons = el("div", "catalogMiroButtons");
+    const save = el("button", "btn primary", "Potvrdi");
+    const msg = el("span", "catalogSubhead");
+    save.onclick = async () => {
+      save.disabled = true;
+      try { onSaved(await postJson(`/api/catalog/miro-pages/${encodeURIComponent(p.key)}`, { classes: [...chosen] })); }
+      catch (e) { msg.textContent = e.message; save.disabled = false; }
+    };
+    buttons.append(save);
+    if (p.confirmed) {
+      const undo = el("button", "btn", "Vrati na predlog");
+      undo.onclick = async () => {
+        undo.disabled = true;
+        try { onSaved(await postJson(`/api/catalog/miro-pages/${encodeURIComponent(p.key)}`, { reset: true })); }
+        catch (e) { msg.textContent = e.message; undo.disabled = false; }
+      };
+      buttons.append(undo);
+    }
+    buttons.append(msg);
+    side.append(chips, add, buttons);
+    card.append(side);
+    return card;
+  }
+
+  function renderMiro(data) {
+    const model = modelSelect.value;
+    const title = el("h2", "catalogTitle", "Stare Miro strane ");
+    title.append(el("span", "catalogCount",
+      `potvrđeno ${data.counts.confirmed} od ${data.counts.total}, bez klase ${data.counts.without_class}`));
+    const intro = el("div", "catalogSubhead",
+      "Za svaku stranu potvrdi kojoj klasi pripada. Strana može da ide uz više klasa, a možeš je potvrditi i bez klase. Svaka potvrda se odmah čuva.");
+    const filters = el("div", "catalogViews");
+    for (const [key, label] of MIRO_FILTERS) {
+      const b = el("button", key === miroFilter ? "btn primary small" : "btn small", label);
+      b.onclick = () => { miroFilter = key; renderMiro(data); };
+      filters.append(b);
+    }
+    const grid = el("div", "catalogMiroGrid");
+    const pages = data.pages.filter((p) => p.model === model && miroMatches(p));
+    for (const p of pages) {
+      grid.append(miroCard(p, data.classes, (saved) => {
+        const i = data.pages.findIndex((x) => x.key === saved.key);
+        data.pages[i] = saved;
+        data.counts.confirmed = data.pages.filter((x) => x.confirmed).length;
+        data.counts.without_class = data.pages.filter((x) => !x.classes.length).length;
+        renderMiro(data);
+      }));
+    }
+    if (!pages.length) grid.append(el("div", "catalogHint", "Nema strana za ovaj izbor."));
+    body.replaceChildren(title, intro, filters, grid);
   }
 
   async function showVariations(model, className, detail, button) {
@@ -234,6 +412,11 @@
         if (no === requestNo) renderUnclassified(data);
         return;
       }
+      if (view === "miro") {
+        const data = await getJson("/api/catalog/miro-pages");
+        if (no === requestNo) renderMiro(data);
+        return;
+      }
       if (view === "report") {
         const data = await getJson("/api/catalog/source-report");
         if (no === requestNo) renderReport(data);
@@ -253,7 +436,8 @@
     viewClasses.classList.toggle("primary", view === "classes");
     viewUnclassified.classList.toggle("primary", view === "unclassified");
     viewReport.classList.toggle("primary", view === "report");
-    modelSelect.closest("label").classList.toggle("hidden", view !== "classes");
+    viewMiro.classList.toggle("primary", view === "miro");
+    modelSelect.closest("label").classList.toggle("hidden", view !== "classes" && view !== "miro");
     loadClasses();
   }
 
@@ -277,6 +461,7 @@
   }
 
   function setOpen(open) {
+    if (!open) viewer.classList.add("hidden");
     panel.classList.toggle("hidden", !open);
     tabs.classList.toggle("catalogOpen", open);
     tab.classList.toggle("tabActive", open);
@@ -289,7 +474,8 @@
   function applyRole() {
     const admin = roleSelect.value === "admin";
     viewReport.classList.toggle("hidden", !admin);
-    if (!admin && view === "report") setView("classes");
+    viewMiro.classList.toggle("hidden", !admin);
+    if (!admin && (view === "report" || view === "miro")) setView("classes");
     else if (!panel.classList.contains("hidden")) loadClasses();
   }
   roleSelect.onchange = () => {
@@ -297,6 +483,8 @@
     applyRole();
   };
   viewReport.classList.toggle("hidden", roleSelect.value !== "admin");
+  viewMiro.classList.toggle("hidden", roleSelect.value !== "admin");
+  viewMiro.onclick = () => setView("miro");
   viewReport.onclick = () => setView("report");
   modelSelect.onchange = () => { selectedClass = null; loadClasses(); };
   viewClasses.onclick = () => setView("classes");

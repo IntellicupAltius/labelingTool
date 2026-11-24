@@ -37,5 +37,14 @@
       "path": "~/Projects/docs/labeling/glasses_pravila_v2_20261030.md"
     }
   },
-  "catalog_known_conflicts_path": "web_labeler/catalog/venues/blaznavac/known_conflicts.yaml"
+  "catalog_known_conflicts_path": "web_labeler/catalog/venues/blaznavac/known_conflicts.yaml",
+  "catalog_miro_dir": "~/intellicup_storage/Blaznavac-Menu,Miro+GDocs/Miro",
+  "catalog_miro_files": {
+    "Bottles": "Bottle Classes.pdf",
+    "Cups": "Cups.pdf",
+    "Glasses": "GLASSES.pdf",
+    "Pitchers": "Pitchers Classes.pdf",
+    "Shots": "Shot Classes.pdf"
+  },
+  "catalog_miro_suggestions_path": "web_labeler/catalog/venues/blaznavac/miro_suggestions.yaml"
 }

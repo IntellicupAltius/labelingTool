@@ -1,0 +1,100 @@
+# Predlog: koja stara Miro strana ide uz koju klasu.
+#
+# Strane su ravne slike bez teksta, pa je natpis sa svake strane pročitan ručno (Claude, 24.11.2026).
+# Klase su imena koja labeleri crtaju. Ovo je samo predlog: admin svaku stranu potvrdi ili promeni
+# na ekranu "Miro strane", a ta odluka ima prednost i ponovni uvoz je ne menja.
+#
+# Strane bokala, šoljica i šotova su po piću, ne po klasi. Za njih je klasa uzeta iz mape artikala
+# (blaznavac_article_map.yaml), pa su označene sa "sigurnost: niska" gde mapa i strana nisu jednoznačne.
+# Prva strana svakog modela osim Glasses je pregled celog modela i nema klasu.
+
+pages:
+  bottles-01: {heading: "Pregled svih flaša", classes: [], note: "Pregledna strana celog modela."}
+  bottles-02: {heading: "AQUA VIVA", classes: [AQUA_VIVA]}
+  bottles-03: {heading: "KNJAZ MILOS, LIMUN, MANDARINA", classes: [KNJAZ_MILOS]}
+  bottles-04: {heading: "NIKSICKO PIVO", classes: [NIKSICKO_PIVO]}
+  bottles-05: {heading: "CORONA", classes: [CORONA_PIVO]}
+  bottles-06: {heading: "JELEN PIVO", classes: [JELEN_PIVO]}
+  bottles-07: {heading: "ASPALL APPLE", classes: [SOMERSBY], confidence: low, note: "Mapa vodi ASPALL JABUKA u SOMERSBY."}
+  bottles-08: {heading: "ASPALL RASPBERRY", classes: [ASPALL_RASPBERRY]}
+  bottles-09: {heading: "BAVARIA, BEZALKOHOLNA", classes: [BAVARIA_PIVO, BAVARIA_BEZALKOHOLNA]}
+  bottles-10: {heading: "EVERVESS", classes: [EVERVESS]}
+  bottles-11: {heading: "GUSTO", classes: [GUSTO]}
+  bottles-12: {heading: "PEPSI, PEPSI ZERO", classes: [PEPSI]}
+  bottles-13: {heading: "7UP", classes: [7UP]}
+  bottles-14: {heading: "MIRINDA", classes: [MIRINDA]}
+  bottles-15: {heading: "SCHEWEPPES TONIC", classes: [SCHEWEPPES_TONIC]}
+  bottles-16: {heading: "GUARANA", classes: [GUARANA]}
+  bottles-17: {heading: "REDBULL", classes: [REDBULL]}
+  bottles-18: {heading: "PROSECCO FLASA", classes: [PROSECCO_FLASA]}
+
+  cups-01: {heading: "Pregled svih šoljica", classes: [], note: "Pregledna strana celog modela."}
+  cups-02: {heading: "ESP. ZA PONETI", classes: [], confidence: low, note: "Mapa vodi espreso za poneti u ESPRESSO_KAFA, ali nije jasno u koju klasu koju labeleri crtaju."}
+  cups-03: {heading: "CAJ", classes: [CAJ, CAJ_NOVA], confidence: low, note: "Nije jasno da li je na slici stara ili nova šolja."}
+  cups-04: {heading: "ESPRESSO, ESPRESSO DECAF", classes: [ESPRESSO_KAFA_MANJA, ESPRESO_KAFA_MANJA_NOVA], confidence: low, note: "Mala šolja; nije jasno da li stara ili nova."}
+  cups-05: {heading: "TURSKA KAFA", classes: [TURSKA_KAFA]}
+  cups-06: {heading: "CAFFE LATTE, LATTE SA UKUSIMA", classes: [CAFFE_LATTE]}
+  cups-07: {heading: "TOPLA COKOLADA, BELA TOPLA COKOLADA, KAKAO", classes: [COKOLADA_KAKAO]}
+  cups-08: {heading: "KUVANO VINO", classes: [KUVANO_VINO]}
+  cups-09: {heading: "IRISH COFFE", classes: [IRISH_COFFE]}
+  cups-10: {heading: "MOKA, MOKA KAFA EXTRA", classes: [MOKA]}
+  cups-11: {heading: "CAPPUCCINO, ESPRESSO SA MLEKOM, DUPLI ESPRESSO", classes: [ESPRESSO_KAFA_VECA, ESPRESO_KAFA_VECA_NOVA], confidence: low, note: "Velika šolja; nije jasno da li stara ili nova."}
+
+  glasses-01: {heading: "OBICNA_PLAVO", classes: [OBICNA_PLAVO]}
+  glasses-02: {heading: "OBICNA_TAMNO", classes: [OBICNA_TAMNO]}
+  glasses-03: {heading: "OBICNA_PINK", classes: [OBICNA_PINK]}
+  glasses-04: {heading: "NIKSICKO_TOCENO", classes: [NIKSICKO_TOCENO]}
+  glasses-05: {heading: "TOCENO_STELA", classes: [TOCENO_STELA]}
+  glasses-06: {heading: "TOCENO_HOEGARDEN", classes: [TOCENO_HOEGARDEN]}
+  glasses-07: {heading: "NES_KAFA", classes: [NES_KAFA]}
+  glasses-08: {heading: "OVALNA_CRVENO", classes: [OVALNA_CRVENO]}
+  glasses-09: {heading: "OBICNA_ZUTO", classes: [OBICNA_ZUTO]}
+  glasses-10: {heading: "NISKA_CRVENO", classes: [NISKA_CRVENO]}
+  glasses-11: {heading: "NISKA_PROVIDNO", classes: [NISKA_PROVIDNO]}
+  glasses-12: {heading: "VISKI_KRATKA_NARANDZASTO", classes: [VISKI_KRATKO_NARANDZASTO]}
+  glasses-13: {heading: "NISKA_NARANZASTO", classes: [NISKA_NARANDZASTO]}
+  glasses-14: {heading: "OBICNA_LIMUNADA_BAZA", classes: [OBICNA_LIMUNADA_BAZA]}
+  glasses-15: {heading: "VISOKA_USKA_PROVIDNO", classes: [VISOKA_USKA_PROVIDNO]}
+  glasses-16: {heading: "MARTINI_BELO", classes: [MARTINI_BELO]}
+  glasses-17: {heading: "MARTINI_CRVENO", classes: [MARTINI_CRVENO]}
+  glasses-18: {heading: "MARTINI_ZUTO", classes: [MARTINI_ZUTO]}
+  glasses-19: {heading: "MARTINI_PROVIDNO", classes: [MARTINI_PROVIDNO]}
+  glasses-20: {heading: "OBICNA_CRVENO", classes: [OBICNA_CRVENO]}
+  glasses-21: {heading: "BELO_VINO_CASA", classes: [BELO_VINO_CASA]}
+  glasses-22: {heading: "CRNO_VINO_CASA", classes: [CRNO_VINO_CASA]}
+  glasses-23: {heading: "SEJK_TOUGLASTO", classes: [SEJK_TOUGLASTO]}
+  glasses-24: {heading: "KREM_ZA_PONETI", classes: [KREM_ZA_PONETI]}
+  glasses-25: {heading: "OVALNA_ZUTO", classes: [OVALNA_ZUTO]}
+  glasses-26: {heading: "OVALNA_NARANDZASTO", classes: [OVALNA_NARANDZASTO]}
+  glasses-27: {heading: "OVALNA_BELO", classes: [OVALNA_BELO]}
+  glasses-28: {heading: "OVALNA_SEX_ON_THE_BEACH", classes: [OVALNA_SEX_ON_THE_BEACH]}
+  glasses-29: {heading: "OBICNA_ZUTO-BLURRY", classes: [OBICNA_ZUTO-BLURRY]}
+  glasses-30: {heading: "OBICNA_NARANDZASTO", classes: [OBICNA_NARANDZASTO]}
+  glasses-31: {heading: "OBICNA_LJUBICASTO", classes: [OBICNA_LJUBICASTO]}
+  glasses-32: {heading: "OVALNA_ZUTO-ZELENO", classes: [OVALNA_ZUTO-ZELENO]}
+  glasses-33: {heading: "NISKA_BELO_SIVO", classes: [NISKA_BELO_SIVO]}
+  glasses-34: {heading: "NISKA_ZUTO", classes: [NISKA_ZUTO]}
+
+  pitchers-01: {heading: "Pregled svih bokala", classes: [], note: "Pregledna strana celog modela."}
+  pitchers-02: {heading: "VIAGRA, STOPER, LYNCHBURG LEMONADE, LIMUNADA, LIMUNADA DJUMBIR, LIMUNADA SA NANOM, LIMUNADA SA UKUSOM, MOJITO", classes: [YELLOW_GREEN_FAMILY]}
+  pitchers-03: {heading: "BLUE LAGOON, CONTINENTAL SOUR, BLUE FROG", classes: [BLUE_FAMILY]}
+  pitchers-04: {heading: "WATERMELON COOLER, BEAST, MEXICAN APPLE PIE, SINGAPORE SLING, LIMUNADA SA UKUSOM, TEQUILA SUNRISE, FLYING ELEPHANT", classes: [RED_ORANGE_FAMILY]}
+  pitchers-05: {heading: "MARESITA, MAI TAI", classes: [MARESITA_MAI_TAI]}
+  pitchers-06: {heading: "BLACK SABBATH, LONG ISLAND TEA", classes: [DARK_COCKTAILS]}
+  pitchers-07: {heading: "DEVIL ICED TEA", classes: [DEVIL]}
+  pitchers-08: {heading: "DAY DREAMING", classes: [DAY_DREAMING]}
+  pitchers-09: {heading: "FAT BOY SLIM", classes: [FAT_BOY_SLIM]}
+  pitchers-10: {heading: "SEX ON THE BEACH", classes: [SEX_ON_THE_BEACH]}
+  pitchers-11: {heading: "LIMUNADA SA UKUSOM, LIMUNADA SA NANOM, LIMUNADA (samo osnova u bokalu)", classes: [LIMUNADA_BAZA], confidence: low, note: "Na slikama je samo osnova na dnu bokala."}
+  pitchers-12: {heading: "LIMUNADA BAZA CRVENO", classes: [LIMUNADA_BAZA_CRVENO]}
+
+  shots-01: {heading: "Pregled svih šotova", classes: [], note: "Pregledna strana celog modela."}
+  shots-02: {heading: "Mini Margarita, Imuno Shot", classes: [SHOT_BLURRY]}
+  shots-03: {heading: "B53, Monkey Brain, B52", classes: [B53, SHOT_CREAMY]}
+  shots-04: {heading: "Olmeca altos, Olmeca bela, n.n shot, Avion, Absolut, Havana Club 3, Pernod", classes: [SHOT_TRANSPARENT]}
+  shots-05: {heading: "Rakija Malina, Aperol, Campari", classes: [SHOT_RED]}
+  shots-06: {heading: "Black Jack, Jeger Shot", classes: [SHOT_BLACK]}
+  shots-07: {heading: "caj, dorucak u blaznacu, Medovaca", classes: [DORUCAK-U-BLAZNAVCU, SHOT_ZUTO]}
+  shots-08: {heading: "Shot_amber: Rakija sljiva, Jelicki dukat, Olmeca zuta", classes: [SHOT_AMBER]}
+  shots-09: {heading: "THC", classes: [THC]}
+  shots-10: {heading: "Blow Job", classes: [BLOW_JOB]}

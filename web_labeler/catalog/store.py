@@ -12,11 +12,14 @@ from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from web_labeler.catalog import assortment as _assortment
 from web_labeler.catalog import class_rules as _rules
+from web_labeler.catalog import examples as _examples
+from web_labeler.catalog import miro as _miro
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
-           "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings"}
+           "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings",
+           "miro_pages", "miro_suggested", "miro_reviews", "miro_links"}
 
 _SCHEMA = """
 CREATE TABLE venues (
@@ -137,6 +140,44 @@ CREATE TABLE source_findings (
 );
 """
 
+_SCHEMA_V4 = """
+CREATE TABLE miro_pages (
+    venue_id    TEXT NOT NULL REFERENCES venues(venue_id),
+    page_key    TEXT NOT NULL,
+    model_key   TEXT NOT NULL,
+    source_file TEXT NOT NULL,
+    page_no     INTEGER NOT NULL,
+    sha256      TEXT NOT NULL,
+    width       INTEGER NOT NULL,
+    height      INTEGER NOT NULL,
+    heading     TEXT NOT NULL DEFAULT '',
+    confidence  TEXT NOT NULL DEFAULT 'normal',
+    note        TEXT NOT NULL DEFAULT '',
+    imported_at TEXT NOT NULL,
+    PRIMARY KEY (venue_id, page_key)
+);
+CREATE TABLE miro_suggested (
+    venue_id   TEXT NOT NULL,
+    page_key   TEXT NOT NULL,
+    class_name TEXT NOT NULL,
+    PRIMARY KEY (venue_id, page_key, class_name)
+);
+CREATE TABLE miro_reviews (
+    venue_id   TEXT NOT NULL,
+    page_key   TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY (venue_id, page_key)
+);
+CREATE TABLE miro_links (
+    venue_id   TEXT NOT NULL,
+    page_key   TEXT NOT NULL,
+    model_key  TEXT NOT NULL,
+    class_name TEXT NOT NULL,
+    PRIMARY KEY (venue_id, page_key, class_name)
+);
+CREATE INDEX miro_links_class ON miro_links (venue_id, model_key, class_name);
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -169,6 +210,11 @@ class CatalogSettings:
     active_days: int = 30
     import_baseline: Optional[Mapping[str, Any]] = None
     rule_sources: Optional[_rules.RuleSources] = None
+    miro_dir: Optional[Path] = None
+    miro_files: Optional[Mapping[str, str]] = None
+    miro_suggestions_path: Optional[Path] = None
+    media_dir: Optional[Path] = None
+    dataset_dir: Optional[Path] = None
 
     @classmethod
     def from_config(cls, cfg: Mapping[str, Any], models_dir: Path,
@@ -205,11 +251,18 @@ class CatalogSettings:
                 training_dir, optional_path("catalog_documented_classes_dir"), optional_path("catalog_cards_dir"),
                 optional_path("catalog_word_exports_dir"), optional_path("catalog_live_models_dir"), rule_files,
                 optional_path("catalog_known_conflicts_path"))
+        miro_files = cfg.get("catalog_miro_files")
+        media_dir = optional_path("catalog_media_dir") or (db_path.parent / "media" if db_path else None)
+        dataset_dir = optional_path("catalog_dataset_dir") or (Path(raw_base_path).resolve() if raw_base_path else None)
+        if dataset_dir is not None and dataset_dir not in roots:
+            roots.append(dataset_dir)
         return cls(db_path, venue_id, venue_name, Path(models_dir).resolve(), tuple(roots),
                    optional_path("catalog_pos_dir"), str(cfg.get("catalog_pos_adapter") or "").strip() or None,
                    optional_path("article_map_path"), optional_path("catalog_blacklist_path"),
                    int(cfg.get("catalog_active_days") or 30), baseline if isinstance(baseline, dict) else None,
-                   rule_sources)
+                   rule_sources, optional_path("catalog_miro_dir"),
+                   {str(k): str(v) for k, v in miro_files.items()} if isinstance(miro_files, dict) else None,
+                   optional_path("catalog_miro_suggestions_path"), media_dir, dataset_dir)
 
     @classmethod
     def from_config_file(cls, config_path: Path) -> "CatalogSettings":
@@ -271,11 +324,10 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version == 1:
-            conn.executescript(f"BEGIN;{_SCHEMA_V2}{_SCHEMA_V3}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version == 2:
-            conn.executescript(f"BEGIN;{_SCHEMA_V3}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        elif version in (1, 2, 3):
+            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4][version - 1:]
+            conn.executescript(f"BEGIN;{''.join(steps)}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version != SCHEMA_VERSION:
             raise CatalogError(f"Unsupported Catalog database version: {version}")
     except sqlite3.Error as e:
@@ -421,6 +473,57 @@ def _apply_rules(conn: sqlite3.Connection, venue: str, plan: _rules.RulesPlan) -
                        json.dumps(f["sources"], ensure_ascii=False)) for f in plan.findings])
 
 
+def _build_miro_plan(settings: CatalogSettings, sources: Mapping[str, List[str]]) -> Optional[_miro.MiroPlan]:
+    if not settings.miro_dir and not settings.miro_files:
+        return None
+    if not settings.miro_dir or not settings.miro_files or settings.media_dir is None:
+        raise CatalogError("Miro import needs both catalog_miro_dir and catalog_miro_files")
+    for root in settings.forbidden_roots + ((settings.dataset_dir,) if settings.dataset_dir else ()):
+        if _is_within(settings.media_dir.resolve(), root):
+            raise CatalogError(f"Catalog images must not be stored inside {root}")
+    try:
+        return _miro.build_plan(settings.miro_dir, settings.miro_files, settings.miro_suggestions_path, sources)
+    except _miro.MiroError as e:
+        raise CatalogError(f"Import refused, nothing changed. {e}")
+
+
+def _media_path(settings: CatalogSettings, sha256: str) -> Path:
+    return settings.media_dir / "miro" / f"{sha256}.jpg"
+
+
+def _store_miro_images(settings: CatalogSettings, plan: _miro.MiroPlan) -> None:
+    """Images are stored by content, so writing them before the database commit is harmless."""
+    for page in plan.pages:
+        target = _media_path(settings, page.sha256)
+        if target.is_file():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".part")
+        tmp.write_bytes(page.data)
+        os.replace(tmp, target)
+
+
+def _apply_miro(conn: sqlite3.Connection, venue: str, plan: _miro.MiroPlan, at: str) -> None:
+    """Pages and suggestions follow the sources. Admin decisions are never touched by an import."""
+    for page in plan.pages:
+        s = plan.suggestions.get(page.key) or _miro.Suggestion("", [])
+        conn.execute(
+            "INSERT INTO miro_pages (venue_id, page_key, model_key, source_file, page_no, sha256, width, height, heading, "
+            "confidence, note, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (venue_id, page_key) DO UPDATE SET model_key = excluded.model_key, source_file = excluded.source_file, "
+            "page_no = excluded.page_no, sha256 = excluded.sha256, width = excluded.width, height = excluded.height, "
+            "heading = excluded.heading, confidence = excluded.confidence, note = excluded.note",
+            (venue, page.key, page.model, page.source_file, page.page_no, page.sha256, page.width, page.height,
+             s.heading, s.confidence, s.note, at))
+    conn.execute("DELETE FROM miro_suggested WHERE venue_id = ?", (venue,))
+    conn.executemany("INSERT INTO miro_suggested (venue_id, page_key, class_name) VALUES (?, ?, ?)",
+                     [(venue, key, c) for key, s in plan.suggestions.items() for c in s.classes])
+    keys = {p.key for p in plan.pages}
+    stored = {r[0] for r in conn.execute("SELECT page_key FROM miro_pages WHERE venue_id = ?", (venue,))}
+    plan.report["kept_but_missing_in_source"] = sorted(stored - keys)
+    plan.report["confirmed"] = conn.execute("SELECT COUNT(*) FROM miro_reviews WHERE venue_id = ?", (venue,)).fetchone()[0]
+
+
 def import_catalog(settings: CatalogSettings) -> Dict[str, Any]:
     """Full import: class lists, then articles and their POS history, in one all-or-nothing step."""
     plan = _build_assortment_plan(settings)
@@ -435,7 +538,10 @@ def import_catalog(settings: CatalogSettings) -> Dict[str, Any]:
                     model_classes = map_classes.setdefault(link["model"], {})
                     model_classes[link["class"]] = model_classes.get(link["class"], False) or sold
         rules = _rules.build_rules_plan(settings.rule_sources, _read_sources(settings), map_classes)
-    return _import(settings, plan, rules)
+    miro = _build_miro_plan(settings, _read_sources(settings))
+    if miro is not None:
+        _store_miro_images(settings, miro)
+    return _import(settings, plan, rules, miro)
 
 
 def import_class_lists(settings: CatalogSettings) -> Dict[str, Any]:
@@ -443,7 +549,7 @@ def import_class_lists(settings: CatalogSettings) -> Dict[str, Any]:
 
 
 def _import(settings: CatalogSettings, plan: Optional[_assortment.AssortmentPlan],
-            rules: Optional[_rules.RulesPlan] = None) -> Dict[str, Any]:
+            rules: Optional[_rules.RulesPlan] = None, miro: Optional[_miro.MiroPlan] = None) -> Dict[str, Any]:
     """Bring the tool's class lists into the Catalog, all or nothing.
 
     Safe to repeat: existing numbers never change and new classes are only appended. If a source
@@ -483,6 +589,9 @@ def _import(settings: CatalogSettings, plan: Optional[_assortment.AssortmentPlan
         if rules is not None:
             _apply_rules(conn, venue, rules)
             report["class_rules"] = rules.report
+        if miro is not None:
+            _apply_miro(conn, venue, miro, at)
+            report["miro"] = miro.report
         if report["added"] or plan is not None:
             conn.execute("INSERT INTO import_runs (venue_id, at, summary_json) VALUES (?, ?, ?)",
                          (venue, at, json.dumps(report, ensure_ascii=False, sort_keys=True)))
@@ -557,7 +666,8 @@ def _variation(row: Sequence[Any], classes: Optional[List[str]] = None) -> Dict[
         tags.append("sve stornirano")
     return {"article_id": article_id, "code": code, "name": name.strip(), "state": state,
             "state_label": STATE_LABELS[state], "sold": sold, "last_sale": last_sale, "tags": tags,
-            "provisional_reason": provisional, "mapping_mode": mode, "classes": classes or []}
+            "provisional_reason": provisional, "mapping_mode": mode, "classes": classes or [],
+            "image": None}
 
 
 TRAINING_LABELS = {"trained": "U modelu", "excluded": "Izbačena iz treninga", "not_in_model": "Nije u živom modelu",
@@ -658,7 +768,8 @@ def class_detail(settings: CatalogSettings, model: str, class_name: str) -> Dict
     return {"model": model, "class": class_name, "trained_name": trained, "training_state": info["state"],
             "training_label": TRAINING_LABELS[info["state"]], "drawn_as": drawn, "united": len(drawn) > 1,
             "rules": sections, "has_description": bool(sections), "variations": variations,
-            "findings": [{"severity": s, "title": t, "text": x, "sources": json.loads(src)} for s, t, x, src in findings]}
+            "findings": [{"severity": s, "title": t, "text": x, "sources": json.loads(src)} for s, t, x, src in findings],
+            "miro_pages": class_miro_pages(settings, model, class_name)}
 
 
 def source_report(settings: CatalogSettings) -> Dict[str, Any]:
@@ -691,3 +802,148 @@ def catalog_status(settings: CatalogSettings) -> Dict[str, Any]:
     if not models:
         return {"available": False, "message": MSG_EMPTY, "venue_name": settings.venue_name, "model_count": 0}
     return {"available": True, "message": "", "venue_name": settings.venue_name, "model_count": len(models)}
+
+
+# ---------------- Old Miro pages and dataset examples ----------------
+
+MIRO_SOURCE_LABEL = "Stara Miro strana"
+EXAMPLE_SOURCE_LABEL = "Primer iz dataseta"
+
+
+class UnknownPage(Exception):
+    pass
+
+
+def _page_rows(conn: sqlite3.Connection, venue: str, where: str = "", args: Sequence[Any] = ()) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT p.page_key, p.model_key, p.source_file, p.page_no, p.width, p.height, p.heading, p.confidence, p.note, "
+        "r.decided_at FROM miro_pages p LEFT JOIN miro_reviews r ON r.venue_id = p.venue_id AND r.page_key = p.page_key "
+        f"WHERE p.venue_id = ? {where} ORDER BY p.model_key, p.page_no", (venue, *args)).fetchall()
+    suggested: Dict[str, List[str]] = {}
+    for key, name in conn.execute("SELECT page_key, class_name FROM miro_suggested WHERE venue_id = ? ORDER BY class_name", (venue,)):
+        suggested.setdefault(key, []).append(name)
+    linked: Dict[str, List[str]] = {}
+    for key, name in conn.execute("SELECT page_key, class_name FROM miro_links WHERE venue_id = ? ORDER BY class_name", (venue,)):
+        linked.setdefault(key, []).append(name)
+    pages = []
+    for key, model, source, page_no, width, height, heading, confidence, note, decided_at in rows:
+        confirmed = decided_at is not None
+        classes = linked.get(key, []) if confirmed else suggested.get(key, [])
+        pages.append({"key": key, "model": model, "source_file": source, "page_no": page_no, "width": width,
+                      "height": height, "heading": heading, "note": note, "low_confidence": confidence == "low",
+                      "confirmed": confirmed, "decided_at": decided_at, "classes": classes,
+                      "suggested": suggested.get(key, []), "image_url": f"/api/catalog/miro-pages/{key}/image",
+                      "source_label": MIRO_SOURCE_LABEL})
+    return pages
+
+
+def list_miro_pages(settings: CatalogSettings) -> Dict[str, Any]:
+    """Every imported page, whether or not it has a class, with the admin's progress."""
+    with _open_for_read(settings) as conn:
+        pages = _page_rows(conn, settings.venue_id)
+        classes: Dict[str, List[str]] = {}
+        for model, name in conn.execute("SELECT model_key, name FROM classes WHERE venue_id = ? ORDER BY model_key, class_id",
+                                        (settings.venue_id,)):
+            classes.setdefault(model, []).append(name)
+    counts = {"total": len(pages), "confirmed": sum(p["confirmed"] for p in pages),
+              "without_class": sum(not p["classes"] for p in pages)}
+    return {"pages": pages, "counts": counts, "classes": classes}
+
+
+def save_miro_page(settings: CatalogSettings, page_key: str, class_names: Sequence[str]) -> Dict[str, Any]:
+    """Admin confirms which classes a page belongs to. An empty list confirms a page without a class."""
+    names = sorted({str(n).strip() for n in class_names if str(n).strip()})
+    conn = _open_for_write(settings)
+    venue = settings.venue_id
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT model_key FROM miro_pages WHERE venue_id = ? AND page_key = ?", (venue, page_key)).fetchone()
+        if row is None:
+            raise UnknownPage(page_key)
+        model = row[0]
+        known = {r[0] for r in conn.execute("SELECT name FROM classes WHERE venue_id = ? AND model_key = ?", (venue, model))}
+        unknown = [n for n in names if n not in known]
+        if unknown:
+            raise CatalogError(f"Model {model} nema klasu: {', '.join(unknown)}")
+        conn.execute("DELETE FROM miro_links WHERE venue_id = ? AND page_key = ?", (venue, page_key))
+        conn.executemany("INSERT INTO miro_links (venue_id, page_key, model_key, class_name) VALUES (?, ?, ?, ?)",
+                         [(venue, page_key, model, n) for n in names])
+        conn.execute("INSERT INTO miro_reviews (venue_id, page_key, decided_at) VALUES (?, ?, ?) "
+                     "ON CONFLICT (venue_id, page_key) DO UPDATE SET decided_at = excluded.decided_at",
+                     (venue, page_key, _now()))
+        conn.execute("COMMIT")
+    except sqlite3.Error as e:
+        conn.rollback()
+        raise CatalogError(f"Nije sačuvano: {e}")
+    except (CatalogError, UnknownPage):
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return next(p for p in list_miro_pages(settings)["pages"] if p["key"] == page_key)
+
+
+def reset_miro_page(settings: CatalogSettings, page_key: str) -> Dict[str, Any]:
+    """Undo the admin's decision: the page goes back to the suggestion."""
+    conn = _open_for_write(settings)
+    venue = settings.venue_id
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM miro_pages WHERE venue_id = ? AND page_key = ?", (venue, page_key)).fetchone() is None:
+            raise UnknownPage(page_key)
+        conn.execute("DELETE FROM miro_links WHERE venue_id = ? AND page_key = ?", (venue, page_key))
+        conn.execute("DELETE FROM miro_reviews WHERE venue_id = ? AND page_key = ?", (venue, page_key))
+        conn.execute("COMMIT")
+    except sqlite3.Error as e:
+        conn.rollback()
+        raise CatalogError(f"Nije sačuvano: {e}")
+    except UnknownPage:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return next(p for p in list_miro_pages(settings)["pages"] if p["key"] == page_key)
+
+
+def miro_page_image(settings: CatalogSettings, page_key: str) -> Path:
+    with _open_for_read(settings) as conn:
+        row = conn.execute("SELECT sha256 FROM miro_pages WHERE venue_id = ? AND page_key = ?",
+                           (settings.venue_id, page_key)).fetchone()
+    if row is None or settings.media_dir is None:
+        raise UnknownPage(page_key)
+    path = _media_path(settings, row[0])
+    if not path.is_file():
+        raise UnknownPage(page_key)
+    return path
+
+
+def class_miro_pages(settings: CatalogSettings, model: str, class_name: str) -> List[Dict[str, Any]]:
+    """Confirmed pages of the class, and pages only suggested for it while the admin has not decided."""
+    with _open_for_read(settings) as conn:
+        pages = _page_rows(conn, settings.venue_id, "AND p.model_key = ?", (model,))
+    return [p for p in pages if class_name in p["classes"]]
+
+
+def _class_names(settings: CatalogSettings, model: str) -> List[str]:
+    return [c["name"] for c in list_classes(settings, model)]
+
+
+def class_examples(settings: CatalogSettings, model: str, class_name: str, count: int = 6,
+                   seed: Optional[int] = None) -> Dict[str, Any]:
+    names = _class_names(settings, model)
+    if class_name not in names:
+        return {"available": settings.dataset_dir is not None, "total_images": 0, "examples": [],
+                "source_label": EXAMPLE_SOURCE_LABEL}
+    picked = _examples.pick_examples(settings.dataset_dir, model, class_name, names.index(class_name),
+                                     max(1, min(int(count), 24)), seed)
+    base = f"/api/catalog/models/{model}/classes/{class_name}/examples"
+    picked["examples"] = [{"url": f"{base}/{e['file']}?box={e['box']}", "source_label": EXAMPLE_SOURCE_LABEL}
+                          for e in picked["examples"]]
+    picked["source_label"] = EXAMPLE_SOURCE_LABEL
+    return picked
+
+
+def example_image(settings: CatalogSettings, model: str, class_name: str, file_name: str, box: int) -> bytes:
+    names = _class_names(settings, model)
+    return _examples.crop_example(settings.dataset_dir, model, class_name,
+                                  _examples.class_id_of(names, class_name), file_name, box)

@@ -506,5 +506,160 @@ class ClassRulesTests(unittest.TestCase):
         self.assertEqual(catalog.class_detail(self.settings, "Glasses", "NISKA_ZUTO")["trained_name"], "NISKA_BELO_ZUTO")
 
 
+class MiroAndExamplesTests(AssortmentImportTests):
+    """Ticket 04: old Miro pages as whole images, admin confirmation, read-only dataset examples."""
+
+    def setUp(self):
+        super().setUp()
+        from PIL import Image
+        self.miro = self.tmp / "miro"
+        self.miro.mkdir()
+        self.page_sizes = [(300, 200), (320, 500), (280, 180)]
+        pages = [Image.new("RGB", size, color) for size, color in zip(self.page_sizes, ("red", "green", "blue"))]
+        pages[0].save(self.miro / "Glasses board.pdf", save_all=True, append_images=pages[1:])
+        Image.new("RGB", (200, 100), "yellow").save(self.miro / "Shots.pdf")
+        self.suggestions = self.tmp / "suggestions.yaml"
+        self.write_suggestions({"glasses-01": {"heading": "CASA", "classes": ["CASA"]},
+                                "glasses-02": {"heading": "OVERVIEW", "classes": []},
+                                "shots-01": {"heading": "AMBER RED", "classes": ["AMBER", "RED"], "confidence": "low"}})
+        self.raw = self.tmp / "raw"
+        images, labels = self.raw / "glasses" / "images" / "CASA", self.raw / "glasses" / "labels" / "CASA"
+        images.mkdir(parents=True)
+        labels.mkdir(parents=True)
+        for i in range(4):
+            Image.new("RGB", (640, 360), "white").save(images / f"frame_{i}.jpg")
+            (labels / f"frame_{i}.txt").write_text("0 0.5 0.5 0.2 0.3\n1 0.2 0.2 0.1 0.1\n", encoding="utf-8")
+        Image.new("RGB", (640, 360), "white").save(images / "only_other_class.jpg")
+        (labels / "only_other_class.txt").write_text("1 0.5 0.5 0.2 0.3\n", encoding="utf-8")
+        self.settings = self.make_settings(
+            catalog_miro_dir=str(self.miro), catalog_miro_suggestions_path=str(self.suggestions),
+            catalog_miro_files={"Glasses": "Glasses board.pdf", "shots": "Shots.pdf"})
+
+    def write_suggestions(self, pages):
+        self.suggestions.write_text(json.dumps({"pages": pages}), encoding="utf-8")
+
+    def raw_state(self):
+        return {p: (p.is_dir() or p.read_bytes(), p.stat().st_mtime_ns) for p in sorted(self.raw.rglob("*"))}
+
+    def page(self, key):
+        return next(p for p in catalog.list_miro_pages(self.settings)["pages"] if p["key"] == key)
+
+    def test_every_page_is_imported_whole(self):
+        from PIL import Image
+        report = catalog.import_catalog(self.settings)["miro"]
+        self.assertEqual(report["pages"], 4)
+        data = catalog.list_miro_pages(self.settings)
+        self.assertEqual([p["key"] for p in data["pages"]], ["glasses-01", "glasses-02", "glasses-03", "shots-01"])
+        for p, size in zip(data["pages"], self.page_sizes):
+            with Image.open(catalog.miro_page_image(self.settings, p["key"])) as im:
+                self.assertEqual(im.size, size)
+            self.assertEqual(p["source_label"], "Stara Miro strana")
+
+    def test_admin_confirms_on_one_screen_and_decision_survives_reimport(self):
+        catalog.import_catalog(self.settings)
+        self.assertEqual(catalog.list_miro_pages(self.settings)["counts"], {"total": 4, "confirmed": 0, "without_class": 2})
+        self.assertEqual(self.page("shots-01")["classes"], ["AMBER", "RED"])
+        self.assertTrue(self.page("shots-01")["low_confidence"])
+        catalog.save_miro_page(self.settings, "glasses-01", ["NISKA", "CASA"])
+        catalog.save_miro_page(self.settings, "glasses-03", [])
+        catalog.import_catalog(self.settings)
+        self.assertEqual(self.page("glasses-01")["classes"], ["CASA", "NISKA"])
+        self.assertTrue(self.page("glasses-01")["confirmed"])
+        counts = catalog.list_miro_pages(self.settings)["counts"]
+        self.assertEqual(counts, {"total": 4, "confirmed": 2, "without_class": 2})
+        self.assertIn("glasses-03", [p["key"] for p in catalog.list_miro_pages(self.settings)["pages"] if not p["classes"]])
+        catalog.reset_miro_page(self.settings, "glasses-01")
+        self.assertEqual(self.page("glasses-01")["classes"], ["CASA"])
+        self.assertFalse(self.page("glasses-01")["confirmed"])
+
+    def test_one_page_shows_on_every_class_it_belongs_to(self):
+        catalog.import_catalog(self.settings)
+        self.assertEqual(catalog.class_detail(self.settings, "Shots", "AMBER")["miro_pages"][0]["confirmed"], False)
+        catalog.save_miro_page(self.settings, "glasses-01", ["CASA", "NISKA"])
+        for cls in ("CASA", "NISKA"):
+            pages = catalog.class_detail(self.settings, "Glasses", cls)["miro_pages"]
+            self.assertEqual([(p["key"], p["confirmed"], p["source_label"]) for p in pages],
+                             [("glasses-01", True, "Stara Miro strana")])
+
+    def test_wrong_class_is_refused_through_api(self):
+        catalog.import_catalog(self.settings)
+        routes = self.routes_for(self.settings)
+        save = routes[("/api/catalog/miro-pages/{page_key}", "POST")]
+        with self.assertRaises(HTTPException) as e:
+            save("glasses-01", {"classes": ["AMBER"]})
+        self.assertEqual(e.exception.status_code, 400)
+        with self.assertRaises(HTTPException) as e:
+            save("glasses-99", {"classes": []})
+        self.assertEqual(e.exception.status_code, 404)
+        self.assertFalse(self.page("glasses-01")["confirmed"])
+        self.assertTrue(save("glasses-01", {"classes": ["NISKA"]})["confirmed"])
+
+    def routes_for(self, settings):
+        from fastapi import FastAPI
+        from web_labeler.catalog.router import build_catalog_router
+        app = FastAPI()
+        app.include_router(build_catalog_router(settings))
+        return {(r.path, m): r.endpoint for r in app.routes for m in getattr(r, "methods", ())}
+
+    def test_bad_suggestion_refuses_whole_import(self):
+        self.write_suggestions({"glasses-01": {"classes": ["NOT_A_CLASS"]}})
+        with self.assertRaises(catalog.CatalogError):
+            catalog.import_catalog(self.settings)
+        self.assertFalse((self.tmp / "db" / "catalog.db").exists())
+
+    def test_examples_are_labeled_and_never_name_an_article(self):
+        catalog.import_catalog(self.settings)
+        data = catalog.class_examples(self.settings, "Glasses", "CASA", count=3, seed=1)
+        self.assertEqual(data["source_label"], "Primer iz dataseta")
+        self.assertEqual(len(data["examples"]), 3)
+        for e in data["examples"]:
+            self.assertEqual(set(e), {"url", "source_label"})
+            self.assertNotIn("only_other_class", e["url"])
+        self.assertEqual(catalog.class_examples(self.settings, "Glasses", "NISKA")["examples"], [])
+        self.assertEqual(catalog.class_examples(self.settings, "Glasses", "UNITED_CLASS")["examples"], [])
+
+    def test_example_crop_and_raw_stays_unchanged(self):
+        from io import BytesIO
+        from PIL import Image
+        catalog.import_catalog(self.settings)
+        before = self.raw_state()
+        routes = self.routes_for(self.settings)
+        listing = routes[("/api/catalog/models/{model}/classes/{class_name}/examples", "GET")]("Glasses", "CASA", 6, 7)
+        image = routes[("/api/catalog/models/{model}/classes/{class_name}/examples/{file_name}", "GET")]
+        for e in listing["examples"]:
+            name, box = e["url"].rsplit("/", 1)[1].split("?box=")
+            with Image.open(BytesIO(image("Glasses", "CASA", name, int(box)).body)) as im:
+                self.assertEqual(im.format, "JPEG")
+                self.assertLess(im.size[0], 640)
+        for bad in ("../CASA/frame_0.jpg", "frame_0.txt", "missing.jpg"):
+            with self.assertRaises(HTTPException):
+                image("Glasses", "CASA", bad, 0)
+        with self.assertRaises(HTTPException):
+            image("Glasses", "CASA", "only_other_class.jpg", 0)
+        catalog.class_examples(self.settings, "Glasses", "NISKA")
+        self.assertEqual(self.raw_state(), before)
+        self.assertFalse((self.raw / "glasses" / "labels" / "NISKA").exists())
+
+    def test_article_without_evidence_has_no_image(self):
+        catalog.import_catalog(self.settings)
+        self.assertIsNone(self.variation("Glasses", "CASA", "drink")["image"])
+
+    def test_images_refused_inside_raw(self):
+        settings = self.make_settings(catalog_miro_dir=str(self.miro), catalog_media_dir=str(self.raw / "media"),
+                                      catalog_miro_files={"Glasses": "Glasses board.pdf"})
+        with self.assertRaises(catalog.CatalogError):
+            catalog.import_catalog(settings)
+        self.assertFalse((self.raw / "media").exists())
+
+    def test_third_version_database_is_upgraded(self):
+        db = self.tmp / "db" / "catalog.db"
+        db.parent.mkdir()
+        conn = sqlite3.connect(str(db))
+        conn.executescript(store._SCHEMA + store._SCHEMA_V2 + store._SCHEMA_V3 + "PRAGMA user_version = 3;")
+        conn.close()
+        catalog.import_catalog(self.settings)
+        self.assertEqual(catalog.list_miro_pages(self.settings)["counts"]["total"], 4)
+
+
 if __name__ == "__main__":
     unittest.main()

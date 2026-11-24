@@ -47,3 +47,33 @@
 .catalogFinding p { margin: 0 0 5px; line-height: 1.45; }
 .catalogFinding ul { margin: 0; padding-left: 17px; color: var(--muted); line-height: 1.5; }
 .catalogFinding strong { color: var(--text); font-weight: 600; }
+.catalogImages { margin-bottom: 16px; }
+.catalogImages h3 { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; color: var(--accent); font-size: 12px; }
+.catalogImages .catalogSubhead { margin-top: 0; }
+.catalogHint.small { padding: 6px 0; text-align: left; font-size: 12px; }
+.btn.small { padding: 2px 8px; font-size: 11px; }
+.catalogBadge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: .02em; color: #111; background: #fde68a; }
+.catalogExample .catalogBadge { background: #93c5fd; }
+.catalogPageRow, .catalogExampleRow { display: flex; flex-wrap: wrap; gap: 10px; }
+.catalogPage, .catalogExample { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.catalogPage img, .catalogExample img { display: block; border: 1px solid var(--border2); border-radius: 6px; cursor: zoom-in; background: var(--surface); }
+.catalogPage img { width: 260px; height: auto; }
+.catalogPage.big img { width: min(560px, 100%); }
+.catalogExample img { width: 150px; height: 150px; object-fit: contain; }
+.catalogPage figcaption, .catalogExample figcaption { color: var(--muted); font-size: 11px; }
+.catalogNoImage { color: var(--muted); font-style: italic; white-space: nowrap; }
+.catalogViewer { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.82); cursor: zoom-out; }
+.catalogViewer.hidden { display: none; }
+.catalogViewer figure { margin: 0; max-width: 94%; max-height: 94%; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.catalogViewer img { max-width: 100%; max-height: calc(100vh - 140px); border-radius: 6px; }
+.catalogViewer figcaption { color: #e5e7eb; font-size: 13px; }
+.catalogMiroGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(560px, 1fr)); gap: 12px; margin-top: 12px; }
+.catalogMiroCard { display: flex; gap: 12px; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-left: 3px solid #fbbf24; border-radius: 6px; }
+.catalogMiroCard.done { border-left-color: #34d399; }
+.catalogMiroSide { display: flex; flex-direction: column; gap: 6px; min-width: 0; flex: 1; }
+.catalogMiroStatus { font-weight: 700; }
+.catalogMiroHeading { line-height: 1.4; overflow-wrap: anywhere; }
+.catalogChips { display: flex; flex-wrap: wrap; gap: 4px; }
+.catalogChip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border: 1px solid var(--accent); border-radius: 12px; font-size: 12px; }
+.catalogChip button { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; }
+.catalogMiroButtons { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
