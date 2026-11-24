@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from web_labeler import catalog, server
 from web_labeler.catalog import store
+from web_labeler.catalog import miro
 from web_labeler.yolo import load_yolo_names_from_yaml
 
 
@@ -562,7 +563,7 @@ class MiroAndExamplesTests(AssortmentFixture):
 
     def test_admin_confirms_on_one_screen_and_decision_survives_reimport(self):
         catalog.import_catalog(self.settings)
-        self.assertEqual(catalog.list_miro_pages(self.settings)["counts"], {"total": 4, "confirmed": 0, "without_class": 2})
+        self.assertEqual(catalog.list_miro_pages(self.settings)["counts"], {"total": 4, "confirmed": 0, "without_class": 2, "retired": 0})
         self.assertEqual(self.page("shots-01")["classes"], ["AMBER", "RED"])
         self.assertTrue(self.page("shots-01")["low_confidence"])
         catalog.save_miro_page(self.settings, "glasses-01", ["NISKA", "CASA"])
@@ -571,11 +572,49 @@ class MiroAndExamplesTests(AssortmentFixture):
         self.assertEqual(self.page("glasses-01")["classes"], ["CASA", "NISKA"])
         self.assertTrue(self.page("glasses-01")["confirmed"])
         counts = catalog.list_miro_pages(self.settings)["counts"]
-        self.assertEqual(counts, {"total": 4, "confirmed": 2, "without_class": 2})
+        self.assertEqual(counts, {"total": 4, "confirmed": 2, "without_class": 2, "retired": 0})
         self.assertIn("glasses-03", [p["key"] for p in catalog.list_miro_pages(self.settings)["pages"] if not p["classes"]])
         catalog.reset_miro_page(self.settings, "glasses-01")
         self.assertEqual(self.page("glasses-01")["classes"], ["CASA"])
         self.assertFalse(self.page("glasses-01")["confirmed"])
+
+    def test_new_export_keeps_confirmations_by_look_not_position(self):
+        """Ticket 21: Miro re-encodes and reorders pages; a page is recognised by how it looks."""
+        from PIL import Image, ImageDraw
+        catalog.import_catalog(self.settings)
+        catalog.save_miro_page(self.settings, "glasses-01", ["CASA"])   # red
+        catalog.save_miro_page(self.settings, "glasses-02", ["NISKA"])  # green, will be gone
+        catalog.save_miro_page(self.settings, "glasses-03", [])         # blue
+        fresh = Image.new("RGB", (300, 200), "white")
+        ImageDraw.Draw(fresh).rectangle((40, 40, 200, 160), fill="black")
+        # new export: blue first and a little smaller (re-encoded), a new page, red last; green removed
+        pages = [Image.new("RGB", (270, 168), "blue"), fresh, Image.new("RGB", (300, 200), (250, 2, 3))]
+        pages[0].save(self.miro / "Glasses board.pdf", save_all=True, append_images=pages[1:])
+        new_page = [p for p in miro.extract_pdf(self.miro / "Glasses board.pdf", "Glasses") if p.page_no == 2][0]
+        new_key = miro.content_key("Glasses", new_page.sha256)
+        self.write_suggestions({new_key: {"heading": "NOVA", "classes": ["NISKA"]},
+                                "glasses-01": {"heading": "CASA", "classes": ["CASA"]},
+                                "shots-01": {"heading": "AMBER RED", "classes": ["AMBER", "RED"]}})
+        report = catalog.import_catalog(self.settings)["miro"]
+        self.assertEqual(report["kept"], 3)  # red, blue, and the unchanged shots page
+        self.assertEqual(report["new_pages"], ["Glasses 2"])
+        self.assertEqual(report["confirmed_retired"], ["glasses-02 (OVERVIEW)"])
+        self.assertEqual(self.page("glasses-01")["page_no"], 3)
+        self.assertTrue(self.page("glasses-01")["confirmed"])
+        self.assertEqual(self.page("glasses-01")["classes"], ["CASA"])
+        self.assertTrue(self.page("glasses-03")["confirmed"])
+        self.assertEqual(self.page("glasses-03")["page_no"], 1)
+        self.assertEqual((self.page(new_key)["confirmed"], self.page(new_key)["classes"], self.page(new_key)["heading"]),
+                         (False, ["NISKA"], "NOVA"))
+        self.assertTrue(self.page("glasses-02")["retired"])
+        self.assertEqual(catalog.list_miro_pages(self.settings)["counts"],
+                         {"total": 4, "confirmed": 2, "without_class": 1, "retired": 1})
+        with self.assertRaises(catalog.CatalogError):
+            catalog.save_miro_page(self.settings, "glasses-02", ["NISKA"])
+        self.assertEqual([p["key"] for p in catalog.class_detail(self.settings, "Glasses", "NISKA")["miro_pages"]], [new_key])
+        # the same export again changes nothing
+        again = catalog.import_catalog(self.settings)["miro"]
+        self.assertEqual((again["kept"], again["new_pages"], again["retired"]), (4, [], []))
 
     def test_one_page_shows_on_every_class_it_belongs_to(self):
         catalog.import_catalog(self.settings)

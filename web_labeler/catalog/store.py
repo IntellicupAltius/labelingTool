@@ -1,6 +1,7 @@
 """Catalog core: the only code that reads or changes the Catalog database."""
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -24,7 +25,7 @@ from web_labeler.catalog import releases as _releases
 from web_labeler.catalog import clips as _clips
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
            "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings",
            "miro_pages", "miro_suggested", "miro_reviews", "miro_links", "evidence", "evidence_events", "decisions",
@@ -476,6 +477,11 @@ CREATE TRIGGER clip_events_no_delete BEFORE DELETE ON clip_events
 BEGIN SELECT RAISE(ABORT, 'clip history is append-only'); END;
 """
 
+# v14: a Miro page that is not in the newest export stays (with its confirmation) but is marked retired.
+_SCHEMA_V14 = """
+ALTER TABLE miro_pages ADD COLUMN retired_at TEXT;
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -646,11 +652,11 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}{_SCHEMA_V10}{_SCHEMA_V11}{_SCHEMA_V12}{_SCHEMA_V13}"
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}{_SCHEMA_V10}{_SCHEMA_V11}{_SCHEMA_V12}{_SCHEMA_V13}{_SCHEMA_V14}"
                                f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
+        elif version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13):
             steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8, _SCHEMA_V9,
-                     _SCHEMA_V10, _SCHEMA_V11, _SCHEMA_V12, _SCHEMA_V13][version - 1:]
+                     _SCHEMA_V10, _SCHEMA_V11, _SCHEMA_V12, _SCHEMA_V13, _SCHEMA_V14][version - 1:]
             conn.execute("PRAGMA foreign_keys = OFF")  # the decisions rebuild (v12) drops a table others point to
             before = conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] if version >= 6 else 0
             conn.executescript(f"BEGIN;{''.join(steps)}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
@@ -843,25 +849,86 @@ def _store_miro_images(settings: CatalogSettings, plan: _miro.MiroPlan) -> None:
         os.replace(tmp, target)
 
 
-def _apply_miro(conn: sqlite3.Connection, venue: str, plan: _miro.MiroPlan, at: str) -> None:
-    """Pages and suggestions follow the sources. Admin decisions are never touched by an import."""
-    for page in plan.pages:
-        s = plan.suggestions.get(page.key) or _miro.Suggestion("", [])
+def _stored_signature(settings: CatalogSettings, sha256: str) -> bytes:
+    try:
+        return _miro.signature(_media_path(settings, sha256).read_bytes())
+    except Exception:
+        return b""  # image gone: the page can only be retired, never matched
+
+
+def _apply_miro(conn: sqlite3.Connection, venue: str, plan: _miro.MiroPlan, at: str, settings: CatalogSettings) -> None:
+    """Pages and suggestions follow the sources. Admin decisions are never touched by an import.
+
+    A page that was imported before keeps its key, and so its confirmation, when the new export has a page that
+    looks the same. A new page gets a key of its own; an old page with no match is marked retired, not deleted.
+    """
+    stored = conn.execute("SELECT page_key, model_key, sha256, width, height, heading, retired_at FROM miro_pages "
+                          "WHERE venue_id = ? ORDER BY retired_at IS NOT NULL, page_no", (venue,)).fetchall()
+    confirmed = {r[0] for r in conn.execute("SELECT page_key FROM miro_reviews WHERE venue_id = ?", (venue,))}
+    finals: List[str] = []
+    matched, new, retired, lost = [], [], [], []
+    for model in sorted({p.model for p in plan.pages}):
+        pages = [p for p in plan.pages if p.model == model]
+        olds = [r for r in stored if r[1] == model]
+        if not olds:
+            finals.extend(p.key for p in pages)
+            continue
+        match = _miro.match_pages([(p.signature, (p.width, p.height)) for p in pages],
+                                  [(_stored_signature(settings, r[2]), (r[3], r[4])) for r in olds])
+        taken = {r[0] for r in stored}
+        for i, page in enumerate(pages):
+            if i in match:
+                key = olds[match[i]][0]
+                matched.append(key)
+            else:
+                key = _miro.content_key(model, page.sha256)
+                while key in taken:  # never reuse a key that belongs to another page
+                    key = _miro.content_key(model, hashlib.sha256((key + page.sha256).encode()).hexdigest())
+                taken.add(key)
+                new.append(f"{model} {page.page_no}")
+            finals.append(key)
+    for page, key in zip(plan.pages, finals):
+        s = (plan.suggestions.get(_miro.content_key(page.model, page.sha256)) or plan.suggestions.get(key)
+             or _miro.Suggestion("", []))
+        page.key = key
         conn.execute(
             "INSERT INTO miro_pages (venue_id, page_key, model_key, source_file, page_no, sha256, width, height, heading, "
-            "confidence, note, imported_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "confidence, note, imported_at, retired_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) "
             "ON CONFLICT (venue_id, page_key) DO UPDATE SET model_key = excluded.model_key, source_file = excluded.source_file, "
             "page_no = excluded.page_no, sha256 = excluded.sha256, width = excluded.width, height = excluded.height, "
-            "heading = excluded.heading, confidence = excluded.confidence, note = excluded.note",
-            (venue, page.key, page.model, page.source_file, page.page_no, page.sha256, page.width, page.height,
+            "heading = excluded.heading, confidence = excluded.confidence, note = excluded.note, retired_at = NULL",
+            (venue, key, page.model, page.source_file, page.page_no, page.sha256, page.width, page.height,
              s.heading, s.confidence, s.note, at))
+    keys = set(finals)
+    models_in_plan = {p.model for p in plan.pages}
+    for key, model, _, _, _, heading, retired_at in stored:
+        if key in keys or retired_at is not None or model not in models_in_plan:
+            continue
+        conn.execute("UPDATE miro_pages SET retired_at = ? WHERE venue_id = ? AND page_key = ?", (at, venue, key))
+        retired.append(f"{key} ({heading})" if heading else key)
+        if key in confirmed:
+            lost.append(f"{key} ({heading})" if heading else key)
+    suggested = {}
+    for page in plan.pages:
+        s = plan.suggestions.get(_miro.content_key(page.model, page.sha256)) or plan.suggestions.get(page.key)
+        if s is not None:
+            suggested[page.key] = s
     conn.execute("DELETE FROM miro_suggested WHERE venue_id = ?", (venue,))
     conn.executemany("INSERT INTO miro_suggested (venue_id, page_key, class_name) VALUES (?, ?, ?)",
-                     [(venue, key, c) for key, s in plan.suggestions.items() for c in s.classes])
-    keys = {p.key for p in plan.pages}
-    stored = {r[0] for r in conn.execute("SELECT page_key FROM miro_pages WHERE venue_id = ?", (venue,))}
-    plan.report["kept_but_missing_in_source"] = sorted(stored - keys)
-    plan.report["confirmed"] = conn.execute("SELECT COUNT(*) FROM miro_reviews WHERE venue_id = ?", (venue,)).fetchone()[0]
+                     [(venue, key, c) for key, s in suggested.items() for c in s.classes])
+    used = {_miro.content_key(p.model, p.sha256) for p in plan.pages} | keys
+    plan.report["suggested"] = sum(1 for s in suggested.values() if s.classes)
+    plan.report["without_page_suggestion"] = sorted(k for k in keys if k not in suggested)
+    plan.report["suggestions_without_page"] = sorted(k for k in plan.suggestions if k not in used)
+    plan.report["kept"] = len(matched)
+    plan.report["new_pages"] = new
+    plan.report["retired"] = retired
+    plan.report["confirmed_retired"] = lost
+    plan.report["kept_but_missing_in_source"] = sorted(
+        r[0] for r in conn.execute("SELECT page_key FROM miro_pages WHERE venue_id = ? AND retired_at IS NOT NULL", (venue,)))
+    plan.report["confirmed"] = conn.execute(
+        "SELECT COUNT(*) FROM miro_reviews r JOIN miro_pages p ON p.venue_id = r.venue_id AND p.page_key = r.page_key "
+        "WHERE r.venue_id = ? AND p.retired_at IS NULL", (venue,)).fetchone()[0]
 
 
 def import_catalog(settings: CatalogSettings) -> Dict[str, Any]:
@@ -930,7 +997,7 @@ def _import(settings: CatalogSettings, plan: Optional[_assortment.AssortmentPlan
             _apply_rules(conn, venue, rules)
             report["class_rules"] = rules.report
         if miro is not None:
-            _apply_miro(conn, venue, miro, at)
+            _apply_miro(conn, venue, miro, at, settings)
             report["miro"] = miro.report
         if report["added"] or plan is not None:
             conn.execute("INSERT INTO import_runs (venue_id, at, summary_json) VALUES (?, ?, ?)",
@@ -1262,8 +1329,8 @@ class UnknownPage(Exception):
 def _page_rows(conn: sqlite3.Connection, venue: str, where: str = "", args: Sequence[Any] = ()) -> List[Dict[str, Any]]:
     rows = conn.execute(
         "SELECT p.page_key, p.model_key, p.source_file, p.page_no, p.width, p.height, p.heading, p.confidence, p.note, "
-        "r.decided_at FROM miro_pages p LEFT JOIN miro_reviews r ON r.venue_id = p.venue_id AND r.page_key = p.page_key "
-        f"WHERE p.venue_id = ? {where} ORDER BY p.model_key, p.page_no", (venue, *args)).fetchall()
+        "r.decided_at, p.retired_at FROM miro_pages p LEFT JOIN miro_reviews r ON r.venue_id = p.venue_id AND r.page_key = p.page_key "
+        f"WHERE p.venue_id = ? {where} ORDER BY p.model_key, p.retired_at IS NOT NULL, p.page_no", (venue, *args)).fetchall()
     suggested: Dict[str, List[str]] = {}
     for key, name in conn.execute("SELECT page_key, class_name FROM miro_suggested WHERE venue_id = ? ORDER BY class_name", (venue,)):
         suggested.setdefault(key, []).append(name)
@@ -1271,12 +1338,13 @@ def _page_rows(conn: sqlite3.Connection, venue: str, where: str = "", args: Sequ
     for key, name in conn.execute("SELECT page_key, class_name FROM miro_links WHERE venue_id = ? ORDER BY class_name", (venue,)):
         linked.setdefault(key, []).append(name)
     pages = []
-    for key, model, source, page_no, width, height, heading, confidence, note, decided_at in rows:
+    for key, model, source, page_no, width, height, heading, confidence, note, decided_at, retired_at in rows:
         confirmed = decided_at is not None
         classes = linked.get(key, []) if confirmed else suggested.get(key, [])
         pages.append({"key": key, "model": model, "source_file": source, "page_no": page_no, "width": width,
                       "height": height, "heading": heading, "note": note, "low_confidence": confidence == "low",
                       "confirmed": confirmed, "decided_at": decided_at, "classes": classes,
+                      "retired": retired_at is not None, "retired_at": retired_at,
                       "suggested": suggested.get(key, []), "image_url": f"/api/catalog/miro-pages/{key}/image",
                       "source_label": MIRO_SOURCE_LABEL})
     return pages
@@ -1290,8 +1358,9 @@ def list_miro_pages(settings: CatalogSettings) -> Dict[str, Any]:
         for model, name in conn.execute("SELECT model_key, name FROM classes WHERE venue_id = ? ORDER BY model_key, class_id",
                                         (settings.venue_id,)):
             classes.setdefault(model, []).append(name)
-    counts = {"total": len(pages), "confirmed": sum(p["confirmed"] for p in pages),
-              "without_class": sum(not p["classes"] for p in pages)}
+    current = [p for p in pages if not p["retired"]]
+    counts = {"total": len(current), "confirmed": sum(p["confirmed"] for p in current),
+              "without_class": sum(not p["classes"] for p in current), "retired": len(pages) - len(current)}
     return {"pages": pages, "counts": counts, "classes": classes}
 
 
@@ -1302,9 +1371,11 @@ def save_miro_page(settings: CatalogSettings, page_key: str, class_names: Sequen
     venue = settings.venue_id
     try:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute("SELECT model_key FROM miro_pages WHERE venue_id = ? AND page_key = ?", (venue, page_key)).fetchone()
+        row = conn.execute("SELECT model_key, retired_at FROM miro_pages WHERE venue_id = ? AND page_key = ?", (venue, page_key)).fetchone()
         if row is None:
             raise UnknownPage(page_key)
+        if row[1] is not None:
+            raise CatalogError("Ove strane više nema u Miru (arhiva). Potvrdi njenu novu stranu.")
         model = row[0]
         known = {r[0] for r in conn.execute("SELECT name FROM classes WHERE venue_id = ? AND model_key = ?", (venue, model))}
         unknown = [n for n in names if n not in known]
@@ -1366,7 +1437,7 @@ def class_miro_pages(settings: CatalogSettings, model: str, class_name: str) -> 
     """Confirmed pages of the class, and pages only suggested for it while the admin has not decided."""
     with _open_for_read(settings) as conn:
         pages = _page_rows(conn, settings.venue_id, "AND p.model_key = ?", (model,))
-    return [p for p in pages if class_name in p["classes"]]
+    return [p for p in pages if class_name in p["classes"] and not p["retired"]]
 
 
 def _class_names(settings: CatalogSettings, model: str) -> List[str]:

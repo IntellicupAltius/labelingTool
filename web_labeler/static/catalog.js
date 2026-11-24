@@ -48,7 +48,7 @@
   let decisionFilter = "propose";
   let openArticle = null;
   let classChoices = null;
-  const MIRO_FILTERS = [["all", "Sve"], ["waiting", "Čeka potvrdu"], ["confirmed", "Potvrđeno"], ["none", "Bez klase"]];
+  const MIRO_FILTERS = [["all", "Sve"], ["waiting", "Čeka potvrdu"], ["confirmed", "Potvrđeno"], ["none", "Bez klase"], ["retired", "Arhiva"]];
   let miroFilter = "waiting";
   let exampleSeed = Math.floor(Math.random() * 1e9);
   let requestNo = 0;
@@ -313,6 +313,8 @@
   }
 
   function miroMatches(p) {
+    if (miroFilter === "retired") return p.retired;
+    if (p.retired) return false;
     if (miroFilter === "waiting") return !p.confirmed;
     if (miroFilter === "confirmed") return p.confirmed;
     if (miroFilter === "none") return !p.classes.length;
@@ -323,6 +325,15 @@
     const card = el("div", p.confirmed ? "catalogMiroCard done" : "catalogMiroCard");
     card.append(miroThumb(p, false));
     const side = el("div", "catalogMiroSide");
+    if (p.retired) {
+      side.append(el("div", "catalogMiroStatus", "Nema u novom Miru"));
+      if (p.heading) side.append(el("div", "catalogMiroHeading", `Na strani piše: ${p.heading}`));
+      side.append(el("div", "catalogSubhead", p.confirmed
+        ? `Bila potvrđena: ${p.classes.length ? p.classes.join(", ") : "bez klase"}. Ova strana se više ne prikazuje na kartici klase; potvrdi njenu novu stranu.`
+        : "Ova strana se više ne prikazuje na kartici klase."));
+      card.append(side);
+      return card;
+    }
     side.append(el("div", "catalogMiroStatus", p.confirmed ? "Potvrđeno" : "Čeka potvrdu"));
     if (p.heading) side.append(el("div", "catalogMiroHeading", `Na strani piše: ${p.heading}`));
     if (p.low_confidence) side.append(el("span", "catalogTag warn", "predlog nije siguran"));
@@ -391,8 +402,8 @@
       grid.append(miroCard(p, data.classes, (saved) => {
         const i = data.pages.findIndex((x) => x.key === saved.key);
         data.pages[i] = saved;
-        data.counts.confirmed = data.pages.filter((x) => x.confirmed).length;
-        data.counts.without_class = data.pages.filter((x) => !x.classes.length).length;
+        data.counts.confirmed = data.pages.filter((x) => x.confirmed && !x.retired).length;
+        data.counts.without_class = data.pages.filter((x) => !x.classes.length && !x.retired).length;
         renderMiro(data);
       }));
     }

@@ -9,6 +9,31 @@
 # Prva strana svakog modela osim Glasses je pregled celog modela i nema klasu.
 
 pages:
+  # Bottles, izvoz iz Mira 24.11.2026 (23 strane). Ključ = sadržaj strane, pa važi bez obzira na redosled.
+  # Strane koje se nisu promenile zadržavaju i stari ključ (bottles-02 ...) i potvrdu; ispod su stari ključevi.
+  bottles-19516f090c: {heading: "Pregled svih flaša", classes: [], note: "Pregledna strana celog modela."}
+  bottles-d649d6707b: {heading: "AQUA VIVA", classes: [AQUA_VIVA]}
+  bottles-6543ec4f76: {heading: "KNJAZ MILOS, LIMUN, MANDARINA", classes: [KNJAZ_MILOS]}
+  bottles-ad948bc140: {heading: "NIKSICKO PIVO", classes: [NIKSICKO_PIVO]}
+  bottles-2a608bc3d2: {heading: "CORONA", classes: [CORONA_PIVO]}
+  bottles-1fc25284fa: {heading: "JELEN PIVO", classes: [JELEN_PIVO], note: "JELEN_PIVO je izbačen iz treninga (nema ga u ponudi)."}
+  bottles-0b923b1dee: {heading: "ASPALL RASPBERRY", classes: [ASPALL_RASPBERRY]}
+  bottles-128cd7f7bf: {heading: "BAVARIA", classes: [BAVARIA_PIVO]}
+  bottles-c0fe1095fe: {heading: "EVERVESS TONIC", classes: [EVERVESS]}
+  bottles-45ce35cd42: {heading: "GUSTO", classes: [GUSTO]}
+  bottles-fd35fc55c8: {heading: "PEPSI, PEPSI ZERO", classes: [PEPSI]}
+  bottles-be667c7428: {heading: "7UP", classes: [7UP]}
+  bottles-ee30cf96c8: {heading: "MIRINDA", classes: [MIRINDA]}
+  bottles-469a6f639d: {heading: "SCHEWEPPES TONIC", classes: [SCHEWEPPES_TONIC]}
+  bottles-d4461bc02a: {heading: "GUARANA", classes: [GUARANA]}
+  bottles-453401d67a: {heading: "REDBULL", classes: [REDBULL]}
+  bottles-61a58da8cb: {heading: "PROSECCO FLASA", classes: [PROSECCO_FLASA]}
+  bottles-2ef25fc0d9: {heading: "BEZALKOHOLNA (BAVARIA)", classes: [BAVARIA_BEZALKOHOLNA]}
+  bottles-a9a7543905: {heading: "VINO_KIBLA", classes: [VINO_KIBLA], note: "Belo, roze i prosecco u kibli; označava se cela kibla sa flašom (potvrđeno 24.11.)."}
+  bottles-811bd90496: {heading: "EVERVESS BITER", classes: [EVERVESS], note: "Mapa vodi EVERVESS BITER u EVERVESS."}
+  bottles-b80a96f29e: {heading: "VINO_FLASA_ROZE", classes: [VINO_FLASA_ROZE], note: "Izbačena klasa (24.11.): roze u kibli je VINO_KIBLA. Strana ostaje kao arhiva."}
+  bottles-4741e89562: {heading: "VINO_FLASA_BELO", classes: [VINO_FLASA_BELO], note: "Izbačena klasa (24.11.): belo u kibli je VINO_KIBLA. Strana ostaje kao arhiva."}
+  bottles-9d23cb5b9c: {heading: "ASPALL APPLE, SOMERSBY", classes: [SOMERSBY], note: "Mapa vodi ASPALL JABUKA u SOMERSBY; izgledaju isto."}
   bottles-01: {heading: "Pregled svih flaša", classes: [], note: "Pregledna strana celog modela."}
   bottles-02: {heading: "AQUA VIVA", classes: [AQUA_VIVA]}
   bottles-03: {heading: "KNJAZ MILOS, LIMUN, MANDARINA", classes: [KNJAZ_MILOS]}

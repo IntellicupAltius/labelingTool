@@ -214,7 +214,7 @@ class NewClassTests(unittest.TestCase):
         conn = sqlite3.connect(db)
         old_check = re.sub(r",\s*'class_target'\)", ")", store._SCHEMA_V12)  # the v11 table, same columns
         conn.execute("PRAGMA foreign_keys = OFF")
-        conn.executescript(f"BEGIN;DROP TABLE clip_events;{old_check}PRAGMA user_version = 11;COMMIT;")
+        conn.executescript(f"BEGIN;DROP TABLE clip_events;ALTER TABLE miro_pages DROP COLUMN retired_at;{old_check}PRAGMA user_version = 11;COMMIT;")
         rows = conn.execute("SELECT * FROM decisions ORDER BY decision_id").fetchall()
         with self.assertRaises(sqlite3.IntegrityError):
             conn.execute("INSERT INTO decisions (venue_id, kind, payload, actor, role, created_at, valid_from) "
