@@ -417,6 +417,36 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.identity("Casa Vina Crvena")["mapping"], "mapiranje nedostaje")
         self.assertNotIn("Casa Vina Crvena", [c["text"].split(":")[0] for c in store.next_release(settings)["changes"]])
 
+    # ---- inbox "čeka te" (ticket 14) ----
+
+    def test_inbox_shows_only_what_waits_for_the_labeler(self):
+        names = lambda: [i["name"] for i in store.list_inbox(self.settings)["items"]]
+        self.assertEqual(names(), ["NEW DRINK"])  # sold, no class; tracked and ignored are not here
+        v = self.identity("NEW DRINK")
+        store.snooze(self.settings, v["identity_id"], "Goca", "labeler")
+        self.assertEqual(names(), [])
+        self.assertEqual(store.list_inbox(self.settings)["counts"]["snoozed"], 1)
+        from datetime import date, timedelta
+        later = (date.today() + timedelta(days=15)).isoformat()
+        self.assertEqual([i["name"] for i in store.list_inbox(self.settings, later)["items"]], ["NEW DRINK"])  # back after 14 days
+        prop = catalog.record_decision(self.settings, "propose", "Goca", "labeler", identity_id=v["identity_id"],
+                                       payload={"kind": "new_class", "change": {"note": "zelena flaša"}}, reason="nema klase")
+        self.assertEqual(prop["text"], "predlog: treba nova klasa (zelena flaša)")
+        inbox = store.list_inbox(self.settings, (date.today() + timedelta(days=15)).isoformat())
+        self.assertEqual((inbox["items"], inbox["counts"]["waiting_class"]), ([], 1))
+        catalog.record_decision(self.settings, "reject", "Aleksa", "admin", target_id=prop["decision_id"], reason="postoji klasa")
+        self.assertEqual([i["name"] for i in store.list_inbox(self.settings, (date.today() + timedelta(days=15)).isoformat())["items"]],
+                         ["NEW DRINK"])
+        catalog.record_decision(self.settings, "ignore", "Goca", "labeler", article_id=v["article_id"])  # X acts at once
+        self.assertEqual(store.list_inbox(self.settings)["items"], [])
+
+    def test_merge_proposal_from_inbox(self):
+        v = self.identity("NEW DRINK")
+        into = self.identity("Casa Vina")["article_id"]
+        catalog.record_decision(self.settings, "propose", "Goca", "labeler", article_id=v["article_id"], identity_id=v["identity_id"],
+                                payload={"kind": "merge", "change": {"into": into}}, reason="isto piće")
+        self.assertEqual(store.list_inbox(self.settings)["counts"]["proposed"], 1)
+
     def test_sixth_version_database_is_upgraded_and_needs_one_import(self):
         db = self.tmp / "db6" / "catalog.db"
         db.parent.mkdir()

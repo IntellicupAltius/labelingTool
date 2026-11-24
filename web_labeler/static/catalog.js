@@ -33,6 +33,8 @@
   const viewReleases = document.getElementById("catalogViewReleases");
   const viewFindings = document.getElementById("catalogViewFindings");
   const viewDays = document.getElementById("catalogViewDays");
+  const viewInbox = document.getElementById("catalogViewInbox");
+  const tabInbox = document.getElementById("tabInbox");
   const FINDING_FILTERS = [["open", "Čeka odluku"], ["all", "Sve"]];
   let findingFilter = "open";
   const NOT_RECORDED = "nije zabeleženo";
@@ -669,7 +671,8 @@
           });
           return b;
         };
-        buttons.append(applyBtn("Primeni", false));
+        if (h.payload.kind === "new_class") buttons.append(el("span", "catalogSubhead", "Nova klasa se otvara u etapi 3. Do tada artikal čeka."));
+        else buttons.append(applyBtn("Primeni", false));
         if (h.payload.kind === "classes") buttons.append(applyBtn("Primeni sa zvezdicom", true));
         const no = el("button", "btn small", "Odbij");
         no.onclick = () => askReason(item, "Zašto odbijaš?", async (reason) => {
@@ -1030,6 +1033,102 @@
       section.append(el("summary", "", `${group.label} (${group.items.length})`));
       section.append(group.items.length ? variationsTable(group.items, true) : el("div", "catalogHint", "Nema artikala."));
       nodes.push(section);
+    }
+    body.replaceChildren(...nodes);
+  }
+
+  // ---------------- Inbox "čeka te" ----------------
+
+  function inboxForm(slot, v, kind) {
+    slot.replaceChildren();
+    const box = el("div", "catalogAsk");
+    const msg = el("span", "catalogPasteMsg");
+    const note = el("input", "catalogReason");
+    note.placeholder = "Napomena (nije obavezno)";
+    let read = () => ({});
+    if (kind === "classes") {
+      const modelPick = el("select");
+      const classPick = el("select");
+      const fill = () => classPick.replaceChildren(new Option("Izaberi klasu…", ""), ...(classChoices[modelPick.value] || []).map((n) => new Option(n, n)));
+      modelPick.append(...Object.keys(classChoices).map((m) => new Option(m, m)));
+      modelPick.onchange = fill;
+      fill();
+      box.append(modelPick, classPick);
+      read = () => {
+        if (!classPick.value) throw new Error("Izaberi klasu.");
+        return { links: [{ model: modelPick.value, class: classPick.value }] };
+      };
+    } else if (kind === "merge") {
+      const pick = el("input", "catalogReason");
+      pick.placeholder = "Ime postojećeg artikla";
+      const list = el("datalist");
+      list.id = `catalogMerge${v.identity_id}`;
+      pick.setAttribute("list", list.id);
+      getJson("/api/catalog/articles?state=tracked").then((d) => {
+        const seen = new Set();
+        for (const a of d.items) if (a.article_id !== v.article_id && !seen.has(a.name)) { seen.add(a.name); list.append(new Option(a.name, a.name)); }
+        pick._items = d.items;
+      });
+      box.append(pick, list);
+      read = () => {
+        const hit = (pick._items || []).find((a) => a.name === pick.value.trim());
+        if (!hit) throw new Error("Izaberi artikal sa spiska.");
+        return { into: hit.article_id };
+      };
+    }
+    const save = el("button", "btn primary small", "Pošalji");
+    const cancel = el("button", "btn small", "Odustani");
+    save.onclick = async () => {
+      save.disabled = true;
+      try {
+        const change = read();
+        if (kind === "new_class") change.note = note.value.trim();
+        await decide({ kind: "propose", identity_id: v.identity_id, article_id: v.article_id, payload: { kind, change }, reason: note.value.trim() || "predlog labelera" });
+        showToast("Poslato adminu.");
+        loadClasses();
+      } catch (e) { msg.textContent = e.message; save.disabled = false; }
+    };
+    cancel.onclick = () => slot.replaceChildren();
+    box.append(note, save, cancel, msg);
+    slot.append(box);
+  }
+
+  async function renderInbox(data) {
+    await loadChoices();
+    const title = el("h2", "catalogTitle", "Čeka te ");
+    title.append(el("span", "catalogCount", `${data.counts.waiting} artikala`));
+    const intro = el("div", "catalogSubhead",
+      `Artikli koji se prodaju, a nemaju klasu. Najprodavaniji su prvi. Poslato adminu: ${data.counts.proposed}, čeka novu klasu: ${data.counts.waiting_class}, odloženo: ${data.counts.snoozed}.`);
+    const nodes = [title, intro];
+    if (!data.items.length) nodes.push(el("div", "catalogHint", "Ništa ne čeka. Bravo!"));
+    for (const v of data.items) {
+      const card = el("div", "catalogFinding");
+      card.append(el("div", "catalogFindingTitle", v.name));
+      card.append(el("div", "catalogSubhead", `Šifra ${v.code || "nema"} · prodato ${formatQty(v.sold)} · poslednja prodaja ${formatDate(v.last_sale)}`));
+      const slot = el("div");
+      const buttons = el("div", "catalogMiroButtons");
+      const x = el("button", "btn small", "X Ne pratimo");
+      x.title = "Hrana, cigarete i sve što kamera ne prati";
+      x.onclick = () => askReason(slot, "Napomena (nije obavezno), npr. hrana", async (reason) => {
+        await decide({ kind: "ignore", article_id: v.article_id, reason });
+      });
+      const propose = el("button", "btn small", "Predloži klasu");
+      propose.onclick = () => inboxForm(slot, v, "classes");
+      const same = el("button", "btn small", "Isto kao postojeći artikal");
+      same.onclick = () => inboxForm(slot, v, "merge");
+      const fresh = el("button", "btn small", "Treba nova klasa");
+      fresh.onclick = () => inboxForm(slot, v, "new_class");
+      const later = el("button", "btn small", "Odloži");
+      later.title = "Vraća se pri sledećoj prodaji ili za 14 dana";
+      later.onclick = async () => {
+        try { await postJson(`/api/catalog/inbox/${v.identity_id}/snooze`, { actor: person(), role: roleSelect.value }); showToast("Odloženo."); loadClasses(); }
+        catch (e) { showToast(e.message); }
+      };
+      const open = el("button", "btn small", "Otvori karticu (slika)");
+      open.onclick = () => showArticle(v.article_id);
+      buttons.append(x, propose, same, fresh, later, open);
+      card.append(buttons, slot);
+      nodes.push(card);
     }
     body.replaceChildren(...nodes);
   }
@@ -1447,6 +1546,11 @@
         if (no === requestNo) renderMiro(data);
         return;
       }
+      if (view === "inbox") {
+        const data = await getJson("/api/catalog/inbox");
+        if (no === requestNo) await renderInbox(data);
+        return;
+      }
       if (view === "days") {
         const data = await getJson("/api/catalog/day-table");
         if (no === requestNo) renderDays(data);
@@ -1504,6 +1608,7 @@
     viewReleases.classList.toggle("primary", view === "releases");
     viewFindings.classList.toggle("primary", view === "findings");
     viewDays.classList.toggle("primary", view === "days");
+    viewInbox.classList.toggle("primary", view === "inbox");
     selectedVariation = null;
     openCardFile = null;
     cardRetries = 0;
@@ -1538,7 +1643,7 @@
   }
 
   // A running server without the Catalog routes still serves this page: keep the tab hidden there.
-  fetch("/api/catalog/status").then((r) => { tab.hidden = !r.ok; }).catch(() => {});
+  fetch("/api/catalog/status").then((r) => { tab.hidden = !r.ok; tabInbox.hidden = !r.ok; }).catch(() => {});
 
   roleSelect.value = readRole();
   function applyRole() {
@@ -1575,13 +1680,15 @@
   viewFindings.classList.toggle("hidden", roleSelect.value !== "admin");
   viewFindings.onclick = () => setView("findings");
   viewDays.onclick = () => setView("days");
+  viewInbox.onclick = () => setView("inbox");
   modelSelect.onchange = () => { selectedClass = null; selectedVariation = null; openCardFile = null; loadClasses(); };
   viewClasses.onclick = () => setView("classes");
   viewUnclassified.onclick = () => setView("unclassified");
   tab.onclick = () => { setOpen(true); refresh(); };
+  tabInbox.onclick = () => { setOpen(true); tab.classList.remove("tabActive"); tabInbox.classList.add("tabActive"); setView("inbox"); };
   tabs.addEventListener("click", (e) => {
     const button = e.target.closest(".tabBtn");
-    if (button && button !== tab) setOpen(false);
+    if (button && button !== tab && button !== tabInbox) { setOpen(false); tabInbox.classList.remove("tabActive"); }
   }, true);
   // The labeling shortcuts listen on window: keep them from acting on the hidden workspace.
   for (const type of ["keydown", "keyup"]) {

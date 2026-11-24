@@ -144,6 +144,22 @@ def build_catalog_router(settings: CatalogSettings) -> APIRouter:
         except CatalogError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    @router.get("/inbox")
+    def catalog_inbox() -> Dict[str, Any]:
+        try:
+            return store.list_inbox(settings)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.post("/inbox/{identity_id}/snooze")
+    def catalog_snooze(identity_id: int, req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        try:
+            return store.snooze(settings, identity_id, req.get("actor"), req.get("role"), req.get("reason"))
+        except UnknownArticle:
+            raise HTTPException(status_code=404, detail="Taj artikal ne postoji.")
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     @router.get("/day-table")
     def catalog_day_table() -> Dict[str, Any]:
         try:

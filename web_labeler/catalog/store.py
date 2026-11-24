@@ -20,12 +20,12 @@ from web_labeler.catalog import model_cards as _model_cards
 from web_labeler.catalog import releases as _releases
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
            "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings",
            "miro_pages", "miro_suggested", "miro_reviews", "miro_links", "evidence", "evidence_events", "decisions",
            "map_names", "source_lines", "training_classes", "releases", "locks",
-           "pos_files", "pos_file_rows", "findings", "finding_events", "pos_day_marks"}
+           "pos_files", "pos_file_rows", "findings", "finding_events", "pos_day_marks", "inbox_snoozes"}
 
 _SCHEMA = """
 CREATE TABLE venues (
@@ -398,6 +398,23 @@ CREATE TRIGGER pos_day_marks_no_delete BEFORE DELETE ON pos_day_marks
 BEGIN SELECT RAISE(ABORT, 'day marks are append-only'); END;
 """
 
+_SCHEMA_V11 = """
+CREATE TABLE inbox_snoozes (
+    snooze_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id    TEXT NOT NULL REFERENCES venues(venue_id),
+    identity_id INTEGER NOT NULL REFERENCES pos_identities(identity_id),
+    until_day   TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    reason      TEXT,
+    at          TEXT NOT NULL
+);
+CREATE TRIGGER inbox_snoozes_no_update BEFORE UPDATE ON inbox_snoozes
+BEGIN SELECT RAISE(ABORT, 'snoozes are append-only'); END;
+CREATE TRIGGER inbox_snoozes_no_delete BEFORE DELETE ON inbox_snoozes
+BEGIN SELECT RAISE(ABORT, 'snoozes are append-only'); END;
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -564,11 +581,11 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}{_SCHEMA_V10}"
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}{_SCHEMA_V10}{_SCHEMA_V11}"
                                f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+        elif version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
             steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8, _SCHEMA_V9,
-                     _SCHEMA_V10][version - 1:]
+                     _SCHEMA_V10, _SCHEMA_V11][version - 1:]
             conn.executescript(f"BEGIN;{''.join(steps)}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version != SCHEMA_VERSION:
             raise CatalogError(f"Unsupported Catalog database version: {version}")
@@ -1616,12 +1633,15 @@ def record_decision(settings: CatalogSettings, kind: str, actor: Any, role: Any,
             payload = {}
         elif kind == "propose":
             change_kind = str(payload.get("kind") or "")
-            if change_kind not in ("classes", "provisional", "merge", "ignore"):
-                raise CatalogError("Predlog može biti promena klase, zvezdica, spajanje ili X.")
-            if change_kind in ("classes", "provisional") and identity_id is None:
+            if change_kind not in ("classes", "provisional", "merge", "ignore", "new_class"):
+                raise CatalogError("Predlog može biti promena klase, zvezdica, spajanje, X ili nova klasa.")
+            if change_kind in ("classes", "provisional", "new_class") and identity_id is None:
                 raise CatalogError("Izaberi POS varijaciju (ime i šifru).")
-            payload = {"kind": change_kind, "change": _clean_change(settings, conn, venue, change_kind, payload.get("change") or {},
-                                                                      article_id, identity_id)}
+            if change_kind == "new_class":  # the admin opens the class (stage 3); until then it only waits
+                change = {"note": " ".join(str((payload.get("change") or {}).get("note") or "").split())[:300] or None}
+            else:
+                change = _clean_change(settings, conn, venue, change_kind, payload.get("change") or {}, article_id, identity_id)
+            payload = {"kind": change_kind, "change": change}
         else:
             from_proposal = payload.get("from_proposal")
             payload = _clean_change(settings, conn, venue, kind, payload, article_id, identity_id)
@@ -1670,6 +1690,8 @@ def _fmt_day(value: str) -> str:
 
 
 def _describe(kind: str, payload: Mapping[str, Any], article_names: Mapping[int, str]) -> str:
+    if kind == "new_class":
+        return "treba nova klasa" + (f" ({payload['note']})" if payload.get("note") else "")
     if kind == "classes":
         links = payload.get("links") or []
         if not links:
@@ -2577,3 +2599,76 @@ def mark_day(settings: CatalogSettings, day: str, action: str, actor: Any, role:
     finally:
         conn.close()
     return {"day": day, "action": action}
+
+
+# ---------------- Inbox "čeka te" (ticket 14) ----------------
+
+SNOOZE_DAYS = 14
+
+
+def _snoozed(conn: sqlite3.Connection, venue: str, current: Mapping[int, _decisions.Variation], today: str) -> Dict[int, str]:
+    """Snoozed until 14 days pass or the article is sold again, whichever is first."""
+    out: Dict[int, str] = {}
+    for identity_id, until, at in conn.execute(
+            "SELECT identity_id, until_day, at FROM inbox_snoozes WHERE venue_id = ? ORDER BY snooze_id", (venue,)):
+        v = current.get(identity_id)
+        sold_again = v is not None and v.last_sale and v.last_sale[:10] > at[:10]
+        if until > today and not sold_again:
+            out[identity_id] = until
+        else:
+            out.pop(identity_id, None)
+    return out
+
+
+def list_inbox(settings: CatalogSettings, today: Optional[str] = None) -> Dict[str, Any]:
+    """What waits for the labeler: sold articles without a class, nobody proposed anything yet, not snoozed."""
+    today = today or _today()
+    venue = settings.venue_id
+    with _open_for_read(settings) as conn:
+        current = _current(conn, venue)
+        decisions = _load_decisions(conn, venue)
+        snoozed = _snoozed(conn, venue, current, today)
+        evidence = _evidence_by_identity(conn, venue)
+    waiting_ids, waiting_articles, new_class = set(), set(), set()
+    for d in decisions:
+        if d.kind == "propose" and _proposal_status(d.decision_id, decisions) == "pending":
+            if d.identity_id:
+                waiting_ids.add(d.identity_id)
+            if d.payload.get("kind") == "new_class" and d.identity_id:
+                new_class.add(d.identity_id)
+            elif d.article_id and not d.identity_id:
+                waiting_articles.add(d.article_id)
+    items, counts = [], Counter()
+    for v in _sorted(x for x in current.values() if x.code is not None and x.state == "pending" and x.sold > 0):
+        if v.identity_id in new_class:
+            counts["waiting_class"] += 1
+        elif v.identity_id in waiting_ids or v.article_id in waiting_articles:
+            counts["proposed"] += 1
+        elif v.identity_id in snoozed:
+            counts["snoozed"] += 1
+        else:
+            items.append(_variation(v, evidence))
+    return {"items": items, "counts": {"waiting": len(items), "proposed": counts["proposed"],
+                                       "waiting_class": counts["waiting_class"], "snoozed": counts["snoozed"]}}
+
+
+def snooze(settings: CatalogSettings, identity_id: int, actor: Any, role: Any, reason: Any = "") -> Dict[str, Any]:
+    from datetime import date, timedelta
+    person, role = _clean_person(actor, role)
+    venue = settings.venue_id
+    until = (date.fromisoformat(_today()) + timedelta(days=SNOOZE_DAYS)).isoformat()
+    conn = _open_for_write(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM pos_identities WHERE venue_id = ? AND identity_id = ?", (venue, identity_id)).fetchone() is None:
+            raise UnknownArticle(identity_id)
+        conn.execute("INSERT INTO inbox_snoozes (venue_id, identity_id, until_day, actor, role, reason, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (venue, identity_id, until, person, role, " ".join(str(reason or "").split())[:300] or None, _now()))
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+    return {"identity_id": identity_id, "until": until}
