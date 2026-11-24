@@ -16,10 +16,10 @@ from web_labeler.catalog import examples as _examples
 from web_labeler.catalog import miro as _miro
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
            "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings",
-           "miro_pages", "miro_suggested", "miro_reviews", "miro_links"}
+           "miro_pages", "miro_suggested", "miro_reviews", "miro_links", "evidence", "evidence_events"}
 
 _SCHEMA = """
 CREATE TABLE venues (
@@ -178,6 +178,48 @@ CREATE TABLE miro_links (
 CREATE INDEX miro_links_class ON miro_links (venue_id, model_key, class_name);
 """
 
+_SCHEMA_V5 = """
+CREATE TABLE evidence (
+    evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id    TEXT NOT NULL REFERENCES venues(venue_id),
+    identity_id INTEGER NOT NULL REFERENCES pos_identities(identity_id),
+    article_id  INTEGER NOT NULL REFERENCES articles(article_id),
+    model_key   TEXT,
+    class_name  TEXT,
+    sha256      TEXT NOT NULL,
+    media_type  TEXT NOT NULL,
+    width       INTEGER NOT NULL,
+    height      INTEGER NOT NULL,
+    size_bytes  INTEGER NOT NULL,
+    source      TEXT NOT NULL,
+    added_by    TEXT NOT NULL,
+    added_role  TEXT NOT NULL,
+    added_at    TEXT NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'rejected')),
+    decided_by  TEXT,
+    decided_at  TEXT,
+    reason      TEXT,
+    UNIQUE (venue_id, sha256)
+);
+CREATE INDEX evidence_identity ON evidence (venue_id, identity_id, status);
+CREATE TABLE evidence_events (
+    event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id    TEXT NOT NULL,
+    evidence_id INTEGER NOT NULL REFERENCES evidence(evidence_id),
+    at          TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    action      TEXT NOT NULL CHECK (action IN ('added', 'confirmed', 'rejected')),
+    note        TEXT
+);
+CREATE TRIGGER evidence_no_delete BEFORE DELETE ON evidence
+BEGIN SELECT RAISE(ABORT, 'catalog images are never deleted'); END;
+CREATE TRIGGER evidence_events_append_only BEFORE UPDATE ON evidence_events
+BEGIN SELECT RAISE(ABORT, 'image history is append-only'); END;
+CREATE TRIGGER evidence_events_no_delete BEFORE DELETE ON evidence_events
+BEGIN SELECT RAISE(ABORT, 'image history is append-only'); END;
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -324,9 +366,10 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3):
-            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4][version - 1:]
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}"
+                               f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
+        elif version in (1, 2, 3, 4):
+            steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5][version - 1:]
             conn.executescript(f"BEGIN;{''.join(steps)}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
         elif version != SCHEMA_VERSION:
             raise CatalogError(f"Unsupported Catalog database version: {version}")
@@ -653,10 +696,26 @@ def list_classes(settings: CatalogSettings, model: str) -> List[Dict[str, Any]]:
 STATE_LABELS = {"tracked": "Praćeno", "ignored": "Ignorisano", "pending": "Čeka odluku", "dormant": "Uspavano"}
 
 
-def _variation(row: Sequence[Any], classes: Optional[List[str]] = None) -> Dict[str, Any]:
-    article_id, code, name, state, sold, last_sale, not_verified, provisional, mode = row
+def _evidence_by_identity(conn: sqlite3.Connection, venue: str) -> Dict[int, Dict[str, Any]]:
+    """Confirmed image (newest) and number of images waiting, per POS variation."""
+    result: Dict[int, Dict[str, Any]] = {}
+    for evidence_id, identity_id, status in conn.execute(
+            "SELECT evidence_id, identity_id, status FROM evidence WHERE venue_id = ? AND status != 'rejected' "
+            "ORDER BY evidence_id", (venue,)):
+        item = result.setdefault(identity_id, {"confirmed": None, "pending": 0})
+        if status == "confirmed":
+            item["confirmed"] = evidence_id
+        else:
+            item["pending"] += 1
+    return result
+
+
+def _variation(row: Sequence[Any], classes: Optional[List[str]] = None,
+               evidence: Optional[Mapping[int, Dict[str, Any]]] = None) -> Dict[str, Any]:
+    identity_id, article_id, code, name, state, sold, last_sale, not_verified, provisional, mode = row
+    ev = (evidence or {}).get(identity_id, {"confirmed": None, "pending": 0})
     tags: List[str] = []
-    if not_verified:
+    if not_verified and ev["confirmed"] is None:
         tags.append("nije provereno na snimku")
     if provisional:
         tags.append("privremeno")
@@ -664,10 +723,14 @@ def _variation(row: Sequence[Any], classes: Optional[List[str]] = None) -> Dict[
         tags.append("nije prodavano")
     elif sold <= 0:
         tags.append("sve stornirano")
-    return {"article_id": article_id, "code": code, "name": name.strip(), "state": state,
+    if ev["pending"]:
+        tags.append("slika čeka potvrdu")
+    image = None if ev["confirmed"] is None else {"evidence_id": ev["confirmed"], "url": _evidence_url(ev["confirmed"]),
+                                                  "source_label": EVIDENCE_SOURCE_LABEL}
+    return {"identity_id": identity_id, "article_id": article_id, "code": code, "name": name.strip(), "state": state,
             "state_label": STATE_LABELS[state], "sold": sold, "last_sale": last_sale, "tags": tags,
             "provisional_reason": provisional, "mapping_mode": mode, "classes": classes or [],
-            "image": None}
+            "image": image, "pending_images": ev["pending"]}
 
 
 TRAINING_LABELS = {"trained": "U modelu", "excluded": "Izbačena iz treninga", "not_in_model": "Nije u živom modelu",
@@ -733,10 +796,11 @@ def list_variations(settings: CatalogSettings, model: str, class_name: str) -> L
             f"WHERE l.model_key = ? AND l.class_name IN ({marks}) ORDER BY i.sold_qty DESC, i.name, i.code",
             (venue, model.lower(), *scope)).fetchall()
         result = []
+        evidence = _evidence_by_identity(conn, venue)
         for row in rows:
             links = conn.execute("SELECT model_key, class_name FROM class_links WHERE entry_id = ? ORDER BY position",
                                  (row[10],)).fetchall()
-            item = _variation(row[1:10], [f"{m}.{c}" for m, c in links])
+            item = _variation(row[0:10], [f"{m}.{c}" for m, c in links], evidence)
             own = {c for m, c in links if m == model.lower()}
             item["via_class"] = None if class_name in own else next((n for n in scope if n in own), None)
             result.append(item)
@@ -785,12 +849,13 @@ def list_unclassified(settings: CatalogSettings) -> Dict[str, Any]:
     """POS pairs without a class, grouped by state, best sellers first."""
     with _open_for_read(settings) as conn:
         rows = conn.execute(
-            "SELECT i.article_id, i.code, i.name, i.state, i.sold_qty, i.last_sale, i.not_verified, NULL, NULL "
+            "SELECT i.identity_id, i.article_id, i.code, i.name, i.state, i.sold_qty, i.last_sale, i.not_verified, NULL, NULL "
             "FROM pos_identities i WHERE i.venue_id = ? AND i.code IS NOT NULL AND i.state != 'tracked' "
             "ORDER BY i.sold_qty DESC, i.name, i.code", (settings.venue_id,)).fetchall()
+        evidence = _evidence_by_identity(conn, settings.venue_id)
     groups = {state: [] for state in ("pending", "dormant", "ignored")}
     for row in rows:
-        groups[row[3]].append(_variation(row))
+        groups[row[4]].append(_variation(row, evidence=evidence))
     return {"groups": [{"state": s, "label": STATE_LABELS[s], "items": items} for s, items in groups.items()]}
 
 
@@ -947,3 +1012,223 @@ def example_image(settings: CatalogSettings, model: str, class_name: str, file_n
     names = _class_names(settings, model)
     return _examples.crop_example(settings.dataset_dir, model, class_name,
                                   _examples.class_id_of(names, class_name), file_name, box)
+
+
+# ---------------- Pasted images as evidence for a POS variation ----------------
+
+EVIDENCE_SOURCE_LABEL = "Dokaz iz Kataloga"
+EVIDENCE_MAX_BYTES = 10 * 1024 * 1024
+EVIDENCE_MIN_SIDE = 40
+EVIDENCE_MAX_SIDE = 8000
+_EVIDENCE_FORMATS = {"PNG": ("image/png", "png"), "JPEG": ("image/jpeg", "jpg"), "WEBP": ("image/webp", "webp")}
+EVIDENCE_STATUS_LABELS = {"pending": "Čeka potvrdu", "confirmed": "Potvrđeno", "rejected": "Odbijeno"}
+
+
+class UnknownEvidence(Exception):
+    pass
+
+
+def _evidence_url(evidence_id: int) -> str:
+    return f"/api/catalog/evidence/{evidence_id}/image"
+
+
+def _evidence_path(settings: CatalogSettings, sha256: str, media_type: str) -> Path:
+    ext = next(e for t, e in _EVIDENCE_FORMATS.values() if t == media_type)
+    return settings.media_dir / "evidence" / f"{sha256}.{ext}"
+
+
+def _check_image(data: bytes) -> Tuple[str, int, int]:
+    """Refuse anything that is not a reasonable screenshot. Returns media type and size."""
+    from io import BytesIO
+    from PIL import Image
+    if not data:
+        raise CatalogError("Slika je prazna.")
+    if len(data) > EVIDENCE_MAX_BYTES:
+        raise CatalogError("Slika je prevelika (najviše 10 MB). Iseci manji deo ekrana.")
+    try:
+        with Image.open(BytesIO(data)) as im:
+            fmt = im.format
+            im.verify()
+        with Image.open(BytesIO(data)) as im:
+            width, height = im.size
+    except Exception:
+        raise CatalogError("Ovo nije slika koju alat može da pročita.")
+    if fmt not in _EVIDENCE_FORMATS:
+        raise CatalogError("Prihvataju se samo PNG, JPEG i WEBP slike.")
+    if min(width, height) < EVIDENCE_MIN_SIDE:
+        raise CatalogError("Slika je premala. Napravi veći isečak.")
+    if max(width, height) > EVIDENCE_MAX_SIDE:
+        raise CatalogError("Slika je prevelika po dimenzijama. Iseci manji deo ekrana.")
+    return _EVIDENCE_FORMATS[fmt][0], width, height
+
+
+def _clean_person(name: Any, role: Any) -> Tuple[str, str]:
+    person = " ".join(str(name or "").split())[:60]
+    if not person:
+        raise CatalogError("Upiši svoje ime pre čuvanja.")
+    return person, ("admin" if role == "admin" else "labeler")
+
+
+def add_evidence(settings: CatalogSettings, identity_id: int, data: bytes, added_by: str, role: str,
+                 model: Optional[str] = None, class_name: Optional[str] = None) -> Dict[str, Any]:
+    """Save a pasted screenshot for one POS variation. It waits for the admin and never goes to RAW."""
+    import hashlib
+    person, role = _clean_person(added_by, role)
+    media_type, width, height = _check_image(data)
+    if settings.media_dir is None:
+        raise CatalogError("Katalog nema folder za slike.")
+    for root in settings.forbidden_roots:
+        if _is_within(settings.media_dir.resolve(), root):
+            raise CatalogError(f"Catalog images must not be stored inside {root}")
+    sha = hashlib.sha256(data).hexdigest()
+    conn = _open_for_write(settings)
+    venue = settings.venue_id
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT article_id, name FROM pos_identities WHERE venue_id = ? AND identity_id = ?",
+                           (venue, identity_id)).fetchone()
+        if row is None:
+            raise UnknownEvidence(identity_id)
+        same = conn.execute("SELECT e.status, i.name FROM evidence e JOIN pos_identities i ON i.identity_id = e.identity_id "
+                            "WHERE e.venue_id = ? AND e.sha256 = ?", (venue, sha)).fetchone()
+        if same:
+            raise CatalogError(f"Ova slika je već sačuvana za artikal {same[1].strip()} "
+                               f"({EVIDENCE_STATUS_LABELS[same[0]].lower()}).")
+        target = _evidence_path(settings, sha, media_type)
+        if not target.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_suffix(".part")
+            tmp.write_bytes(data)
+            os.replace(tmp, target)
+        at = _now()
+        evidence_id = conn.execute(
+            "INSERT INTO evidence (venue_id, identity_id, article_id, model_key, class_name, sha256, media_type, width, height, "
+            "size_bytes, source, added_by, added_role, added_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'paste', ?, ?, ?, 'pending')",
+            (venue, identity_id, row[0], model, class_name, sha, media_type, width, height, len(data), person, role, at)).lastrowid
+        conn.execute("INSERT INTO evidence_events (venue_id, evidence_id, at, actor, role, action) VALUES (?, ?, ?, ?, ?, 'added')",
+                     (venue, evidence_id, at, person, role))
+        conn.execute("COMMIT")
+    except sqlite3.Error as e:
+        conn.rollback()
+        raise CatalogError(f"Nije sačuvano: {e}")
+    except (CatalogError, UnknownEvidence):
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return get_evidence(settings, evidence_id)
+
+
+def decide_evidence(settings: CatalogSettings, evidence_id: int, decision: str, decided_by: str,
+                    reason: str = "") -> Dict[str, Any]:
+    """Admin confirms or rejects a waiting image. A rejected image stays in the history."""
+    if decision not in ("confirmed", "rejected"):
+        raise CatalogError("Odluka mora biti potvrda ili odbijanje.")
+    person, _ = _clean_person(decided_by, "admin")
+    note = " ".join(str(reason or "").split())[:300] or None
+    conn = _open_for_write(settings)
+    venue = settings.venue_id
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT status FROM evidence WHERE venue_id = ? AND evidence_id = ?", (venue, evidence_id)).fetchone()
+        if row is None:
+            raise UnknownEvidence(evidence_id)
+        if row[0] != "pending":
+            raise CatalogError(f"O ovoj slici je već odlučeno ({EVIDENCE_STATUS_LABELS[row[0]].lower()}).")
+        at = _now()
+        conn.execute("UPDATE evidence SET status = ?, decided_by = ?, decided_at = ?, reason = ? WHERE evidence_id = ?",
+                     (decision, person, at, note, evidence_id))
+        conn.execute("INSERT INTO evidence_events (venue_id, evidence_id, at, actor, role, action, note) "
+                     "VALUES (?, ?, ?, ?, 'admin', ?, ?)", (venue, evidence_id, at, person, decision, note))
+        conn.execute("COMMIT")
+    except sqlite3.Error as e:
+        conn.rollback()
+        raise CatalogError(f"Nije sačuvano: {e}")
+    except (CatalogError, UnknownEvidence):
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return get_evidence(settings, evidence_id)
+
+
+_EVIDENCE_SELECT = (
+    "SELECT e.evidence_id, e.identity_id, e.article_id, i.code, i.name, e.model_key, e.class_name, e.width, e.height, "
+    "e.added_by, e.added_role, e.added_at, e.status, e.decided_by, e.decided_at, e.reason "
+    "FROM evidence e JOIN pos_identities i ON i.identity_id = e.identity_id WHERE e.venue_id = ? ")
+
+
+def _evidence_item(conn: sqlite3.Connection, row: Sequence[Any]) -> Dict[str, Any]:
+    (evidence_id, identity_id, article_id, code, name, model, class_name, width, height,
+     added_by, added_role, added_at, status, decided_by, decided_at, reason) = row
+    history = [{"at": at, "actor": actor, "role": role, "action": action, "note": note}
+               for at, actor, role, action, note in conn.execute(
+                   "SELECT at, actor, role, action, note FROM evidence_events WHERE evidence_id = ? ORDER BY event_id",
+                   (evidence_id,))]
+    return {"evidence_id": evidence_id, "identity_id": identity_id, "article_id": article_id, "code": code,
+            "name": name.strip(), "model": model, "class": class_name, "width": width, "height": height,
+            "added_by": added_by, "added_role": added_role, "added_at": added_at, "status": status,
+            "status_label": EVIDENCE_STATUS_LABELS[status], "decided_by": decided_by, "decided_at": decided_at,
+            "reason": reason, "url": _evidence_url(evidence_id), "source_label": EVIDENCE_SOURCE_LABEL, "history": history}
+
+
+def get_evidence(settings: CatalogSettings, evidence_id: int) -> Dict[str, Any]:
+    with _open_for_read(settings) as conn:
+        row = conn.execute(_EVIDENCE_SELECT + "AND e.evidence_id = ?", (settings.venue_id, evidence_id)).fetchone()
+        if row is None:
+            raise UnknownEvidence(evidence_id)
+        return _evidence_item(conn, row)
+
+
+def list_evidence(settings: CatalogSettings, status: Optional[str] = "pending",
+                  identity_id: Optional[int] = None) -> Dict[str, Any]:
+    where, args = "", []
+    if status:
+        where += "AND e.status = ? "
+        args.append(status)
+    if identity_id is not None:
+        where += "AND e.identity_id = ? "
+        args.append(identity_id)
+    with _open_for_read(settings) as conn:
+        rows = conn.execute(_EVIDENCE_SELECT + where + "ORDER BY e.evidence_id DESC", (settings.venue_id, *args)).fetchall()
+        items = [_evidence_item(conn, r) for r in rows]
+        counts = dict(conn.execute("SELECT status, COUNT(*) FROM evidence WHERE venue_id = ? GROUP BY status",
+                                   (settings.venue_id,)).fetchall())
+    return {"items": items, "counts": {k: counts.get(k, 0) for k in EVIDENCE_STATUS_LABELS}}
+
+
+def evidence_image(settings: CatalogSettings, evidence_id: int) -> Tuple[Path, str]:
+    with _open_for_read(settings) as conn:
+        row = conn.execute("SELECT sha256, media_type FROM evidence WHERE venue_id = ? AND evidence_id = ?",
+                           (settings.venue_id, evidence_id)).fetchone()
+    if row is None or settings.media_dir is None:
+        raise UnknownEvidence(evidence_id)
+    path = _evidence_path(settings, row[0], row[1])
+    if not path.is_file():
+        raise UnknownEvidence(evidence_id)
+    return path, row[1]
+
+
+def list_without_image(settings: CatalogSettings, model: Optional[str] = None) -> Dict[str, Any]:
+    """Tracked, sold POS variations with a class but no confirmed image, best sellers first."""
+    venue = settings.venue_id
+    where, args = "", []
+    if model:
+        where = "AND l.model_key = ? "
+        args.append(model.lower())
+    with _open_for_read(settings) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT i.identity_id, i.article_id, i.code, i.name, i.state, i.sold_qty, i.last_sale, i.not_verified, "
+            f"e.provisional, e.mapping_mode, e.entry_id {_LINKED_IDENTITIES}"
+            f"WHERE i.state = 'tracked' AND i.code IS NOT NULL {where}ORDER BY i.sold_qty DESC, i.name, i.code",
+            (venue, *args)).fetchall()
+        evidence = _evidence_by_identity(conn, venue)
+        result, seen = [], set()
+        for row in rows:
+            if row[0] in seen or (evidence.get(row[0]) or {}).get("confirmed") is not None:
+                continue
+            seen.add(row[0])
+            links = conn.execute("SELECT model_key, class_name FROM class_links WHERE entry_id = ? ORDER BY position",
+                                 (row[10],)).fetchall()
+            result.append(_variation(row[0:10], [f"{m}.{c}" for m, c in links], evidence))
+    return {"model": model, "items": result}

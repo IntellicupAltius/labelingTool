@@ -1,6 +1,9 @@
 """HTTP API of the Catalog. The import runs from the command line; the only writes here are admin decisions."""
 from __future__ import annotations
 
+import base64
+import binascii
+
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query
@@ -8,7 +11,8 @@ from fastapi.responses import FileResponse, Response
 
 from web_labeler.catalog import store
 from web_labeler.catalog.examples import ExampleNotFound
-from web_labeler.catalog.store import CatalogError, CatalogSettings, CatalogUnavailable, UnknownModel, UnknownPage
+from web_labeler.catalog.store import (CatalogError, CatalogSettings, CatalogUnavailable, UnknownEvidence, UnknownModel,
+                                       UnknownPage)
 
 
 def build_catalog_router(settings: CatalogSettings) -> APIRouter:
@@ -114,6 +118,65 @@ def build_catalog_router(settings: CatalogSettings) -> APIRouter:
             return store.save_miro_page(settings, page_key, classes)
         except UnknownPage:
             raise HTTPException(status_code=404, detail="Ta strana ne postoji.")
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/without-image")
+    def catalog_without_image(model: Optional[str] = Query(None)) -> Dict[str, Any]:
+        try:
+            return store.list_without_image(settings, model or None)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/evidence")
+    def catalog_evidence(status: Optional[str] = Query("pending")) -> Dict[str, Any]:
+        if status not in (None, "", "all", "pending", "confirmed", "rejected"):
+            raise HTTPException(status_code=400, detail="Nepoznat status.")
+        try:
+            return store.list_evidence(settings, None if status in (None, "", "all") else status)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/evidence/{evidence_id}/image")
+    def catalog_evidence_image(evidence_id: int) -> FileResponse:
+        try:
+            path, media_type = store.evidence_image(settings, evidence_id)
+        except UnknownEvidence:
+            raise HTTPException(status_code=404, detail="Slika nije pronađena.")
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        return FileResponse(path, media_type=media_type, headers={"Cache-Control": "private, max-age=86400"})
+
+    @router.post("/evidence")
+    def catalog_add_evidence(req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        identity_id, image = req.get("identity_id"), req.get("image_base64")
+        if not isinstance(identity_id, int) or not isinstance(image, str):
+            raise HTTPException(status_code=400, detail="Izaberi artikal i nalepi sliku.")
+        if len(image) > store.EVIDENCE_MAX_BYTES * 4 // 3 + 16:
+            raise HTTPException(status_code=400, detail="Slika je prevelika (najviše 10 MB). Iseci manji deo ekrana.")
+        try:
+            data = base64.b64decode(image.split(",", 1)[-1], validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=400, detail="Ovo nije slika koju alat može da pročita.")
+        try:
+            return store.add_evidence(settings, identity_id, data, req.get("added_by"), req.get("role"),
+                                      req.get("model") or None, req.get("class") or None)
+        except UnknownEvidence:
+            raise HTTPException(status_code=404, detail="Taj artikal ne postoji u Katalogu.")
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.post("/evidence/{evidence_id}/decision")
+    def catalog_decide_evidence(evidence_id: int, req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        try:
+            return store.decide_evidence(settings, evidence_id, str(req.get("decision") or ""),
+                                         req.get("decided_by"), str(req.get("reason") or ""))
+        except UnknownEvidence:
+            raise HTTPException(status_code=404, detail="Slika nije pronađena.")
         except CatalogError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except CatalogUnavailable as e:

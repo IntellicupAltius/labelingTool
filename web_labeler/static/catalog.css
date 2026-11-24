@@ -77,3 +77,20 @@
 .catalogChip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; border: 1px solid var(--accent); border-radius: 12px; font-size: 12px; }
 .catalogChip button { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; }
 .catalogMiroButtons { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.catalogTable.selectable tbody tr { cursor: pointer; }
+.catalogTable.selectable tbody tr:hover { background: var(--panel); }
+.catalogTable.selectable tbody tr.selected { background: var(--panel); outline: 1px solid var(--accent); }
+.catalogThumb { display: block; width: 64px; height: 48px; object-fit: cover; border: 1px solid var(--border2); border-radius: 4px; cursor: zoom-in; }
+.catalogPasteHint { margin: 4px 0 8px; padding: 6px 10px; color: var(--muted); font-size: 12px; background: var(--surface); border: 1px dashed var(--border2); border-radius: 6px; }
+.catalogPasteHint.active { color: var(--text); border-color: var(--accent); }
+.catalogPasteBox { display: flex; flex-direction: column; gap: 8px; width: min(720px, 92%); max-height: 92%; overflow: auto; padding: 16px; background: var(--panel); border: 1px solid var(--border2); border-radius: 8px; cursor: default; }
+.catalogPasteBox h3 { margin: 0; font-size: 15px; }
+.catalogPasteBox img { max-width: 100%; max-height: 55vh; object-fit: contain; align-self: center; border: 1px solid var(--border2); border-radius: 6px; }
+.catalogPasteWhat { font-weight: 600; }
+.catalogPasteMsg { color: #fbbf24; min-height: 1em; }
+.catalogToast { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 6; padding: 10px 16px; background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
+.catalogToast.hidden { display: none; }
+.catalogMiroCard.rejected { border-left-color: var(--danger); opacity: .8; }
+.catalogHistory { margin: 0; padding-left: 16px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.catalogReason { width: 100%; }
+#catalogPersonInput { width: 130px; }

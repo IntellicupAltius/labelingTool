@@ -165,7 +165,10 @@ def pos_row(code, name, when, qty=1, price=100, paid=True, table="1"):
     return row
 
 
-class AssortmentImportTests(unittest.TestCase):
+class AssortmentFixture(unittest.TestCase):
+    """Shared POS, map and class lists; holds no tests itself."""
+
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
@@ -231,6 +234,8 @@ class AssortmentImportTests(unittest.TestCase):
         groups = catalog.list_unclassified(self.settings)["groups"]
         return next(g["items"] for g in groups if g["state"] == state)
 
+
+class AssortmentImportTests(AssortmentFixture):
     def test_leading_zero_stays(self):
         catalog.import_catalog(self.settings)
         self.assertEqual(self.variation("Glasses", "CASA", "drink")["code"], "0706")
@@ -506,7 +511,7 @@ class ClassRulesTests(unittest.TestCase):
         self.assertEqual(catalog.class_detail(self.settings, "Glasses", "NISKA_ZUTO")["trained_name"], "NISKA_BELO_ZUTO")
 
 
-class MiroAndExamplesTests(AssortmentImportTests):
+class MiroAndExamplesTests(AssortmentFixture):
     """Ticket 04: old Miro pages as whole images, admin confirmation, read-only dataset examples."""
 
     def setUp(self):
@@ -659,6 +664,139 @@ class MiroAndExamplesTests(AssortmentImportTests):
         conn.close()
         catalog.import_catalog(self.settings)
         self.assertEqual(catalog.list_miro_pages(self.settings)["counts"]["total"], 4)
+
+
+class EvidenceTests(AssortmentFixture):
+    """Ticket 05: a pasted screenshot waits for the admin, then proves one POS variation."""
+
+    def setUp(self):
+        super().setUp()
+        catalog.import_catalog(self.settings)
+        self.drink = self.variation("Glasses", "CASA", "drink")
+
+    def png(self, color="red", size=(120, 80)):
+        from io import BytesIO
+        from PIL import Image
+        out = BytesIO()
+        Image.new("RGB", size, color).save(out, format="PNG")
+        return out.getvalue()
+
+    def add(self, data=None, identity=None, name="Goca"):
+        return catalog.add_evidence(self.settings, identity or self.drink["identity_id"], data or self.png(), name,
+                                    "labeler", "Glasses", "CASA")
+
+    def test_added_image_waits_and_keeps_not_verified(self):
+        item = self.add()
+        self.assertEqual((item["status"], item["added_by"], item["name"], item["class"]), ("pending", "Goca", "drink", "CASA"))
+        self.assertEqual([h["action"] for h in item["history"]], ["added"])
+        drink = self.variation("Glasses", "CASA", "drink")
+        self.assertIsNone(drink["image"])
+        self.assertEqual(drink["pending_images"], 1)
+        self.assertIn("nije provereno na snimku", drink["tags"])
+        path, media_type = catalog.evidence_image(self.settings, item["evidence_id"])
+        self.assertEqual(media_type, "image/png")
+        self.assertTrue(store._is_within(path, self.tmp / "db" / "media"))
+        self.assertFalse((self.tmp / "raw").exists())
+
+    def test_confirmed_image_proves_the_variation_and_survives_reimport(self):
+        item = self.add()
+        done = catalog.decide_evidence(self.settings, item["evidence_id"], "confirmed", "Aleksa")
+        self.assertEqual([h["action"] for h in done["history"]], ["added", "confirmed"])
+        catalog.import_catalog(self.settings)
+        drink = self.variation("Glasses", "CASA", "drink")
+        self.assertEqual(drink["image"]["evidence_id"], item["evidence_id"])
+        self.assertEqual(drink["image"]["source_label"], "Dokaz iz Kataloga")
+        self.assertNotIn("nije provereno na snimku", drink["tags"])
+        self.assertNotIn(drink["identity_id"], [v["identity_id"] for v in catalog.list_without_image(self.settings)["items"]])
+        with self.assertRaises(catalog.CatalogError):
+            catalog.decide_evidence(self.settings, item["evidence_id"], "rejected", "Aleksa")
+
+    def test_rejected_image_stays_in_history_and_proves_nothing(self):
+        item = self.add()
+        catalog.decide_evidence(self.settings, item["evidence_id"], "rejected", "Aleksa", "  pogrešan   artikal ")
+        rejected = catalog.list_evidence(self.settings, "rejected")["items"]
+        self.assertEqual([(r["evidence_id"], r["reason"]) for r in rejected], [(item["evidence_id"], "pogrešan artikal")])
+        self.assertEqual(catalog.list_evidence(self.settings)["items"], [])
+        drink = self.variation("Glasses", "CASA", "drink")
+        self.assertIsNone(drink["image"])
+        self.assertEqual(drink["pending_images"], 0)
+        self.assertIn("nije provereno na snimku", drink["tags"])
+        with sqlite3.connect(str(self.tmp / "db" / "catalog.db")) as conn:
+            with self.assertRaises(sqlite3.DatabaseError):
+                conn.execute("DELETE FROM evidence")
+            with self.assertRaises(sqlite3.DatabaseError):
+                conn.execute("DELETE FROM evidence_events")
+
+    def test_same_image_is_not_saved_twice(self):
+        data = self.png()
+        first = self.add(data)
+        other = self.variation("Glasses", "CASA", "MAIN")["identity_id"]
+        for identity in (self.drink["identity_id"], other):
+            with self.assertRaises(catalog.CatalogError):
+                self.add(data, identity)
+        catalog.decide_evidence(self.settings, first["evidence_id"], "rejected", "Aleksa")
+        with self.assertRaises(catalog.CatalogError):
+            self.add(data)
+        self.assertEqual(len(catalog.list_evidence(self.settings, None)["items"]), 1)
+        self.assertEqual(len(list((self.tmp / "db" / "media" / "evidence").iterdir())), 1)
+
+    def test_only_reasonable_images_from_a_named_person(self):
+        from io import BytesIO
+        from PIL import Image
+        gif = BytesIO()
+        Image.new("RGB", (100, 100)).save(gif, format="GIF")
+        for data in (b"not an image", self.png(size=(20, 20)), gif.getvalue(), b"\x89PNG" + b"0" * (store.EVIDENCE_MAX_BYTES + 1)):
+            with self.assertRaises(catalog.CatalogError):
+                self.add(data)
+        with self.assertRaises(catalog.CatalogError):
+            self.add(name="   ")
+        with self.assertRaises(catalog.UnknownEvidence):
+            self.add(identity=999999)
+        self.assertEqual(catalog.list_evidence(self.settings, None)["items"], [])
+
+    def test_without_image_lists_tracked_sold_variations_best_first(self):
+        items = catalog.list_without_image(self.settings, "Glasses")["items"]
+        self.assertTrue(items)
+        self.assertTrue(all(v["state"] == "tracked" and v["code"] for v in items))
+        self.assertEqual([v["sold"] for v in items], sorted((v["sold"] for v in items), reverse=True))
+        self.assertNotIn("NEVER SOLD", [v["name"] for v in items])
+        self.assertNotIn("OLD NAME", [v["name"] for v in items])
+        pending = self.add()
+        self.assertIn(self.drink["identity_id"], [v["identity_id"] for v in catalog.list_without_image(self.settings, "Glasses")["items"]])
+        catalog.decide_evidence(self.settings, pending["evidence_id"], "confirmed", "Aleksa")
+        self.assertNotIn(self.drink["identity_id"], [v["identity_id"] for v in catalog.list_without_image(self.settings, "Glasses")["items"]])
+
+    def test_paste_through_api(self):
+        import base64
+        from fastapi import FastAPI
+        from web_labeler.catalog.router import build_catalog_router
+        app = FastAPI()
+        app.include_router(build_catalog_router(self.settings))
+        routes = {(r.path, m): r.endpoint for r in app.routes for m in getattr(r, "methods", ())}
+        post = routes[("/api/catalog/evidence", "POST")]
+        url = "data:image/png;base64," + base64.b64encode(self.png()).decode()
+        item = post({"identity_id": self.drink["identity_id"], "image_base64": url, "added_by": "Goca", "role": "labeler"})
+        self.assertEqual(item["status"], "pending")
+        for bad in ({"identity_id": self.drink["identity_id"], "image_base64": "%%%", "added_by": "Goca"},
+                    {"identity_id": self.drink["identity_id"], "image_base64": url, "added_by": "Goca"},
+                    {"image_base64": url, "added_by": "Goca"}):
+            with self.assertRaises(HTTPException) as e:
+                post(bad)
+            self.assertEqual(e.exception.status_code, 400)
+        decide = routes[("/api/catalog/evidence/{evidence_id}/decision", "POST")]
+        with self.assertRaises(HTTPException):
+            decide(item["evidence_id"], {"decision": "maybe", "decided_by": "Aleksa"})
+        self.assertEqual(decide(item["evidence_id"], {"decision": "confirmed", "decided_by": "Aleksa"})["status"], "confirmed")
+
+    def test_fourth_version_database_is_upgraded(self):
+        db = self.tmp / "db2" / "catalog.db"
+        db.parent.mkdir()
+        conn = sqlite3.connect(str(db))
+        conn.executescript(store._SCHEMA + store._SCHEMA_V2 + store._SCHEMA_V3 + store._SCHEMA_V4 + "PRAGMA user_version = 4;")
+        conn.close()
+        settings = self.make_settings(catalog_db_path=str(db))
+        catalog.import_catalog(settings)
+        self.assertEqual(catalog.list_evidence(settings)["counts"], {"pending": 0, "confirmed": 0, "rejected": 0})
 
 
 if __name__ == "__main__":

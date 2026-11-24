@@ -415,15 +415,32 @@
       <div class="catalogViews">
         <button id="catalogViewClasses" class="btn primary">Klase</button>
         <button id="catalogViewUnclassified" class="btn">Bez klase</button>
+        <button id="catalogViewNoImage" class="btn">Bez slike</button>
+        <button id="catalogViewEvidence" class="btn hidden">Nove slike</button>
         <button id="catalogViewMiro" class="btn hidden">Miro strane</button>
         <button id="catalogViewReport" class="btn hidden">Razlike izvora</button>
       </div>
-      <label class="field catalogRole"><div class="label">Radim kao</div>
+      <label class="field catalogRole"><div class="label">Ime</div>
+        <input id="catalogPersonInput" type="text" maxlength="60" placeholder="npr. Goca" autocomplete="off"/>
+      </label>
+      <label class="field"><div class="label">Radim kao</div>
         <select id="catalogRoleSelect"><option value="labeler">Labeler</option><option value="admin">Admin</option></select>
       </label>
     </div>
     <div id="catalogBody" class="catalogBody"></div>
     <div id="catalogViewer" class="catalogViewer hidden"><figure><img alt=""/><figcaption></figcaption></figure></div>
+    <div id="catalogPaste" class="catalogViewer hidden">
+      <div class="catalogPasteBox">
+        <h3>Nova slika za artikal</h3>
+        <div id="catalogPasteWhat" class="catalogPasteWhat"></div>
+        <img id="catalogPasteImg" alt="Nalepljena slika"/>
+        <label class="field"><div class="label">Ime</div><input id="catalogPasteName" type="text" maxlength="60" placeholder="npr. Goca" autocomplete="off"/></label>
+        <div class="catalogSubhead">Slika se čuva samo u Katalogu i čeka potvrdu admina. Ne ide u dataset.</div>
+        <div id="catalogPasteMsg" class="catalogPasteMsg"></div>
+        <div class="catalogMiroButtons"><button id="catalogPasteSave" class="btn primary">Sačuvaj</button><button id="catalogPasteCancel" class="btn">Odustani</button></div>
+      </div>
+    </div>
+    <div id="catalogToast" class="catalogToast hidden"></div>
   </section>
 
   <script src="/static/app.js"></script>
