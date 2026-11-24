@@ -1566,7 +1566,7 @@ def _miro_text(kind: str, subject: str, code: Optional[str], payload: Mapping[st
             "ignore": (f"od {_fmt_day(valid_from)} je izbačen iz asortimana i ne prati se" if payload.get("why") == "assortment"
                        else f"od {_fmt_day(valid_from)} se ne prati"),
             "merge": f"od {_fmt_day(valid_from)} je isti artikal kao {article_names.get(payload.get('into'), payload.get('into'))}"}[kind]
-    return f"{who} {body}." + (f" Razlog: {reason}." if reason else "")
+    return f"{who} {body}." + (f" Razlog: {reason.rstrip('.')}." if reason else "")
 
 
 def _decision_items(conn: sqlite3.Connection, venue: str, where: str = "", args: Sequence[Any] = ()) -> List[Dict[str, Any]]:
