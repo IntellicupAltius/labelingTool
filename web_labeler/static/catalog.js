@@ -1196,7 +1196,9 @@
     if (!data.items.length) nodes.push(el("div", "catalogHint", "Ništa ne čeka. Bravo!"));
     for (const v of data.items) {
       const card = el("div", "catalogFinding");
-      card.append(el("div", "catalogFindingTitle", v.name));
+      const itemHead = el("div", "catalogFindingTitle", `${v.name} `);
+      if (v.clip) itemHead.append(el("span", ["missing", "late"].includes(v.clip.status) ? "catalogTag warn" : "catalogTag", v.clip.label));
+      card.append(itemHead);
       card.append(el("div", "catalogSubhead", `Šifra ${v.code || "nema"} · prodato ${formatQty(v.sold)} · poslednja prodaja ${formatDate(v.last_sale)}`));
       const slot = el("div");
       const buttons = el("div", "catalogMiroButtons");

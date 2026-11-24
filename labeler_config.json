@@ -51,5 +51,16 @@
   "catalog_promotions_path": "~/intellicup_storage/model_history/promotions.jsonl",
   "catalog_training_root": "~/Projects/IntelliCup/training_pipeline/config",
   "catalog_training_archives_dir": "/opt/intellicup/datasets/temp_archives",
-  "catalog_pipeline_map_path": "~/Projects/intellicup_deep_sort/mapping/pos_to_internal_mapping.yaml"
+  "catalog_pipeline_map_path": "~/Projects/intellicup_deep_sort/mapping/pos_to_internal_mapping.yaml",
+  "catalog_clip_root": "/media/intellicup/Transcend/intellicup_catalog_clips/blaznavac",
+  "catalog_clip_mount": "/media/intellicup/Transcend",
+  "catalog_clip_cap_gb": 30,
+  "catalog_clip_nvr_days": 30,
+  "catalog_clip_downloader": [
+    "/opt/interpreters/INTELLICUP_MODELS/bin/python",
+    "/home/intellicup/Projects/IntelliCup/utils/video_utils/test_download.py"
+  ],
+  "catalog_clip_secrets_env": "/opt/intellicup/.secrets/nvr.env",
+  "catalog_clip_lock": "/tmp/blaznavac_nvr_sync.lock",
+  "catalog_clip_enabled": false
 }

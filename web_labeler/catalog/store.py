@@ -19,14 +19,15 @@ from web_labeler.catalog import examples as _examples
 from web_labeler.catalog import miro as _miro
 from web_labeler.catalog import model_cards as _model_cards
 from web_labeler.catalog import releases as _releases
+from web_labeler.catalog import clips as _clips
 from web_labeler.yolo import load_yolo_names_from_yaml
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 _TABLES = {"venues", "models", "classes", "import_runs", "articles", "pos_identities", "map_entries",
            "map_keys", "class_links", "class_training", "class_rule_texts", "source_findings",
            "miro_pages", "miro_suggested", "miro_reviews", "miro_links", "evidence", "evidence_events", "decisions",
            "map_names", "source_lines", "training_classes", "releases", "locks",
-           "pos_files", "pos_file_rows", "findings", "finding_events", "pos_day_marks", "inbox_snoozes"}
+           "pos_files", "pos_file_rows", "findings", "finding_events", "pos_day_marks", "inbox_snoozes", "clip_events"}
 
 _SCHEMA = """
 CREATE TABLE venues (
@@ -449,6 +450,30 @@ CREATE TRIGGER decisions_no_delete BEFORE DELETE ON decisions
 BEGIN SELECT RAISE(ABORT, 'decisions are append-only'); END;
 """
 
+# v13: footage of new articles (ticket 16-18). Every step is an event; files on disk are only what events say.
+_SCHEMA_V13 = """
+CREATE TABLE clip_events (
+    event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue_id    TEXT NOT NULL REFERENCES venues(venue_id),
+    identity_id INTEGER NOT NULL REFERENCES pos_identities(identity_id),
+    action      TEXT NOT NULL CHECK (action IN ('planned', 'downloaded', 'failed', 'missing', 'deleted', 'warned',
+                                                'seen', 'not_visible', 'sent')),
+    sale_time   TEXT,
+    day         TEXT,
+    bytes       INTEGER,
+    folder      TEXT,
+    detail      TEXT NOT NULL DEFAULT '{}',
+    actor       TEXT,
+    role        TEXT,
+    at          TEXT NOT NULL
+);
+CREATE INDEX clip_events_identity ON clip_events (venue_id, identity_id);
+CREATE TRIGGER clip_events_no_update BEFORE UPDATE ON clip_events
+BEGIN SELECT RAISE(ABORT, 'clip history is append-only'); END;
+CREATE TRIGGER clip_events_no_delete BEFORE DELETE ON clip_events
+BEGIN SELECT RAISE(ABORT, 'clip history is append-only'); END;
+"""
+
 MSG_NOT_CONFIGURED = "Katalog još nije podešen na ovom računaru. Javi administratoru."
 MSG_MISSING = "Katalog još nije napravljen. Javi administratoru. Ostatak alata radi normalno."
 MSG_INVALID = "Katalog trenutno ne može da se pročita. Javi administratoru. Ostatak alata radi normalno."
@@ -492,6 +517,7 @@ class CatalogSettings:
     pipeline_map_path: Optional[Path] = None
     trial_dir: Optional[Path] = None
     reminder_emails: Tuple[str, ...] = ()
+    clips: Optional[_clips.ClipSettings] = None
 
     @classmethod
     def from_config(cls, cfg: Mapping[str, Any], models_dir: Path,
@@ -549,7 +575,8 @@ class CatalogSettings:
                    optional_path("catalog_release_dir") or (db_path.parent / "releases" if db_path else None),
                    optional_path("catalog_pipeline_map_path"),
                    optional_path("catalog_trial_dir") or (db_path.parent / "trial_days" if db_path else None),
-                   tuple(str(e).strip() for e in (cfg.get("catalog_reminder_emails") or []) if str(e).strip()))
+                   tuple(str(e).strip() for e in (cfg.get("catalog_reminder_emails") or []) if str(e).strip()),
+                   _clips.ClipSettings.from_config(cfg))
 
     @classmethod
     def from_config_file(cls, config_path: Path) -> "CatalogSettings":
@@ -617,11 +644,11 @@ def _open_for_write(settings: CatalogSettings) -> sqlite3.Connection:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 0
         if version == 0 and not has_tables:
-            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}{_SCHEMA_V10}{_SCHEMA_V11}{_SCHEMA_V12}"
+            conn.executescript(f"BEGIN;{_SCHEMA}{_SCHEMA_V2}{_SCHEMA_V3}{_SCHEMA_V4}{_SCHEMA_V5}{_SCHEMA_V6}{_SCHEMA_V7}{_SCHEMA_V8}{_SCHEMA_V9}{_SCHEMA_V10}{_SCHEMA_V11}{_SCHEMA_V12}{_SCHEMA_V13}"
                                f"PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
-        elif version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
+        elif version in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12):
             steps = [_SCHEMA_V2, _SCHEMA_V3, _SCHEMA_V4, _SCHEMA_V5, _SCHEMA_V6, _SCHEMA_V7, _SCHEMA_V8, _SCHEMA_V9,
-                     _SCHEMA_V10, _SCHEMA_V11, _SCHEMA_V12][version - 1:]
+                     _SCHEMA_V10, _SCHEMA_V11, _SCHEMA_V12, _SCHEMA_V13][version - 1:]
             conn.execute("PRAGMA foreign_keys = OFF")  # the decisions rebuild (v12) drops a table others point to
             before = conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] if version >= 6 else 0
             conn.executescript(f"BEGIN;{''.join(steps)}PRAGMA user_version = {SCHEMA_VERSION};COMMIT;")
@@ -2430,7 +2457,9 @@ FINDING_ACTIONS = {"changed_file": ("Koristi novu verziju", "Zadrži staru verzi
                    "second_code": ("Isti artikal, potvrdi", "Nije isti"),
                    "new_article": ("Viđeno", "Ne treba"),
                    "price_jump": ("U redu", "Proveriti šifru"),
-                   "pos_missing": ("Stiglo je / rešeno", "Nije potrebno")}
+                   "pos_missing": ("Stiglo je / rešeno", "Nije potrebno"),
+                   "clip_late": ("Viđeno", "Nije potrebno"),
+                   "clip_budget": ("Viđeno", "Nije potrebno")}
 
 
 class UnknownFinding(Exception):
@@ -2833,6 +2862,10 @@ def list_inbox(settings: CatalogSettings, today: Optional[str] = None) -> Dict[s
             counts["snoozed"] += 1
         else:
             items.append(_variation(v, evidence))
+    clip_status = _clips.read_status(settings.db_path.parent) if settings.clips and settings.db_path else {}
+    for item in items:
+        st = clip_status.get(item["identity_id"])
+        item["clip"] = {"status": st, "label": _clips.CLIP_STATUS_LABELS[st]} if st in _clips.CLIP_STATUS_LABELS else None
     path = [_variation(v, evidence, flows[v.identity_id]) for v in _sorted(current.values())
             if v.identity_id in flows and flows[v.identity_id]["stage"] != "tracked"]
     order = list(FLOW_LABELS)
@@ -2908,3 +2941,84 @@ def missing_report_reminders(settings: CatalogSettings, now: Optional[datetime] 
                  (settings.db_path.parent / "reminders" / f"{day}.txt").read_text(encoding="utf-8"))
             report["sent"].append(day)
     return report
+
+
+# ---------------- Footage of new articles (ticket 16) ----------------
+
+def _clip_candidates(settings: CatalogSettings, conn: sqlite3.Connection, today: str) -> List[Dict[str, Any]]:
+    """Articles that need footage: sold, waiting for a class (not X, not snoozed), or on the new class path before
+    labeling is done (Čeka klasu / U označavanju)."""
+    venue = settings.venue_id
+    current = _current(conn, venue)
+    decisions = _load_decisions(conn, venue)
+    snoozed = _snoozed(conn, venue, current, today)
+    flows = _flows(settings, current, decisions)
+    out = []
+    for v in _sorted(current.values()):
+        if v.code is None or v.sold <= 0 or v.state == "ignored":
+            continue
+        stage = (flows.get(v.identity_id) or {}).get("stage")
+        waiting = v.state == "pending" and not v.target and v.identity_id not in snoozed
+        if waiting or stage in ("waiting_class", "labeling"):
+            out.append({"identity_id": v.identity_id, "article_id": v.article_id, "code": v.code, "name": v.name,
+                        "last_sale": v.last_sale, "stage": stage})
+    return out
+
+
+def _clip_events(conn: sqlite3.Connection, venue: str, identity_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    where, args = ("AND identity_id = ? ", (venue, identity_id)) if identity_id is not None else ("", (venue,))
+    return [{"event_id": e, "identity_id": i, "action": a, "sale_time": t, "day": d, "bytes": b, "folder": f,
+             "detail": json.loads(x or "{}"), "actor": who, "role": r, "at": at}
+            for e, i, a, t, d, b, f, x, who, r, at in conn.execute(
+                "SELECT event_id, identity_id, action, sale_time, day, bytes, folder, detail, actor, role, at FROM clip_events "
+                f"WHERE venue_id = ? {where}ORDER BY event_id", args)]
+
+
+def clip_context(settings: CatalogSettings, today: str) -> Dict[str, Any]:
+    """Everything the footage job needs, read in one go: candidates, clip history, when each article was last decided."""
+    venue = settings.venue_id
+    with _open_for_read(settings) as conn:
+        candidates = _clip_candidates(settings, conn, today)
+        events = _clip_events(conn, venue)
+        idents = {i: a for i, a in conn.execute("SELECT identity_id, article_id FROM pos_identities WHERE venue_id = ?", (venue,))}
+        by_identity: Dict[int, str] = {}
+        by_article: Dict[int, str] = {}
+        for i, a, at in conn.execute("SELECT identity_id, article_id, created_at FROM decisions WHERE venue_id = ?", (venue,)):
+            if i is not None:
+                by_identity[i] = max(by_identity.get(i, ""), at)
+            if a is not None:
+                by_article[a] = max(by_article.get(a, ""), at)
+    decided = {}
+    for iid in {e["identity_id"] for e in events}:
+        at = max(by_identity.get(iid, ""), by_article.get(idents.get(iid), ""))
+        if at:
+            decided[iid] = at
+    return {"candidates": candidates, "events": events, "decided_at": decided}
+
+
+def add_clip_events(settings: CatalogSettings, events: Sequence[Mapping[str, Any]],
+                    findings: Sequence[Mapping[str, Any]]) -> None:
+    """Append clip events (and the job's findings, once per kind+day+article) in one transaction."""
+    venue = settings.venue_id
+    conn = _open_for_write(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for e in events:
+            conn.execute("INSERT INTO clip_events (venue_id, identity_id, action, sale_time, day, bytes, folder, detail, actor, "
+                         "role, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                         (venue, int(e["identity_id"]), e["action"], e.get("sale_time"), e.get("day"), e.get("bytes"),
+                          e.get("folder"), json.dumps(dict(e.get("detail") or {}), ensure_ascii=False), e.get("actor"),
+                          e.get("role"), e.get("at") or _now()))
+        for f in findings:
+            same = [json.loads(d) for d, in conn.execute("SELECT data FROM findings WHERE venue_id = ? AND kind = ? AND day = ?",
+                                                         (venue, f["kind"], f["day"]))]
+            if any(d.get("identity_id") == f["data"].get("identity_id") for d in same):
+                continue
+            _add_finding(conn, venue, f["kind"], f["day"], None, f["title"], f["text"], f["data"], _now())
+        conn.execute("COMMIT")
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()

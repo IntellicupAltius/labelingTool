@@ -7,6 +7,7 @@
     python -m web_labeler.catalog model-cards         # rebuild the read-only model cards (the tool also starts it)
     python -m web_labeler.catalog reminders          # missing POS report: finding + email text (sends nothing yet)
     python -m web_labeler.catalog pos-watch          # read new complete POS reports (report only; cron every 5 min later)
+    python -m web_labeler.catalog clips [--dry-run]   # footage of new articles from the NVR (after the nightly sync)
     python -m web_labeler.catalog transfer <old.db> [--skip "Proba (Claude)"] [--dry-run]
                                                       # carry manual work from another Catalog DB into this one, once
 """
@@ -26,10 +27,10 @@ from web_labeler.catalog.store import CatalogError, CatalogSettings, import_cata
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m web_labeler.catalog")
-    parser.add_argument("command", choices=["import", "backup", "backups", "restore", "model-cards", "transfer", "pos-watch", "reminders"])
+    parser.add_argument("command", choices=["import", "backup", "backups", "restore", "model-cards", "transfer", "pos-watch", "reminders", "clips"])
     parser.add_argument("file", nargs="?")
     parser.add_argument("--skip", action="append", default=[], help="transfer: leave out everything by this person (test entries)")
-    parser.add_argument("--dry-run", action="store_true", help="transfer: show what would move, change nothing")
+    parser.add_argument("--dry-run", action="store_true", help="transfer/clips: show what would happen, change nothing")
     args = parser.parse_args()
     default_cfg = Path(__file__).resolve().parents[2] / "labeler_config.json"
     config_path = Path(os.getenv("LABELER_CONFIG_PATH") or default_cfg)
@@ -43,6 +44,12 @@ def main() -> int:
         elif args.command == "pos-watch":
             from web_labeler.catalog.store import receive_pos_reports
             report = receive_pos_reports(settings)
+        elif args.command == "clips":
+            from web_labeler.catalog import clips as _clips
+            try:
+                report = _clips.run_job(settings, dry_run=args.dry_run)
+            except _clips.ClipError as e:
+                raise CatalogError(str(e))
         elif args.command == "transfer":
             if not args.file:
                 raise CatalogError("Name the Catalog database to carry the work from")
