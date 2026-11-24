@@ -1499,8 +1499,8 @@ def record_decision(settings: CatalogSettings, kind: str, actor: Any, role: Any,
             payload = {}
         elif kind == "propose":
             change_kind = str(payload.get("kind") or "")
-            if change_kind not in ("classes", "provisional", "merge"):
-                raise CatalogError("Predlog može biti promena klase, zvezdica ili spajanje.")
+            if change_kind not in ("classes", "provisional", "merge", "ignore"):
+                raise CatalogError("Predlog može biti promena klase, zvezdica, spajanje ili X.")
             if change_kind in ("classes", "provisional") and identity_id is None:
                 raise CatalogError("Izaberi POS varijaciju (ime i šifru).")
             payload = {"kind": change_kind, "change": _clean_change(settings, conn, venue, change_kind, payload.get("change") or {},

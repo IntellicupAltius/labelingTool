@@ -343,6 +343,51 @@ class ReleaseTests(unittest.TestCase):
             conn.execute("DELETE FROM locks")
         conn.close()
 
+    # ---- carrying manual work from the trial database (before the switch) ----
+
+    def test_transfer_carries_owner_work_and_leaves_test_entries(self):
+        from io import BytesIO
+        from PIL import Image
+        from web_labeler.catalog import transfer
+        buf = BytesIO()
+        Image.new("RGB", (120, 80), "red").save(buf, format="PNG")
+        src = self.settings
+        catalog.record_decision(src, "ignore", "Proba (Claude)", "labeler", article_id=self.identity("OMLET")["article_id"], reason="proba")
+        x = catalog.record_decision(src, "ignore", "Aleksa", "admin", article_id=self.identity("NEW DRINK")["article_id"],
+                                    payload={"why": "assortment"}, reason="skinuto")
+        prop = catalog.record_decision(src, "propose", "Claude", "labeler", identity_id=self.identity("Niska")["identity_id"],
+                                       payload={"kind": "classes", "change": {"links": [{"model": "glasses", "class": "CASA"}]}},
+                                       reason="predlog")
+        catalog.record_decision(src, "classes", "Aleksa", "admin", identity_id=self.identity("Niska")["identity_id"],
+                                payload={"links": [{"model": "glasses", "class": "CASA"}], "from_proposal": prop["decision_id"]},
+                                reason="da")
+        catalog.record_decision(src, "revoke", "Aleksa", "admin", target_id=x["decision_id"], reason="ipak")
+        ev = catalog.add_evidence(src, self.identity("Casa Vina")["identity_id"], buf.getvalue(), "Goca", "labeler")
+        catalog.decide_evidence(src, ev["evidence_id"], "confirmed", "Aleksa")
+        self.publish()
+
+        target = self.make_settings(catalog_db_path=str(self.tmp / "real" / "catalog.db"), catalog_release_dir=str(self.tmp / "realrel"))
+        with self.assertRaises(transfer.TransferError):  # not imported yet
+            transfer.transfer(self.tmp / "db" / "catalog.db", target)
+        catalog.import_catalog(target)
+        dry = transfer.transfer(self.tmp / "db" / "catalog.db", target, skip_people=["Proba (Claude)"], dry_run=True)
+        self.assertEqual((dry["decisions"], dry["images"]), (4, 1))
+        self.assertEqual(catalog.list_decisions(target)["items"], [])
+        report = transfer.transfer(self.tmp / "db" / "catalog.db", target, skip_people=["Proba (Claude)"])
+        self.assertEqual((report["decisions"], report["images"], report["not_found"]), (4, 1, []))
+        self.assertEqual(len(report["skipped"]), 1)
+        mapping = lambda s, n: next(v for v in catalog.list_articles(s)["items"] if v["name"] == n)["mapping"]
+        for name in ("OMLET", "NEW DRINK", "Niska"):
+            self.assertEqual(mapping(target, name), mapping(src, name), name)
+        proposals = [d for d in catalog.list_decisions(target, "propose")["items"]]
+        self.assertEqual([p["status"] for p in proposals], ["applied"])
+        images = catalog.list_evidence(target, "confirmed")["items"]
+        self.assertEqual(len(images), 1)
+        self.assertTrue(catalog.evidence_image(target, images[0]["evidence_id"])[0].is_file())
+        self.assertEqual(store.list_releases(target)["releases"], [])  # releases never move
+        with self.assertRaises(transfer.TransferError):  # once only
+            transfer.transfer(self.tmp / "db" / "catalog.db", target)
+
     def test_sixth_version_database_is_upgraded_and_needs_one_import(self):
         db = self.tmp / "db6" / "catalog.db"
         db.parent.mkdir()
