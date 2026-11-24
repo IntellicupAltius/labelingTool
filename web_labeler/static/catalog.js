@@ -1963,7 +1963,7 @@
   modelSelect.onchange = () => { selectedClass = null; selectedVariation = null; openCardFile = null; loadClasses(); };
   viewClasses.onclick = () => setView("classes");
   viewUnclassified.onclick = () => setView("unclassified");
-  tab.onclick = () => { setOpen(true); refresh(); };
+  tab.onclick = () => { setOpen(true); tabInbox.classList.remove("tabActive"); if (view === "inbox") setView("classes"); refresh(); };
   tabInbox.onclick = () => { setOpen(true); tab.classList.remove("tabActive"); tabInbox.classList.add("tabActive"); setView("inbox"); };
   tabs.addEventListener("click", (e) => {
     const button = e.target.closest(".tabBtn");

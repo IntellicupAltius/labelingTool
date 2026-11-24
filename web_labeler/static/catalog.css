@@ -11,7 +11,7 @@
 .catalogClass { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 8px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
 .catalogClassId { flex: 0 0 34px; text-align: right; color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 700; }
 .catalogClassName { overflow-wrap: anywhere; }
-.tabs.catalogOpen .tabBtn.tabActive:not(#tabClasses) { background: transparent; color: var(--muted); border-color: transparent; box-shadow: none; }
+.tabs.catalogOpen .tabBtn.tabActive:not(#tabClasses):not(#tabInbox) { background: transparent; color: var(--muted); border-color: transparent; box-shadow: none; }
 .catalogViews { display: flex; gap: 6px; }
 .catalogSplit { display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); gap: 16px; height: 100%; min-height: 0; }
 .catalogList, .catalogDetail { min-height: 0; overflow-y: auto; }
