@@ -922,6 +922,8 @@ def _variation(v: _decisions.Variation, evidence: Optional[Mapping[int, Dict[str
         tags.append("sve stornirano")
     if ev["pending"]:
         tags.append("slika čeka potvrdu")
+    if v.under_review:
+        tags.append("na proveri")
     if v.awaiting_release:
         tags.append("ručna odluka, čeka izdanje")
     image = None if ev["confirmed"] is None else {"evidence_id": ev["confirmed"], "url": _evidence_url(ev["confirmed"]),
@@ -982,7 +984,31 @@ def _current(conn: sqlite3.Connection, venue: str, as_of: Optional[str] = None) 
     released = conn.execute("SELECT MAX(decisions_upto) FROM releases WHERE venue_id = ?", (venue,)).fetchone()[0] or 0
     for v in result.values():
         v.awaiting_release = v.decided and v.last_decision > released
+    _apply_till_findings(conn, venue, result)
     return result
+
+
+def _till_findings(conn: sqlite3.Connection, venue: str) -> List[Tuple[int, Dict[str, Any], str]]:
+    """Rename and second-code findings that still count (open = na proveri, applied = confirmed), newest first."""
+    out = []
+    for finding_id, kind, data, created_at in conn.execute(
+            "SELECT finding_id, kind, data, created_at FROM findings WHERE venue_id = ? AND kind IN ('rename', 'second_code') "
+            "ORDER BY finding_id DESC", (venue,)):
+        state = _finding_status(conn, finding_id)
+        if state != "denied":
+            out.append((finding_id, dict(json.loads(data), kind=kind, created_at=created_at), state))
+    return out
+
+
+def _apply_till_findings(conn: sqlite3.Connection, venue: str, current: Dict[int, _decisions.Variation]) -> None:
+    by_key = {((v.code or ""), _assortment.normalize_name(v.name)): v for v in current.values()}
+    for _, data, state in _till_findings(conn, venue):
+        v = by_key.get((data.get("code") or "", _assortment.normalize_name(data.get("name", ""))))
+        if v is None or v.decided or v.state == "ignored":
+            continue
+        if data["kind"] == "rename" and not v.links and data.get("classes"):
+            v.links, v.state = [tuple(link) for link in data["classes"]], "tracked"
+        v.under_review = v.under_review or state == "open"
 
 
 def _in_scope(v: _decisions.Variation, model: str, names: Sequence[str]) -> bool:
@@ -1837,7 +1863,11 @@ def _release_sources(conn: sqlite3.Connection, venue: str) -> _releases.ReleaseS
     for model, name in conn.execute("SELECT model_key, name FROM classes WHERE venue_id = ? ORDER BY model_key, class_id", (venue,)):
         classes.setdefault(model, []).append(name)
     training = {m: json.loads(c) for m, c in conn.execute("SELECT model_key, config FROM training_classes WHERE venue_id = ?", (venue,))}
-    return _releases.ReleaseSources(entries, blacklist, variations, classes, training)
+    extra = [(data["name"], [tuple(link) for link in data.get("classes") or []],
+              {"id": f"nalaz {finding_id}", "actor": "kasa", "created_at": data["created_at"],
+               "reason": f"preimenovano iz {data.get('old_name')}" + (", na proveri" if state == "open" else ", potvrđeno")})
+             for finding_id, data, state in _till_findings(conn, venue) if data["kind"] == "rename"]
+    return _releases.ReleaseSources(entries, blacklist, variations, classes, training, extra)
 
 
 def _release_rows(conn: sqlite3.Connection, venue: str) -> List[Dict[str, Any]]:
@@ -2168,11 +2198,17 @@ def unlock_catalog(settings: CatalogSettings, actor: Any, role: Any, reason: Any
 # ---------------- POS report intake (ticket 11) ----------------
 
 from web_labeler.catalog import pos_intake as _pos  # noqa: E402
+from web_labeler.catalog import article_findings as _articles  # noqa: E402
 
 FINDING_STATUS_LABELS = {"open": "Čeka odluku", "applied": "Primenjeno", "denied": "Odbijeno"}
 FINDING_ACTIONS = {"changed_file": ("Koristi novu verziju", "Zadrži staru verziju"),
                    "name_mismatch": ("U redu, važi datum iz fajla", "Proveriti sa lokalom"),
-                   "bad_file": ("Viđeno", "Proveriti sa lokalom")}
+                   "bad_file": ("Viđeno", "Proveriti sa lokalom"),
+                   "rename": ("Isti artikal, potvrdi", "Nije isti, ne prati"),
+                   "code_reused": ("Viđeno, odlučiću u Artiklima", "Greška u kasi"),
+                   "second_code": ("Isti artikal, potvrdi", "Nije isti"),
+                   "new_article": ("Viđeno", "Ne treba"),
+                   "price_jump": ("U redu", "Proveriti šifru")}
 
 
 class UnknownFinding(Exception):
@@ -2223,6 +2259,10 @@ def receive_pos_reports(settings: CatalogSettings, now: Optional[datetime] = Non
         known = {sha for sha, in conn.execute("SELECT sha256 FROM pos_files WHERE venue_id = ?", (venue,))}
         baseline = not known
         report["baseline"] = baseline
+        pairs_known = _known_pairs(conn, venue)
+        seen_findings = {(k, d.get("code"), _articles.norm(d.get("name", ""))) for k, d in
+                         ((k, json.loads(d)) for k, d in conn.execute("SELECT kind, data FROM findings WHERE venue_id = ?", (venue,)))}
+        current_view: Optional[Dict[int, _decisions.Variation]] = None
         ready, report["waiting"] = _pos.find_new(settings.pos_dir, settings.pos_adapter, known, now, settle_seconds)
         copies = []
         for path in ready:
@@ -2265,6 +2305,26 @@ def receive_pos_reports(settings: CatalogSettings, now: Optional[datetime] = Non
                              f"{diff['only_new']} novih redova, {diff['only_old']} redova kojih više nema, {diff['both']} istih. "
                              "Važi nova verzija dok ne odlučiš drugačije; obe verzije su sačuvane.",
                              dict(diff, previous_file_id=previous, file=item.name, previous_file=old_name), at)
+            if not item.error:
+                sales: Dict[Tuple[str, str], List[float]] = {}
+                for count, r in item.rows.values():
+                    if r.quantity > 0:
+                        sales.setdefault((r.code, r.name.strip()), []).extend([r.price] * count)
+                for f in _articles.detect(pairs_known, sales):
+                    key = (f["kind"], f["code"], _articles.norm(f["name"]))
+                    if key in seen_findings:
+                        continue
+                    seen_findings.add(key)
+                    if f["kind"] == "rename":
+                        if current_view is None:
+                            current_view = _current(conn, venue)
+                        old = next((v for v in current_view.values() if (v.code or "") == f["code"]
+                                    and _articles.norm(v.name) == _articles.norm(f["old_name"])), None)
+                        f["classes"] = [list(link) for link in old.links] if old and old.state == "tracked" else []
+                    title, text = _article_finding_text(f)
+                    _add_finding(conn, venue, f["kind"], item.report_day, file_id, title, text, f, at)
+                for (code, name), prices in sales.items():
+                    pairs_known.add(code, name, sorted(prices)[len(prices) // 2])
             if item.bad_rows and not item.error:
                 _add_finding(conn, venue, "bad_file", item.report_day, file_id, f"Neki redovi nisu pročitani: {item.name}",
                              f"{len(item.bad_rows)} redova ne može da se pročita i ne računa se. Ostatak izveštaja važi.",
@@ -2283,6 +2343,39 @@ def receive_pos_reports(settings: CatalogSettings, now: Optional[datetime] = Non
     finally:
         conn.close()
     return report
+
+
+def _known_pairs(conn: sqlite3.Connection, venue: str) -> "_articles.Known":
+    known = _articles.Known()
+    for code, name, price in conn.execute("SELECT code, name, last_price FROM pos_identities WHERE venue_id = ? AND code IS NOT NULL",
+                                          (venue,)):
+        known.add(code, name, price)
+    for code, name, price in conn.execute(
+            "SELECT r.code, r.name, r.price FROM pos_file_rows r JOIN pos_files f ON f.file_id = r.file_id "
+            "WHERE f.venue_id = ? AND r.quantity > 0 ORDER BY r.ring_time", (venue,)):
+        known.add(code, name, price)
+    return known
+
+
+def _article_finding_text(f: Mapping[str, Any]) -> Tuple[str, str]:
+    name, code = f["name"], f["code"]
+    if f["kind"] == "rename":
+        classes = ", ".join(f"{m}.{c}" for m, c in f.get("classes") or []) or "bez klase"
+        return (f"Preimenovano u kasi: {f['old_name']} → {name}",
+                f"Šifra {code} se sada zove \"{name}\". Prati se kao i do sada ({classes}), sa oznakom \"na proveri\". "
+                "Potvrdi ako je isto piće; ako nije, novo ime se ne prati.")
+    if f["kind"] == "code_reused":
+        return (f"Šifra {code} dobila potpuno drugo ime: {name}",
+                f"Ranije: {', '.join(f['old_names'])}. Sada: \"{name}\". Možda je šifra data drugom artiklu. "
+                "Novo ime se ne prati dok ne odlučiš.")
+    if f["kind"] == "second_code":
+        return (f"Nova šifra za poznat artikal: {name}",
+                f"\"{name}\" se sada kuca i pod šifrom {code} (ranije {', '.join(f['other_codes'])}). "
+                "Prati se kao isti artikal, sa oznakom \"na proveri\".")
+    if f["kind"] == "price_jump":
+        return (f"Nagla promena cene: {name}",
+                f"Cena po komadu za šifru {code} sa {f['old_price']:g} na {f['new_price']:g} din. Proveri da šifra nije data drugom artiklu.")
+    return (f"Novi artikal u kasi: {name}", f"Šifra {code}, prodato {f['sold']} u ovom izveštaju. Čeka razvrstavanje.")
 
 
 def list_findings(settings: CatalogSettings, status: Optional[str] = "open") -> Dict[str, Any]:

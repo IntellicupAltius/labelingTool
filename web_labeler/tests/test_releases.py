@@ -388,6 +388,35 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(transfer.TransferError):  # once only
             transfer.transfer(self.tmp / "db" / "catalog.db", target)
 
+    # ---- till renames (ticket 12) ----
+
+    def test_till_rename_is_tracked_under_old_class_until_denied(self):
+        from datetime import datetime, timedelta
+        settings = self.make_settings(catalog_pos_dir=str(self.tmp / "pos"), catalog_pos_adapter="blaznavac_csv")
+        later = datetime.now() + timedelta(minutes=10)
+        store.receive_pos_reports(settings, later)  # baseline
+        r = pos_row("0100", "Casa Vina Crvena", "2026.11.21 10:00")
+        r[3] = r[5] = "21/11/2026"
+        with open(self.tmp / "pos" / "b.csv", "w", encoding="utf-8", newline="") as f:
+            csv.writer(f).writerow(r)
+        os.utime(self.tmp / "pos" / "b.csv", (0, 0))
+        store.receive_pos_reports(settings, later)
+        finding = next(f for f in store.list_findings(settings)["items"] if f["kind"] == "rename")
+        self.assertEqual(finding["data"]["old_name"], "Casa Vina")
+        self.assertEqual(finding["data"]["classes"], [["glasses", "CASA"]])
+        nxt = store.next_release(settings)
+        self.assertIn("Casa Vina Crvena: počinje da se prati kao glasses.CASA.", [c["text"] for c in nxt["changes"]])
+        self.assertTrue(all(c["ok"] for c in nxt["checks"]), nxt["checks"])
+        item = next(i for i in nxt["parity"]["items"] if i["text"].startswith("Casa Vina Crvena"))
+        self.assertTrue(item["explained"])
+        self.assertIn("nalaz", item["why"])
+        catalog.import_catalog(settings)  # the new name becomes a POS variation
+        v = self.identity("Casa Vina Crvena")
+        self.assertEqual((v["mapping"], "na proveri" in v["tags"]), ("glasses.CASA", True))
+        store.decide_finding(settings, finding["finding_id"], "denied", "Aleksa", "admin", "drugo piće")
+        self.assertEqual(self.identity("Casa Vina Crvena")["mapping"], "mapiranje nedostaje")
+        self.assertNotIn("Casa Vina Crvena", [c["text"].split(":")[0] for c in store.next_release(settings)["changes"]])
+
     def test_sixth_version_database_is_upgraded_and_needs_one_import(self):
         db = self.tmp / "db6" / "catalog.db"
         db.parent.mkdir()

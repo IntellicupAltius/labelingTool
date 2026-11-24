@@ -37,6 +37,7 @@ class Variation:
     last_decision: int = 0
     ignore_why: Optional[str] = None
     awaiting_release: bool = False
+    under_review: bool = False  # "na proveri": tracked because of a till finding nobody confirmed yet
 
 
 @dataclass

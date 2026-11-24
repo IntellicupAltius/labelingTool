@@ -61,6 +61,8 @@ class ReleaseSources:
     variations: List[VariationState]
     classes: Dict[str, List[str]]            # tool model name (e.g. Glasses) -> names by class number
     training: Dict[str, Dict[str, Any]]      # model (lower) -> `classes:` section of the training config
+    # POS names a finding keeps tracked under an old class (a till rename "na proveri"): (name, links, finding info)
+    extra_tracked: List[Tuple[str, List[Tuple[str, str]], Dict[str, Any]]] = field(default_factory=list)
 
 
 @dataclass
@@ -148,6 +150,13 @@ def generate(src: ReleaseSources) -> Generated:
         decisions = [d for v in group for d in v.decisions]
         out.changes.append({"name": display, "key": key, "before": list(before), "after": list(want),
                             "decisions": sorted({d["id"]: d for d in decisions}.values(), key=lambda d: d["id"])})
+    listed_now = {norm(l) for l in blacklist if not _is_comment(l)} | {norm(k) for k in extra_ignored + left_menu}
+    for name, links, info in src.extra_tracked:
+        key = norm(name)
+        if not links or key in listed_now or any(norm(k) == key for k in mapping):
+            continue
+        mapping[name.strip()] = [f"{m}.{c}" for m, c in links]
+        out.changes.append({"name": name.strip(), "key": key, "before": [], "after": mapping[name.strip()], "decisions": [info]})
     if extra_ignored:
         blacklist += ["", DECISIONS_SECTION] + extra_ignored
     if left_menu:
@@ -350,9 +359,9 @@ def _doc_details(doc: Mapping[str, Any], gen: Mapping[str, Any]) -> List[str]:
 
 
 def _decision_text(decisions: Sequence[Mapping[str, Any]]) -> str:
-    parts = [f"odluka #{d['id']} ({d['actor']}, {str(d['created_at'])[:10]}){': ' + d['reason'] if d.get('reason') else ''}"
-             for d in decisions]
-    return "Ručna odluka u Katalogu: " + "; ".join(parts) + "."
+    parts = [f"{d['id'] if isinstance(d['id'], str) else 'odluka #' + str(d['id'])} ({d['actor']}, {str(d['created_at'])[:10]})"
+             f"{': ' + d['reason'] if d.get('reason') else ''}" for d in decisions]
+    return "Odluka ili nalaz u Katalogu: " + "; ".join(parts) + "."
 
 
 def parity(production: Content, generated: Generated, new: Content) -> Dict[str, Any]:
