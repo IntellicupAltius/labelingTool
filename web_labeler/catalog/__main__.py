@@ -4,6 +4,7 @@
     python -m web_labeler.catalog backup              # nightly copy to catalog_backup_dir, kept 30 days
     python -m web_labeler.catalog backups             # list the copies
     python -m web_labeler.catalog restore <file.db>   # put a copy back (stop the tool first)
+    python -m web_labeler.catalog model-cards         # rebuild the read-only model cards (the tool also starts it)
 """
 from __future__ import annotations
 
@@ -14,12 +15,13 @@ import sys
 from pathlib import Path
 
 from web_labeler.catalog import backup as _backup
-from web_labeler.catalog.store import CatalogError, CatalogSettings, import_catalog
+from web_labeler.catalog import model_cards as _model_cards
+from web_labeler.catalog.store import CatalogError, CatalogSettings, import_catalog, model_cards_snapshot_path
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m web_labeler.catalog")
-    parser.add_argument("command", choices=["import", "backup", "backups", "restore"])
+    parser.add_argument("command", choices=["import", "backup", "backups", "restore", "model-cards"])
     parser.add_argument("file", nargs="?")
     args = parser.parse_args()
     default_cfg = Path(__file__).resolve().parents[2] / "labeler_config.json"
@@ -28,6 +30,11 @@ def main() -> int:
         settings = CatalogSettings.from_config_file(config_path)
         if args.command == "import":
             report = import_catalog(settings)
+        elif args.command == "model-cards":
+            target = model_cards_snapshot_path(settings)
+            if target is None or settings.model_cards is None:
+                raise CatalogError("Set catalog_live_models_dir and the Catalog database first")
+            report = _model_cards.write_snapshot(settings.model_cards, target)
         else:
             if settings.backup_dir is None or settings.db_path is None or not settings.venue_id:
                 raise CatalogError("Set catalog_backup_dir, catalog_venue_id and the Catalog database first")

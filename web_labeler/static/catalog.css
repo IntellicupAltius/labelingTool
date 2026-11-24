@@ -115,3 +115,14 @@
 .catalogResult.selected { border-color: var(--accent); }
 .catalogLinkEditor select, .catalogFormGrid select { width: auto; min-width: 180px; max-width: 100%; }
 .catalogLinkEditor .catalogMiroButtons { flex-wrap: wrap; }
+.catalogModelCard { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; margin: 10px 0 16px; }
+.catalogCardSection { padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
+.catalogCardSection h3 { margin: 0 0 6px; color: var(--accent); font-size: 12px; }
+.catalogFactTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.catalogFactTable th { width: 48%; padding: 3px 8px 3px 0; text-align: left; color: var(--muted); font-weight: 400; vertical-align: top; }
+.catalogFactTable td { padding: 3px 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.catalogMissing { color: var(--muted); font-style: italic; }
+.catalogModelCard .catalogTable { font-size: 12px; }
+.catalogTable tr.selected td { background: var(--panel); }
+.catalogCardSection.wide { grid-column: span 2; overflow-x: auto; }
+@media (max-width: 760px) { .catalogCardSection.wide { grid-column: auto; } }

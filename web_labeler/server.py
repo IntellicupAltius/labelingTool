@@ -323,7 +323,8 @@ def create_app() -> FastAPI:
                       "raw_base_path", "raw_review_dir", "relabel_batches_dir", "article_map_path",
                       "analyzer_models_root", "analyzer_raw_root", "analyzer_models_python", "metrics_python",
                       "catalog_db_path", "catalog_venue_id", "catalog_venue_name", "catalog_media_dir",
-                      "catalog_dataset_dir"):
+                      "catalog_dataset_dir", "catalog_live_models_dir", "catalog_promotions_path",
+                      "catalog_training_root", "catalog_training_archives_dir", "catalog_training_tenant"):
                 if isinstance(cfg.get(k), str) and cfg.get(k).strip():
                     merged[k] = cfg[k].strip()
             if isinstance(cfg.get("bar_counter_options"), list) and cfg.get("bar_counter_options"):

@@ -15,6 +15,7 @@ from web_labeler.catalog import class_rules as _rules
 from web_labeler.catalog import decisions as _decisions
 from web_labeler.catalog import examples as _examples
 from web_labeler.catalog import miro as _miro
+from web_labeler.catalog import model_cards as _model_cards
 from web_labeler.yolo import load_yolo_names_from_yaml
 
 SCHEMA_VERSION = 6
@@ -283,6 +284,7 @@ class CatalogSettings:
     media_dir: Optional[Path] = None
     dataset_dir: Optional[Path] = None
     backup_dir: Optional[Path] = None
+    model_cards: Optional[_model_cards.ModelCardSources] = None
 
     @classmethod
     def from_config(cls, cfg: Mapping[str, Any], models_dir: Path,
@@ -324,6 +326,11 @@ class CatalogSettings:
         dataset_dir = optional_path("catalog_dataset_dir") or (Path(raw_base_path).resolve() if raw_base_path else None)
         if dataset_dir is not None and dataset_dir not in roots:
             roots.append(dataset_dir)
+        live_models = optional_path("catalog_live_models_dir")
+        model_cards = _model_cards.ModelCardSources(
+            live_models, optional_path("catalog_promotions_path"), optional_path("catalog_training_root"),
+            optional_path("catalog_training_archives_dir"),
+            str(cfg.get("catalog_training_tenant") or "").strip() or venue_id) if live_models else None
         return cls(db_path, venue_id, venue_name, Path(models_dir).resolve(), tuple(roots),
                    optional_path("catalog_pos_dir"), str(cfg.get("catalog_pos_adapter") or "").strip() or None,
                    optional_path("article_map_path"), optional_path("catalog_blacklist_path"),
@@ -331,7 +338,7 @@ class CatalogSettings:
                    rule_sources, optional_path("catalog_miro_dir"),
                    {str(k): str(v) for k, v in miro_files.items()} if isinstance(miro_files, dict) else None,
                    optional_path("catalog_miro_suggestions_path"), media_dir, dataset_dir,
-                   optional_path("catalog_backup_dir"))
+                   optional_path("catalog_backup_dir"), model_cards)
 
     @classmethod
     def from_config_file(cls, config_path: Path) -> "CatalogSettings":
@@ -345,6 +352,12 @@ class CatalogSettings:
             models_dir = Path(cfg.get("data_root") or "~/LabelingToolData").expanduser() / "Models"
         raw = str(cfg.get("raw_base_path") or "").strip()
         return cls.from_config(cfg, models_dir, Path(raw).expanduser() if raw else None)
+
+
+def model_cards_snapshot_path(settings: CatalogSettings) -> Optional[Path]:
+    if settings.model_cards is None or settings.db_path is None:
+        return None
+    return settings.db_path.parent / _model_cards.SNAPSHOT_NAME
 
 
 def _now() -> str:

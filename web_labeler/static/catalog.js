@@ -29,6 +29,10 @@
   let pastePayload = null;
   const viewArticles = document.getElementById("catalogViewArticles");
   const viewDecisions = document.getElementById("catalogViewDecisions");
+  const viewModelCards = document.getElementById("catalogViewModelCards");
+  const NOT_RECORDED = "nije zabeleženo";
+  let openCardFile = null;
+  let cardRetries = 0;
   const ARTICLE_FILTERS = [["", "Svi"], ["tracked", "Praćeno"], ["missing", "Mapiranje nedostaje"], ["pending", "Čeka odluku"],
     ["dormant", "Uspavano"], ["ignored", "Ignorisano"]];
   const DECISION_FILTERS = [["propose", "Predlozi"], ["ignore", "X odluke"], ["", "Sve odluke"]];
@@ -1016,6 +1020,174 @@
     body.replaceChildren(...nodes);
   }
 
+  // ---------------- Model cards (read only) ----------------
+
+  function shown(v, fmt) {
+    if (v === null || v === undefined || v === "") return NOT_RECORDED;
+    if (typeof v === "boolean") return v ? "da" : "ne";
+    return fmt ? fmt(v) : String(v);
+  }
+
+  function score(v) { return Number(v).toLocaleString("sr-RS", { minimumFractionDigits: 3, maximumFractionDigits: 3 }); }
+
+  function factRows(rows) {
+    const table = el("table", "catalogFactTable");
+    for (const [label, item, fmt] of rows) {
+      const tr = el("tr");
+      tr.append(el("th", "", label));
+      const td = el("td", item && item.value !== null && item.value !== undefined ? "" : "catalogMissing", shown(item && item.value, fmt));
+      if (item && item.source) td.title = `Izvor: ${item.source}`;
+      tr.append(td);
+      table.append(tr);
+    }
+    return table;
+  }
+
+  function cardSection(title, source, ...content) {
+    const box = el("section", "catalogCardSection");
+    box.append(el("h3", "", title));
+    if (source) box.append(el("div", "catalogSource", `Izvor: ${source}`));
+    box.append(...content);
+    return box;
+  }
+
+  function balanceSection(card) {
+    const nodes = [];
+    const cfg = card.balance_config;
+    if (cfg) {
+      const auto = cfg.auto || {};
+      const lines = [
+        ["Najmanje primera po klasi", { value: cfg.min_samples_per_class === "auto" ? "automatski" : cfg.min_samples_per_class }],
+        ["Cilj (percentil broja primera)", { value: auto.percentile !== undefined ? `P${auto.percentile}` : null }],
+        ["Cilj najmanje / najviše", { value: auto.min_target !== undefined ? `${auto.min_target} / ${auto.max_target}` : null }],
+        ["Najviše dodatih po klasi", { value: cfg.max_aug_per_class }],
+        ["Isecanje na deo kamere (ROI)", { value: cfg.roi_crop }],
+        ["Izmene na isečku", { value: cfg.roi_transforms && cfg.roi_transforms.length ? cfg.roi_transforms.join(", ") : null }],
+        ["Izmene na celoj slici", { value: cfg.global_transforms && cfg.global_transforms.length ? cfg.global_transforms.join(", ") : null }],
+      ];
+      const box = el("div");
+      box.append(el("div", "catalogSource", `Izvor: ${cfg.source}. Fajlovi: ${cfg.files.join(", ")}.`));
+      if (cfg.changed_after_training.length) {
+        box.append(el("div", "catalogNoDesc",
+          "Pažnja: posle ovog treninga menjano je: " + cfg.changed_after_training.map((c) => `${c.file} (${formatDate(c.changed)})`).join(", ")
+          + ". Vrednosti možda nisu iste kao u treningu."));
+      }
+      box.append(factRows(lines));
+      if (cfg.adaptive_strategy) {
+        const steps = cfg.adaptive_strategy.map((s) => s.threshold >= 1e9 ? `ostale ${Math.round(s.percent * 100)}%`
+          : `do ${s.threshold} primera ${Math.round(s.percent * 100)}%`);
+        box.append(el("div", "catalogSubhead", `Koliko se slika dodaje po veličini klase: ${steps.join(", ")}.`));
+      }
+      nodes.push(box);
+    } else {
+      nodes.push(el("div", "catalogMissing", `Podešavanje balansiranja: ${NOT_RECORDED}.`));
+    }
+    const plan = card.balance_plan;
+    if (plan) {
+      nodes.push(el("div", "catalogSubhead",
+        `Stvarno u treningu (izvor: ${plan.source}): ${shown(plan.real_images)} pravih slika, ${shown(plan.added_images)} dodatih.`));
+      const table = el("table", "catalogTable");
+      const head = el("tr");
+      for (const t of ["Klasa", "Dodato", "Train", "Val", "Eval"]) head.append(el("th", t === "Klasa" ? "" : "num", t));
+      table.append(head);
+      for (const r of plan.classes) {
+        const tr = el("tr");
+        tr.append(el("td", "", r.class));
+        for (const k of ["added", "train", "val", "eval"]) tr.append(el("td", "num", shown(r[k])));
+        table.append(tr);
+      }
+      nodes.push(table);
+    } else {
+      nodes.push(el("div", "catalogMissing", `Stvarni plan po klasi: ${NOT_RECORDED} (arhiva trening seta ne postoji).`));
+    }
+    const section = cardSection("Dodatno balansiranje dataseta", null, ...nodes);
+    section.classList.add("wide");
+    return section;
+  }
+
+  function renderCard(card) {
+    const t = card.training;
+    const wrap = el("div", "catalogModelCard");
+    if (card.problems.length) for (const p of card.problems) wrap.append(el("div", "catalogNoDesc", p));
+    wrap.append(cardSection("Osnovno", null, factRows([
+      ["Verzija", card.version], ["Datum treninga", card.date, formatDate], ["Arhitektura", card.architecture],
+      ["Početni model", card.base_model], ["Ultralytics", card.ultralytics], ["Fajl", { value: card.file }],
+    ])));
+    wrap.append(cardSection("Trening", null, factRows([
+      ["Epohe (planirano)", t.epochs], ["Odrađeno epoha", t.epochs_run], ["Najbolja epoha", t.best_epoch],
+      ["Patience", t.patience], ["Veličina slike", t.imgsz], ["Batch", t.batch], ["Optimizer", t.optimizer],
+      ["Početni lr", t.lr0], ["Završni lr (deo)", t.lrf], ["Kosinusni lr", t.cos_lr], ["Seed", t.seed],
+      ["Bez mozaika poslednjih epoha", t.close_mosaic],
+    ])));
+    const augLabels = { hsv_h: "Nijansa (hsv_h)", hsv_s: "Zasićenje (hsv_s)", hsv_v: "Svetlina (hsv_v)", degrees: "Rotacija",
+      translate: "Pomeranje", scale: "Razmera", shear: "Iskošenje", perspective: "Perspektiva", flipud: "Okret gore-dole",
+      fliplr: "Okret levo-desno", mosaic: "Mozaik", mixup: "Mixup", cutmix: "Cutmix", copy_paste: "Copy-paste",
+      auto_augment: "Auto augment", erasing: "Brisanje dela" };
+    wrap.append(cardSection("Augmentacije tokom treninga", null,
+      factRows(Object.keys(augLabels).map((k) => [augLabels[k], card.augmentations[k]]))));
+    wrap.append(balanceSection(card));
+    const names = el("details", "catalogGroup");
+    names.append(el("summary", "", `Klase (${shown(card.classes.count)})`));
+    names.append(card.classes.names.length ? el("div", "catalogSubhead", card.classes.names.join(", ")) : el("div", "catalogMissing", NOT_RECORDED));
+    wrap.append(cardSection("Podaci", card.classes.source ? `klase: ${card.classes.source}` : null, factRows([
+      ["Slika za trening", card.samples.train], ["Slika za proveru (val)", card.samples.val],
+    ]), names));
+    wrap.append(cardSection("Rezultati (val, najbolja epoha)", null, factRows([
+      ["Precision", card.results.precision, score], ["Recall", card.results.recall, score],
+      ["mAP50", card.results.mAP50, score], ["mAP50-95", card.results["mAP50-95"], score],
+    ])));
+    const promo = card.promotions.length
+      ? factRows(card.promotions.map((p) => [`Promovisan ${formatDate(p.date)}`,
+        { value: [p.before && p.before !== "(nije zabeleženo)" ? `umesto ${p.before}` : null, p.why].filter(Boolean).join(". ") || "razlog nije zabeležen", source: p.source }]))
+      : el("div", "catalogMissing", `Promocija: ${NOT_RECORDED}.`);
+    wrap.append(cardSection("Promocija", null, promo));
+    return wrap;
+  }
+
+  function versionsTable(entry, onPick) {
+    const table = el("table", "catalogTable selectable");
+    const head = el("tr");
+    for (const title of ["Verzija", "Datum", "Arhitektura", "Klase", "Train / Val", "mAP50", "Epohe"]) head.append(el("th", "", title));
+    table.append(head);
+    for (const c of entry.cards) {
+      const tr = el("tr", c.file === openCardFile ? "selected" : "");
+      tr.title = c.file;
+      tr.append(el("td", "", `${shown(c.version.value)}${c.live ? " (živi)" : ""}`), el("td", "", shown(c.date.value, formatDate)),
+        el("td", "", shown(c.architecture.value)), el("td", "num", shown(c.classes.count)),
+        el("td", "num", `${shown(c.samples.train.value)} / ${shown(c.samples.val.value)}`),
+        el("td", "num", shown(c.results.mAP50.value, score)),
+        el("td", "num", `${shown(c.training.epochs_run.value)} od ${shown(c.training.epochs.value)}`));
+      tr.onclick = () => onPick(c);
+      table.append(tr);
+    }
+    return table;
+  }
+
+  function renderModelCards(model, data) {
+    if (!data.snapshot) {
+      showMessage("Kartice modela se upravo prave. Stranica će se sama osvežiti za par sekundi.");
+      return;
+    }
+    const entry = data.snapshot.models.find((m) => m.model.toLowerCase() === model.toLowerCase());
+    if (!entry) { showMessage(`Za model ${model} nema fajlova modela na serveru.`); return; }
+    const card = entry.cards.find((c) => c.file === openCardFile) || entry.cards.find((c) => c.live) || entry.cards[0];
+    const title = el("h2", "catalogTitle", `${model}: ${card.live ? "živi model" : "prethodna verzija"} `);
+    title.append(el("span", "catalogCount", `${shown(card.version.value)}, ${shown(card.date.value, formatDate)}`));
+    const nodes = [title, el("div", "catalogSubhead",
+      `Samo za pregled. Puni se sama iz fajlova modela, evidencije i trening konfiguracije. Pređi mišem preko vrednosti da vidiš izvor. Osveženo ${formatTime(data.snapshot.built_at)}.`)];
+    if (data.refreshing) nodes.push(el("div", "catalogSubhead", "Fajlovi su se promenili, kartice se osvežavaju..."));
+    for (const w of entry.warnings) nodes.push(el("div", "catalogNoDesc", w));
+    if (!card.live) {
+      const back = el("button", "btn small", "Nazad na živi model");
+      back.onclick = () => { openCardFile = null; renderModelCards(model, data); };
+      nodes.push(back);
+    }
+    nodes.push(renderCard(card));
+    nodes.push(el("h3", "catalogVarHead", "Sve verzije"));
+    nodes.push(versionsTable(entry, (c) => { openCardFile = c.file; renderModelCards(model, data); body.scrollTop = 0; }));
+    body.replaceChildren(...nodes);
+  }
+
   async function loadClasses(keepFocus) {
     const no = ++requestNo;
     openArticle = null;
@@ -1054,6 +1226,19 @@
         if (no === requestNo) renderMiro(data);
         return;
       }
+      if (view === "modelcards") {
+        const model = modelSelect.value;
+        const data = await getJson("/api/catalog/model-cards");
+        if (no !== requestNo) return;
+        renderModelCards(model, data);
+        if (data.refreshing && cardRetries < 15) {
+          cardRetries += 1;
+          setTimeout(() => { if (no === requestNo && view === "modelcards") loadClasses(); }, 2000);
+        } else if (!data.refreshing) {
+          cardRetries = 0;
+        }
+        return;
+      }
       if (view === "report") {
         const data = await getJson("/api/catalog/source-report");
         if (no === requestNo) renderReport(data);
@@ -1078,8 +1263,11 @@
     viewEvidence.classList.toggle("primary", view === "evidence");
     viewArticles.classList.toggle("primary", view === "articles");
     viewDecisions.classList.toggle("primary", view === "decisions");
+    viewModelCards.classList.toggle("primary", view === "modelcards");
     selectedVariation = null;
-    modelSelect.closest("label").classList.toggle("hidden", !["classes", "miro", "noimage"].includes(view));
+    openCardFile = null;
+    cardRetries = 0;
+    modelSelect.closest("label").classList.toggle("hidden", !["classes", "miro", "noimage", "modelcards"].includes(view));
     loadClasses();
   }
 
@@ -1119,7 +1307,8 @@
     viewMiro.classList.toggle("hidden", !admin);
     viewEvidence.classList.toggle("hidden", !admin);
     viewDecisions.classList.toggle("hidden", !admin);
-    if (!admin && ["report", "miro", "evidence", "decisions"].includes(view)) setView("classes");
+    viewModelCards.classList.toggle("hidden", !admin);
+    if (!admin && ["report", "miro", "evidence", "decisions", "modelcards"].includes(view)) setView("classes");
     else if (openArticle !== null && !panel.classList.contains("hidden")) showArticle(openArticle);
     else if (!panel.classList.contains("hidden")) loadClasses();
   }
@@ -1137,7 +1326,9 @@
   viewDecisions.classList.toggle("hidden", roleSelect.value !== "admin");
   viewDecisions.onclick = () => setView("decisions");
   viewReport.onclick = () => setView("report");
-  modelSelect.onchange = () => { selectedClass = null; selectedVariation = null; loadClasses(); };
+  viewModelCards.classList.toggle("hidden", roleSelect.value !== "admin");
+  viewModelCards.onclick = () => setView("modelcards");
+  modelSelect.onchange = () => { selectedClass = null; selectedVariation = null; openCardFile = null; loadClasses(); };
   viewClasses.onclick = () => setView("classes");
   viewUnclassified.onclick = () => setView("unclassified");
   tab.onclick = () => { setOpen(true); refresh(); };

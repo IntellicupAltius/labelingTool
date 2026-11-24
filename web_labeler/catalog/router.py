@@ -3,20 +3,54 @@ from __future__ import annotations
 
 import base64
 import binascii
-
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 
 from web_labeler.catalog import store
+from web_labeler.catalog import model_cards as _model_cards
 from web_labeler.catalog.examples import ExampleNotFound
 from web_labeler.catalog.store import (CatalogError, CatalogSettings, CatalogUnavailable, NotAllowed, UnknownArticle,
                                        UnknownEvidence, UnknownModel, UnknownPage)
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_refresh: Dict[str, Any] = {"proc": None}
+
+
+def start_model_cards_refresh(settings: CatalogSettings) -> bool:
+    """Rebuild the model cards in a separate process (never in the web process). False when one already runs."""
+    proc = _refresh["proc"]
+    if proc is not None and proc.poll() is None:
+        return False
+    target = store.model_cards_snapshot_path(settings)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target.with_suffix(".log"), "ab") as log:
+        _refresh["proc"] = subprocess.Popen([sys.executable, "-m", "web_labeler.catalog", "model-cards"], cwd=str(_REPO_ROOT),
+                                            stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+    return True
+
+
 def build_catalog_router(settings: CatalogSettings) -> APIRouter:
     router = APIRouter(prefix="/api/catalog")
+
+    @router.get("/model-cards")
+    def catalog_model_cards() -> Dict[str, Any]:
+        target = store.model_cards_snapshot_path(settings)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Kartice modela nisu podešene na ovom serveru.")
+        snapshot = _model_cards.read_snapshot(target)
+        stale = snapshot is None or snapshot.get("fingerprint") != _model_cards.fingerprint(settings.model_cards)
+        if stale:
+            try:
+                start_model_cards_refresh(settings)
+            except OSError:
+                pass
+        return {"refreshing": stale, "snapshot": snapshot}
 
     @router.get("/status")
     def catalog_status() -> Dict[str, Any]:
