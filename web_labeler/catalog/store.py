@@ -809,7 +809,8 @@ def _evidence_by_identity(conn: sqlite3.Connection, venue: str) -> Dict[int, Dic
 
 def mapping_text(v: _decisions.Variation) -> str:
     if v.state == "ignored":
-        return "ne pratimo"
+        why = _decisions.IGNORE_WHY.get(v.ignore_why or "")
+        return f"ne pratimo: {why}" if why else "ne pratimo"
     if not v.links:
         return "mapiranje nedostaje"
     return ", ".join(f"{m}.{c}" for m, c in v.links)
@@ -1425,7 +1426,12 @@ def _clean_change(settings: CatalogSettings, conn: sqlite3.Connection, venue: st
             raise CatalogError("Artikal je već deo tog artikla.")
         return {"into": into}
     if kind == "ignore":
-        return {}
+        why = payload.get("why")
+        if why in (None, ""):
+            return {}
+        if why not in _decisions.IGNORE_WHY:
+            raise CatalogError("Nepoznat razlog za X.")
+        return {"why": why}
     raise CatalogError(f"Nepoznata vrsta odluke: {kind}")
 
 
@@ -1541,7 +1547,8 @@ def _describe(kind: str, payload: Mapping[str, Any], article_names: Mapping[int,
     if kind == "provisional":
         return f"privremeno (*): {payload['provisional']}" if payload.get("provisional") else "skinuta zvezdica"
     if kind == "ignore":
-        return "ne pratimo"
+        why = _decisions.IGNORE_WHY.get(payload.get("why") or "")
+        return f"ne pratimo ({why})" if why else "ne pratimo"
     if kind == "merge":
         return f"spojen sa artiklom {article_names.get(payload.get('into'), payload.get('into'))}"
     if kind == "propose":
@@ -1556,7 +1563,8 @@ def _miro_text(kind: str, subject: str, code: Optional[str], payload: Mapping[st
         return None
     who = f"POS artikal {subject}" + (f" (šifra {code})" if code else "")
     body = {"classes": f"od {_fmt_day(valid_from)} ide u {_describe(kind, payload, article_names)}",
-            "ignore": f"od {_fmt_day(valid_from)} se ne prati",
+            "ignore": (f"od {_fmt_day(valid_from)} je izbačen iz asortimana i ne prati se" if payload.get("why") == "assortment"
+                       else f"od {_fmt_day(valid_from)} se ne prati"),
             "merge": f"od {_fmt_day(valid_from)} je isti artikal kao {article_names.get(payload.get('into'), payload.get('into'))}"}[kind]
     return f"{who} {body}." + (f" Razlog: {reason}." if reason else "")
 
@@ -1728,7 +1736,8 @@ def _release_sources(conn: sqlite3.Connection, venue: str) -> _releases.ReleaseS
         elif d.kind == "ignore" and d.article_id is not None:
             by_article.setdefault(_decisions.resolve(d.article_id, merges), []).append(info[d.decision_id])
     variations = [_releases.VariationState(v.identity_id, v.article_id, v.code, v.name, v.state, list(v.links),
-                                           by_identity.get(v.identity_id, []) + by_article.get(v.article_id, []))
+                                           by_identity.get(v.identity_id, []) + by_article.get(v.article_id, []),
+                                           v.ignore_why)
                   for v in current.values()]
     classes: Dict[str, List[str]] = {}
     for model, name in conn.execute("SELECT model_key, name FROM classes WHERE venue_id = ? ORDER BY model_key, class_id", (venue,)):

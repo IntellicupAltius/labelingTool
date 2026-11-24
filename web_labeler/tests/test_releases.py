@@ -187,6 +187,20 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(all(c["ok"] for c in nxt["checks"]), nxt["checks"])
         self.assertIn("Casa Vina: više se ne prati (ide na listu za ignorisanje).", [c["text"] for c in nxt["changes"]])
 
+    def test_left_the_menu_stays_listed_and_goes_to_its_own_blacklist_part(self):
+        self.decide("ignore", "Casa Vina", payload={"why": "assortment"})
+        self.decide("ignore", "NEW DRINK")
+        self.assertEqual(self.identity("Casa Vina")["mapping"], "ne pratimo: izbačeno iz asortimana")
+        self.assertEqual(self.identity("NEW DRINK")["mapping"], "ne pratimo")
+        self.publish()
+        lines = (self.tmp / "releases" / "0001" / R.BLACKLIST_FILE).read_text().splitlines()
+        self.assertEqual(lines[lines.index(R.DECISIONS_SECTION) + 1], "NEW DRINK")
+        self.assertEqual(lines[lines.index(R.ASSORTMENT_SECTION) + 1], "Casa Vina")
+        history = catalog.article_card(self.settings, self.identity("Casa Vina")["article_id"])["history"]
+        self.assertTrue(any("izbačen iz asortimana" in (h.get("miro_text") or "") for h in history), history)
+        with self.assertRaises(catalog.CatalogError):
+            self.decide("ignore", "Niska", payload={"why": "nesto"})
+
     def test_duplicate_codes_and_conflicting_decisions_block(self):
         variations = [R.VariationState(1, 10, "0100", "A", "tracked", [("glasses", "CASA")], []),
                       R.VariationState(2, 11, "0100", "B", "tracked", [("glasses", "CASA")], []),

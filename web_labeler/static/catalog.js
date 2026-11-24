@@ -850,6 +850,12 @@
       await decide({ kind: "ignore", article_id: card.home_article_id, reason });
     });
     actions.append(x);
+    const gone = el("button", "btn", "Izbačeno iz asortimana");
+    gone.title = "Bilo je u ponudi, više se ne prodaje. Ostaje u Katalogu sa istorijom, ne prati se.";
+    gone.onclick = () => askReason(formSlot, "Napomena (nije obavezno), npr. skinuto sa menija u aprilu", async (reason) => {
+      await decide({ kind: "ignore", article_id: card.home_article_id, reason, payload: { why: "assortment" } });
+    });
+    actions.append(gone);
     if (isAdmin()) {
       const merge = el("button", "btn", "Spoji sa…");
       merge.onclick = () => mergeForm(formSlot, card);

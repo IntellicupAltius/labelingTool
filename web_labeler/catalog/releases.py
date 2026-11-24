@@ -30,6 +30,7 @@ CLASS_LIST_DIR = "class_lists"
 TRAINING_DIR = "training_classes"
 DOCUMENTED_DIR = "documented_classes"
 DECISIONS_SECTION = "# Katalog: ne pratimo (ručne odluke)"
+ASSORTMENT_SECTION = "# Katalog: izbačeno iz asortimana"
 _YAML_SPECIAL = ":{}[]|>&*!,'\""
 
 
@@ -50,6 +51,7 @@ class VariationState:
     state: str                      # tracked | ignored | pending | dormant
     links: List[Tuple[str, str]]
     decisions: List[Dict[str, Any]]  # decisions in force that set this (classes or ignore); empty = sources only
+    ignore_why: Optional[str] = None   # "assortment" = left the menu; None = plain X
 
 
 @dataclass
@@ -116,6 +118,7 @@ def generate(src: ReleaseSources) -> Generated:
     blacklist = list(src.blacklist_lines)
     listed = {norm(l) for l in blacklist if not _is_comment(l)}
     extra_ignored = [k for k in dict.fromkeys(skip_keys) if norm(k) not in listed]
+    left_menu: List[str] = []
     out = Generated({})
 
     by_name: Dict[str, List[VariationState]] = {}
@@ -139,7 +142,7 @@ def generate(src: ReleaseSources) -> Generated:
         blacklist = [l for l in blacklist if _is_comment(l) or norm(l) != key]
         extra_ignored = [k for k in extra_ignored if norm(k) != key]
         if want == ("ignore",):
-            extra_ignored.append(group[0].name.strip())
+            (left_menu if any(v.ignore_why == "assortment" for v in group) else extra_ignored).append(group[0].name.strip())
         elif want:
             mapping[display] = list(want)
         decisions = [d for v in group for d in v.decisions]
@@ -147,6 +150,8 @@ def generate(src: ReleaseSources) -> Generated:
                             "decisions": sorted({d["id"]: d for d in decisions}.values(), key=lambda d: d["id"])})
     if extra_ignored:
         blacklist += ["", DECISIONS_SECTION] + extra_ignored
+    if left_menu:
+        blacklist += ["", ASSORTMENT_SECTION] + left_menu
 
     files = {MAP_FILE: _map_text(mapping), BLACKLIST_FILE: HEADER + "\n".join(blacklist) + "\n"}
     for model, names in sorted(src.classes.items()):

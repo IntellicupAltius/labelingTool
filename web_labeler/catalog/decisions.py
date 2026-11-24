@@ -13,6 +13,7 @@ EFFECT_KINDS = ("classes", "provisional", "ignore", "merge")
 KINDS = EFFECT_KINDS + ("revoke", "propose", "reject")
 LABELER_KINDS = {"ignore", "propose"}
 MODES = ("fallback", "any")
+IGNORE_WHY = {"assortment": "izbačeno iz asortimana"}  # X with a kind of reason; no kind = plain X
 
 KIND_LABELS = {"classes": "Promena klase", "provisional": "Zvezdica", "ignore": "Ne pratimo (X)", "merge": "Spajanje artikala",
                "revoke": "Poništavanje", "propose": "Predlog", "reject": "Odbijen predlog"}
@@ -34,6 +35,7 @@ class Variation:
     decided: bool = False
     source_article_id: int = 0
     last_decision: int = 0
+    ignore_why: Optional[str] = None
     awaiting_release: bool = False
 
 
@@ -99,6 +101,7 @@ def apply(variations: Dict[int, Variation], decisions: List[Decision], as_of: st
             for v in variations.values():
                 if v.article_id == target:
                     v.state, v.links, v.decided = "ignored", [], True
+                    v.ignore_why = d.payload.get("why") or None
                     v.last_decision = max(v.last_decision, d.decision_id)
         elif d.kind == "merge":
             for v in variations.values():
