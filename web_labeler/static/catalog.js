@@ -27,6 +27,16 @@
   let evidenceFilter = "pending";
   let selectedVariation = null;
   let pastePayload = null;
+  const viewArticles = document.getElementById("catalogViewArticles");
+  const viewDecisions = document.getElementById("catalogViewDecisions");
+  const ARTICLE_FILTERS = [["", "Svi"], ["tracked", "Praćeno"], ["missing", "Mapiranje nedostaje"], ["pending", "Čeka odluku"],
+    ["dormant", "Uspavano"], ["ignored", "Ignorisano"]];
+  const DECISION_FILTERS = [["propose", "Predlozi"], ["ignore", "X odluke"], ["", "Sve odluke"]];
+  let articleQuery = "";
+  let articleFilter = "";
+  let decisionFilter = "propose";
+  let openArticle = null;
+  let classChoices = null;
   const MIRO_FILTERS = [["all", "Sve"], ["waiting", "Čeka potvrdu"], ["confirmed", "Potvrđeno"], ["none", "Bez klase"]];
   let miroFilter = "waiting";
   let exampleSeed = Math.floor(Math.random() * 1e9);
@@ -123,7 +133,12 @@
         if (tag === "privremeno" && v.provisional_reason) chip.title = v.provisional_reason;
         tags.append(chip);
       }
-      row.append(el("td", "", v.name), el("td", "", v.code || "nema"),
+      const nameCell = el("td");
+      const link = el("button", "catalogLink", v.name);
+      link.title = "Otvori karticu artikla";
+      link.onclick = (e) => { e.stopPropagation(); showArticle(v.article_id); };
+      nameCell.append(link);
+      row.append(nameCell, el("td", "", v.code || "nema"),
         el("td", "num", v.code ? formatQty(v.sold) : "nema"), el("td", "", formatDate(v.last_sale)), tags, imageCell(v));
       if (context) {
         if (selectedVariation && selectedVariation.identity_id === v.identity_id) row.classList.add("selected");
@@ -536,6 +551,381 @@
     updateHint();
   }
 
+  function isAdmin() { return roleSelect.value === "admin"; }
+
+  function person() {
+    const name = personInput.value.trim();
+    if (!name) { personInput.focus(); throw new Error("Upiši svoje ime gore desno."); }
+    return name;
+  }
+
+  async function decide(body) {
+    return postJson("/api/catalog/decisions", { ...body, actor: person(), role: roleSelect.value });
+  }
+
+  async function loadChoices() {
+    if (!classChoices) classChoices = (await getJson("/api/catalog/class-choices")).models;
+    return classChoices;
+  }
+
+  function stateTag(v) {
+    return el("span", v.state === "tracked" ? "catalogTag" : "catalogTag warn", v.state_label);
+  }
+
+  function mappingCell(v) {
+    const td = el("td", v.state !== "ignored" && !v.classes.length ? "catalogMissing" : "", v.mapping);
+    return td;
+  }
+
+  function renderArticles(data) {
+    const title = el("h2", "catalogTitle", "Artikli ");
+    title.append(el("span", "catalogCount", `${data.items.length} prikazano, mapiranje nedostaje kod ${data.counts.missing}`));
+    const search = el("input", "catalogSearch");
+    search.type = "search";
+    search.placeholder = "Traži po imenu ili šifri";
+    search.value = articleQuery;
+    let timer = null;
+    search.oninput = () => { clearTimeout(timer); timer = setTimeout(() => { articleQuery = search.value; loadClasses(true); }, 250); };
+    const filters = el("div", "catalogViews");
+    for (const [key, label] of ARTICLE_FILTERS) {
+      const count = key === "" ? "" : ` (${data.counts[key]})`;
+      const b = el("button", key === articleFilter ? "btn primary small" : "btn small", label + count);
+      b.onclick = () => { articleFilter = key; loadClasses(); };
+      filters.append(b);
+    }
+    const table = el("table", "catalogTable");
+    const head = el("tr");
+    for (const t of ["Artikal", "Šifra", "Prodato", "Poslednja prodaja", "Stanje", "Mapiranje", "Oznake"]) head.append(el("th", t === "Prodato" ? "num" : "", t));
+    const thead = el("thead");
+    thead.append(head);
+    const tbody = el("tbody");
+    for (const v of data.items) {
+      const row = el("tr", "catalogClickRow");
+      const tags = el("td");
+      v.tags.forEach((t) => tags.append(el("span", t === "privremeno" ? "catalogTag warn" : "catalogTag", t)));
+      row.append(el("td", "", v.name), el("td", "", v.code || "nema"), el("td", "num", v.code ? formatQty(v.sold) : "nema"),
+        el("td", "", formatDate(v.last_sale)), el("td"), mappingCell(v), tags);
+      row.children[4].append(stateTag(v));
+      row.onclick = () => showArticle(v.article_id);
+      tbody.append(row);
+    }
+    table.append(thead, tbody);
+    const intro = el("div", "catalogSubhead", "Svi POS artikli lokala. Klik na red otvara karticu artikla.");
+    const nodes = [title, intro, search, filters, data.items.length ? table : el("div", "catalogHint", "Nema artikala za ovaj izbor.")];
+    body.replaceChildren(...nodes);
+    search.focus();
+    search.setSelectionRange(search.value.length, search.value.length);
+  }
+
+  function historyItem(h, card) {
+    const item = el("div", `catalogDecision${h.revoked ? " revoked" : ""}`);
+    const head = el("div", "catalogDecisionHead");
+    head.append(el("strong", "", h.kind_label), document.createTextNode(` ${h.subject}${h.code ? `, šifra ${h.code}` : ""}: ${h.text}`));
+    item.append(head);
+    const meta = `${formatTime(h.created_at)}, ${h.actor} (${h.role === "admin" ? "admin" : "labeler"}), važi od ${formatDate(h.valid_from)}`;
+    item.append(el("div", "catalogSubhead", meta));
+    if (h.reason) item.append(el("div", "", `Zašto: ${h.reason}`));
+    if (h.status_label) item.append(el("span", h.status === "pending" ? "catalogTag warn" : "catalogTag", h.status_label));
+    if (h.revoked) item.append(el("span", "catalogTag warn", `poništeno (odluka #${h.revoked_by})`));
+    if (h.future) item.append(el("span", "catalogTag", "još ne važi"));
+    if (isAdmin() && h.miro_text) {
+      const box = el("div", "catalogMiroText");
+      box.append(el("div", "catalogSubhead", "Tekst za Miro i Word (do zaključavanja):"), el("div", "", h.miro_text));
+      const copy = el("button", "btn small", "Kopiraj");
+      copy.onclick = () => navigator.clipboard.writeText(h.miro_text).then(() => showToast("Tekst je kopiran."), () => showToast("Kopiranje nije uspelo, označi tekst ručno."));
+      box.append(copy);
+      item.append(box);
+    }
+    if (isAdmin()) {
+      const buttons = el("div", "catalogMiroButtons");
+      const msg = el("span", "catalogSubhead");
+      if (["classes", "provisional", "ignore", "merge"].includes(h.kind) && !h.revoked) {
+        const undo = el("button", "btn small", "Poništi");
+        undo.onclick = () => askReason(item, "Zašto poništavaš?", async (reason) => {
+          await decide({ kind: "revoke", target_id: h.decision_id, reason });
+        });
+        buttons.append(undo);
+      }
+      if (h.kind === "propose" && h.status === "pending") {
+        const change = h.payload.change || {};
+        const applyBtn = (label, star) => {
+          const b = el("button", star ? "btn small" : "btn primary small", label);
+          b.onclick = () => askReason(item, star ? "Zašto primenjuješ i šta nije sigurno?" : "Zašto primenjuješ?", async (reason) => {
+            const payload = { ...change, from_proposal: h.decision_id };
+            if (star) payload.provisional = reason;
+            await decide({ kind: h.payload.kind, identity_id: h.identity_id, article_id: h.article_id, payload, reason });
+          });
+          return b;
+        };
+        buttons.append(applyBtn("Primeni", false));
+        if (h.payload.kind === "classes") buttons.append(applyBtn("Primeni sa zvezdicom", true));
+        const no = el("button", "btn small", "Odbij");
+        no.onclick = () => askReason(item, "Zašto odbijaš?", async (reason) => {
+          await decide({ kind: "reject", target_id: h.decision_id, reason });
+        });
+        buttons.append(no);
+      }
+      if (card === undefined && h.article_id) {
+        const open = el("button", "btn small", "Otvori karticu");
+        open.onclick = () => showArticle(h.article_id);
+        buttons.append(open);
+      }
+      if (buttons.children.length) { buttons.append(msg); item.append(buttons); }
+    } else if (card === undefined && h.article_id) {
+      const open = el("button", "btn small", "Otvori karticu");
+      open.onclick = () => showArticle(h.article_id);
+      item.append(open);
+    }
+    return item;
+  }
+
+  function askReason(container, label, action) {
+    container.querySelectorAll(".catalogAsk").forEach((x) => x.remove());
+    const box = el("div", "catalogAsk");
+    const input = el("input", "catalogReason");
+    input.placeholder = label;
+    const ok = el("button", "btn primary small", "Sačuvaj");
+    const cancel = el("button", "btn small", "Odustani");
+    const msg = el("span", "catalogPasteMsg");
+    ok.onclick = async () => {
+      ok.disabled = true;
+      try { await action(input.value.trim()); showToast("Sačuvano."); refreshAfterDecision(); }
+      catch (e) { msg.textContent = e.message; ok.disabled = false; }
+    };
+    cancel.onclick = () => box.remove();
+    box.append(input, ok, cancel, msg);
+    container.append(box);
+    input.focus();
+  }
+
+  function refreshAfterDecision() {
+    if (openArticle !== null) showArticle(openArticle);
+    else loadClasses();
+  }
+
+  function linkEditor(model, start) {
+    const box = el("div", "catalogLinkEditor");
+    const chosen = [...start];
+    const chips = el("div", "catalogChips");
+    const draw = () => {
+      chips.replaceChildren();
+      if (!chosen.length) chips.append(el("span", "catalogHint small", "Bez klase (mapiranje nedostaje)"));
+      chosen.forEach((c, i) => {
+        const chip = el("span", "catalogChip", `${i === 0 ? "glavna" : "rezerva"}: ${c.model}.${c.class}`);
+        const x = el("button", "", "×");
+        x.onclick = () => { chosen.splice(i, 1); draw(); };
+        chip.append(x);
+        chips.append(chip);
+      });
+    };
+    const modelPick = el("select");
+    const classPick = el("select");
+    const fillClasses = () => {
+      classPick.replaceChildren(new Option("Izaberi klasu…", ""), ...(classChoices[modelPick.value] || []).map((n) => new Option(n, n)));
+    };
+    modelPick.append(...Object.keys(classChoices).map((m) => new Option(m, m)));
+    modelPick.value = model && classChoices[model] ? model : Object.keys(classChoices)[0];
+    modelPick.onchange = fillClasses;
+    fillClasses();
+    classPick.onchange = () => {
+      if (classPick.value && !chosen.some((c) => c.model === modelPick.value && c.class === classPick.value)) {
+        chosen.push({ model: modelPick.value, class: classPick.value });
+      }
+      classPick.value = "";
+      draw();
+    };
+    draw();
+    const pickers = el("div", "catalogMiroButtons");
+    pickers.append(el("span", "catalogSubhead", "Dodaj klasu u modelu:"), modelPick, classPick);
+    box.append(chips, pickers);
+    return { box, links: () => chosen };
+  }
+
+  function variationForm(container, v, proposal) {
+    container.querySelectorAll(".catalogForm").forEach((x) => x.remove());
+    const form = el("div", "catalogForm");
+    form.append(el("h4", "", proposal ? `Predlog promene za ${v.name}` : `Promena klase za ${v.name}`));
+    const start = v.classes.map((c) => { const [m, ...rest] = c.split("."); return { model: m, class: rest.join(".") }; });
+    const editor = linkEditor(start.length ? start[0].model : null, start);
+    form.append(editor.box);
+    const mode = el("select");
+    mode.append(new Option("Prvo glavna, pa rezerva (fallback)", "fallback"), new Option("Bilo koja od navedenih (any)", "any"));
+    mode.value = v.mapping_mode === "any" ? "any" : "fallback";
+    const star = el("input", "catalogReason");
+    star.placeholder = "Zvezdica: šta nije sigurno (prazno = bez zvezdice)";
+    star.value = v.provisional_reason || "";
+    const from = el("input");
+    from.type = "date";
+    from.value = new Date().toISOString().slice(0, 10);
+    const reason = el("input", "catalogReason");
+    reason.placeholder = "Zašto (obavezno)";
+    const fields = el("div", "catalogFormGrid");
+    fields.append(el("label", "", "Ako ima više klasa"), mode, el("label", "", "Zvezdica"), star);
+    if (!proposal) fields.append(el("label", "", "Važi od"), from);
+    fields.append(el("label", "", "Zašto"), reason);
+    const msg = el("span", "catalogPasteMsg");
+    const save = el("button", "btn primary", proposal ? "Pošalji predlog" : "Sačuvaj odluku");
+    const cancel = el("button", "btn", "Odustani");
+    cancel.onclick = () => form.remove();
+    save.onclick = async () => {
+      save.disabled = true;
+      const change = { links: editor.links(), mode: mode.value, provisional: star.value.trim() || null };
+      try {
+        if (proposal) await decide({ kind: "propose", identity_id: v.identity_id, payload: { kind: "classes", change }, reason: reason.value });
+        else await decide({ kind: "classes", identity_id: v.identity_id, payload: change, reason: reason.value, valid_from: from.value });
+        showToast(proposal ? "Predlog je poslat adminu." : "Odluka je sačuvana. Čeka sledeće izdanje.");
+        refreshAfterDecision();
+      } catch (e) { msg.textContent = e.message; save.disabled = false; }
+    };
+    const buttons = el("div", "catalogMiroButtons");
+    buttons.append(save, cancel, msg);
+    form.append(fields, buttons);
+    container.append(form);
+  }
+
+  function mergeForm(container, card) {
+    container.querySelectorAll(".catalogForm").forEach((x) => x.remove());
+    const form = el("div", "catalogForm");
+    form.append(el("h4", "", `Spoji ${card.name} sa postojećim artiklom`),
+      el("div", "catalogSubhead", "Koristi kad je isto piće dobilo novu šifru ili novo ime u kasi."));
+    const search = el("input", "catalogSearch");
+    search.placeholder = "Traži artikal po imenu ili šifri";
+    const results = el("div", "catalogResults");
+    let target = null;
+    const reason = el("input", "catalogReason");
+    reason.placeholder = "Zašto (obavezno)";
+    const msg = el("span", "catalogPasteMsg");
+    let timer = null;
+    search.oninput = () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        if (search.value.trim().length < 2) { results.replaceChildren(); return; }
+        const data = await getJson(`/api/catalog/articles?q=${encodeURIComponent(search.value.trim())}`);
+        const seen = new Set();
+        results.replaceChildren(...data.items.filter((v) => v.article_id !== card.home_article_id && !seen.has(v.article_id) && seen.add(v.article_id))
+          .slice(0, 12).map((v) => {
+            const b = el("button", "catalogResult", `${v.name} (šifra ${v.code || "nema"}, ${v.mapping})`);
+            b.onclick = () => { target = v; results.querySelectorAll(".selected").forEach((x) => x.classList.remove("selected")); b.classList.add("selected"); };
+            return b;
+          }));
+      }, 250);
+    };
+    const save = el("button", "btn primary", "Spoji");
+    save.onclick = async () => {
+      if (!target) { msg.textContent = "Izaberi artikal sa spiska."; return; }
+      save.disabled = true;
+      try {
+        await decide({ kind: "merge", article_id: card.home_article_id, payload: { into: target.article_id }, reason: reason.value });
+        showToast("Artikli su spojeni. Čeka sledeće izdanje.");
+        showArticle(target.article_id);
+      } catch (e) { msg.textContent = e.message; save.disabled = false; }
+    };
+    const cancel = el("button", "btn", "Odustani");
+    cancel.onclick = () => form.remove();
+    const buttons = el("div", "catalogMiroButtons");
+    buttons.append(save, cancel, msg);
+    form.append(search, results, reason, buttons);
+    container.append(form);
+  }
+
+  function renderArticle(card) {
+    const back = el("button", "btn small", "← Nazad");
+    back.onclick = () => { openArticle = null; loadClasses(); };
+    const title = el("h2", "catalogTitle", card.home_name);
+    const nodes = [back, title];
+    if (card.merged_into) nodes.push(el("div", "catalogSubhead", `Artikal ${card.name} je spojen sa ovim artiklom.`));
+    const actions = el("div", "catalogMiroButtons");
+    const formSlot = el("div");
+    const x = el("button", "btn", "X Ne pratimo");
+    x.title = "Za hranu, cigarete i sve što kamera ne treba da prati";
+    x.onclick = () => askReason(formSlot, "Napomena (nije obavezno), npr. hrana", async (reason) => {
+      await decide({ kind: "ignore", article_id: card.home_article_id, reason });
+    });
+    actions.append(x);
+    if (isAdmin()) {
+      const merge = el("button", "btn", "Spoji sa…");
+      merge.onclick = () => mergeForm(formSlot, card);
+      actions.append(merge);
+    }
+    nodes.push(actions, formSlot);
+    nodes.push(el("h3", "catalogVarHead", `POS varijacije (${card.variations.length})`));
+    const table = el("table", "catalogTable");
+    const head = el("tr");
+    for (const t of ["Ime u kasi", "Šifra", "Prodato", "Prvi put", "Poslednji put", "Stanje", "Mapiranje", "Oznake", "Slika", ""]) head.append(el("th", t === "Prodato" ? "num" : "", t));
+    const thead = el("thead");
+    thead.append(head);
+    const tbody = el("tbody");
+    for (const v of card.variations) {
+      const row = el("tr");
+      const tags = el("td");
+      v.tags.forEach((t) => {
+        const chip = el("span", t === "privremeno" ? "catalogTag warn" : "catalogTag", t);
+        if (t === "privremeno" && v.provisional_reason) chip.title = v.provisional_reason;
+        tags.append(chip);
+      });
+      const mapping = mappingCell(v);
+      if (v.mode_label) mapping.append(el("div", "catalogSubhead", v.mode_label));
+      const act = el("td");
+      const change = el("button", "btn small", isAdmin() ? "Promeni klasu" : "Predloži promenu");
+      change.onclick = async () => { await loadChoices(); variationForm(formSlot, v, !isAdmin()); formSlot.scrollIntoView({ block: "nearest" }); };
+      act.append(change);
+      row.append(el("td", "", v.name), el("td", "", v.code || "nema"), el("td", "num", v.code ? formatQty(v.sold) : "nema"),
+        el("td", "", formatDate(v.first_seen)), el("td", "", formatDate(v.last_seen)), el("td"), mapping, tags, imageCell(v), act);
+      row.children[5].append(stateTag(v));
+      tbody.append(row);
+    }
+    table.append(thead, tbody);
+    nodes.push(table);
+    if (card.images.length) {
+      nodes.push(el("h3", "catalogVarHead", "Slike"));
+      const grid = el("div", "catalogExampleRow");
+      card.images.forEach((img) => {
+        const fig = el("figure", "catalogExample");
+        const pic = el("img");
+        pic.src = img.url;
+        pic.onclick = () => openViewer(img.url, `${img.source_label}: ${img.name}`);
+        const cap = el("figcaption");
+        cap.append(sourceBadge(img.source_label), document.createTextNode(` ${img.status_label}`));
+        fig.append(pic, cap);
+        grid.append(fig);
+      });
+      nodes.push(grid);
+    }
+    nodes.push(el("h3", "catalogVarHead", `Istorija odluka (${card.history.length})`));
+    if (!card.history.length) nodes.push(el("div", "catalogHint small", "Još nema ručnih odluka. Stanje dolazi iz POS izveštaja i mape."));
+    card.history.forEach((h) => nodes.push(historyItem(h, card)));
+    body.replaceChildren(...nodes);
+  }
+
+  async function showArticle(articleId) {
+    const no = ++requestNo;
+    openArticle = articleId;
+    body.replaceChildren(el("div", "catalogHint", "Učitavam…"));
+    try {
+      const card = await getJson(`/api/catalog/articles/${articleId}`);
+      if (no === requestNo) renderArticle(card);
+    } catch (e) {
+      if (no === requestNo) showMessage(e.message);
+    }
+  }
+
+  function renderDecisions(data) {
+    const title = el("h2", "catalogTitle", "Odluke ");
+    const pending = data.items.filter((d) => d.kind === "propose" && d.status === "pending").length;
+    title.append(el("span", "catalogCount", decisionFilter === "propose" ? `${pending} predloga čeka odluku` : `${data.items.length} zapisa`));
+    const intro = el("div", "catalogSubhead", "Ništa se ne briše. Promena ili poništavanje pravi novi zapis, a odluke čekaju sledeće izdanje i ne menjaju produkciju.");
+    const filters = el("div", "catalogViews");
+    for (const [key, label] of DECISION_FILTERS) {
+      const b = el("button", key === decisionFilter ? "btn primary small" : "btn small", label);
+      b.onclick = () => { decisionFilter = key; loadClasses(); };
+      filters.append(b);
+    }
+    const list = el("div", "catalogDecisionList");
+    data.items.forEach((h) => list.append(historyItem(h)));
+    if (!data.items.length) list.append(el("div", "catalogHint", "Nema zapisa."));
+    body.replaceChildren(title, intro, filters, list);
+  }
+
   async function showVariations(model, className, detail, button) {
     const no = ++requestNo;
     body.querySelectorAll(".catalogList .selected").forEach((b) => b.classList.remove("selected"));
@@ -626,9 +1016,23 @@
     body.replaceChildren(...nodes);
   }
 
-  async function loadClasses() {
+  async function loadClasses(keepFocus) {
     const no = ++requestNo;
+    openArticle = null;
     try {
+      if (view === "articles") {
+        const params = new URLSearchParams();
+        if (articleQuery.trim()) params.set("q", articleQuery.trim());
+        if (articleFilter) params.set("state", articleFilter);
+        const data = await getJson(`/api/catalog/articles?${params}`);
+        if (no === requestNo) renderArticles(data);
+        return;
+      }
+      if (view === "decisions") {
+        const data = await getJson(`/api/catalog/decisions${decisionFilter ? `?kind=${decisionFilter}` : ""}`);
+        if (no === requestNo) renderDecisions(data);
+        return;
+      }
       if (view === "unclassified") {
         const data = await getJson("/api/catalog/unclassified");
         if (no === requestNo) renderUnclassified(data);
@@ -672,6 +1076,8 @@
     viewMiro.classList.toggle("primary", view === "miro");
     viewNoImage.classList.toggle("primary", view === "noimage");
     viewEvidence.classList.toggle("primary", view === "evidence");
+    viewArticles.classList.toggle("primary", view === "articles");
+    viewDecisions.classList.toggle("primary", view === "decisions");
     selectedVariation = null;
     modelSelect.closest("label").classList.toggle("hidden", !["classes", "miro", "noimage"].includes(view));
     loadClasses();
@@ -712,7 +1118,9 @@
     viewReport.classList.toggle("hidden", !admin);
     viewMiro.classList.toggle("hidden", !admin);
     viewEvidence.classList.toggle("hidden", !admin);
-    if (!admin && ["report", "miro", "evidence"].includes(view)) setView("classes");
+    viewDecisions.classList.toggle("hidden", !admin);
+    if (!admin && ["report", "miro", "evidence", "decisions"].includes(view)) setView("classes");
+    else if (openArticle !== null && !panel.classList.contains("hidden")) showArticle(openArticle);
     else if (!panel.classList.contains("hidden")) loadClasses();
   }
   roleSelect.onchange = () => {
@@ -725,6 +1133,9 @@
   viewEvidence.classList.toggle("hidden", roleSelect.value !== "admin");
   viewEvidence.onclick = () => setView("evidence");
   viewNoImage.onclick = () => setView("noimage");
+  viewArticles.onclick = () => setView("articles");
+  viewDecisions.classList.toggle("hidden", roleSelect.value !== "admin");
+  viewDecisions.onclick = () => setView("decisions");
   viewReport.onclick = () => setView("report");
   modelSelect.onchange = () => { selectedClass = null; selectedVariation = null; loadClasses(); };
   viewClasses.onclick = () => setView("classes");

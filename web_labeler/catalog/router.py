@@ -11,8 +11,8 @@ from fastapi.responses import FileResponse, Response
 
 from web_labeler.catalog import store
 from web_labeler.catalog.examples import ExampleNotFound
-from web_labeler.catalog.store import (CatalogError, CatalogSettings, CatalogUnavailable, UnknownEvidence, UnknownModel,
-                                       UnknownPage)
+from web_labeler.catalog.store import (CatalogError, CatalogSettings, CatalogUnavailable, NotAllowed, UnknownArticle,
+                                       UnknownEvidence, UnknownModel, UnknownPage)
 
 
 def build_catalog_router(settings: CatalogSettings) -> APIRouter:
@@ -177,6 +177,66 @@ def build_catalog_router(settings: CatalogSettings) -> APIRouter:
                                          req.get("decided_by"), str(req.get("reason") or ""))
         except UnknownEvidence:
             raise HTTPException(status_code=404, detail="Slika nije pronađena.")
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/class-choices")
+    def catalog_class_choices() -> Dict[str, Any]:
+        try:
+            return {"models": store.class_choices(settings)}
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/articles")
+    def catalog_articles(q: Optional[str] = Query(None), state: Optional[str] = Query(None)) -> Dict[str, Any]:
+        if state not in (None, "", "tracked", "ignored", "pending", "dormant", "missing"):
+            raise HTTPException(status_code=400, detail="Nepoznato stanje.")
+        try:
+            return store.list_articles(settings, q, state or None)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/articles/{article_id}")
+    def catalog_article(article_id: int, as_of: Optional[str] = Query(None)) -> Dict[str, Any]:
+        try:
+            return store.article_card(settings, article_id, store._valid_date(as_of) if as_of else None)
+        except UnknownArticle:
+            raise HTTPException(status_code=404, detail="Taj artikal ne postoji u Katalogu.")
+        except CatalogError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.get("/decisions")
+    def catalog_decisions(kind: Optional[str] = Query(None)) -> Dict[str, Any]:
+        try:
+            return store.list_decisions(settings, kind or None)
+        except CatalogUnavailable as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+    @router.post("/decisions")
+    def catalog_record_decision(req: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        def opt_int(key: str) -> Optional[int]:
+            value = req.get(key)
+            if value is None:
+                return None
+            if not isinstance(value, int):
+                raise HTTPException(status_code=400, detail=f"{key} mora biti broj.")
+            return value
+        payload = req.get("payload") or {}
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Neispravna odluka.")
+        try:
+            return store.record_decision(
+                settings, str(req.get("kind") or ""), req.get("actor"), req.get("role"), article_id=opt_int("article_id"),
+                identity_id=opt_int("identity_id"), payload=payload, reason=req.get("reason"), evidence=req.get("evidence"),
+                valid_from=req.get("valid_from"), target_id=opt_int("target_id"))
+        except NotAllowed as e:
+            raise HTTPException(status_code=403, detail=str(e))
+        except UnknownArticle:
+            raise HTTPException(status_code=404, detail="Taj artikal ne postoji u Katalogu.")
         except CatalogError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except CatalogUnavailable as e:

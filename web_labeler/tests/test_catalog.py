@@ -799,5 +799,216 @@ class EvidenceTests(AssortmentFixture):
         self.assertEqual(catalog.list_evidence(settings)["counts"], {"pending": 0, "confirmed": 0, "rejected": 0})
 
 
+class DecisionTests(AssortmentFixture):
+    """Ticket 06: manual decisions are appended, survive imports and never touch production files."""
+
+    def setUp(self):
+        super().setUp()
+        catalog.import_catalog(self.settings)
+        self.burger = self.find("NEW BURGER")
+
+    def find(self, name):
+        return next(v for v in catalog.list_articles(self.settings)["items"] if v["name"] == name)
+
+    def decide(self, kind, role="admin", **kw):
+        kw.setdefault("reason", "test")
+        return catalog.record_decision(self.settings, kind, "Aleksa" if role == "admin" else "Goca", role, **kw)
+
+    def set_class(self, identity, cls, **kw):
+        return self.decide("classes", identity_id=identity, payload={"links": [{"model": "glasses", "class": cls}]}, **kw)
+
+    def test_labeler_may_only_mark_x_or_propose(self):
+        with self.assertRaises(catalog.NotAllowed):
+            self.set_class(self.burger["identity_id"], "CASA", role="labeler")
+        with self.assertRaises(catalog.NotAllowed):
+            self.decide("merge", role="labeler", article_id=self.burger["article_id"], payload={"into": 1})
+        x = self.decide("ignore", role="labeler", article_id=self.burger["article_id"], reason="", valid_from="2030-01-01")
+        self.assertEqual((x["role"], x["actor"], x["valid_from"]), ("labeler", "Goca", store._today()))
+        with self.assertRaises(catalog.NotAllowed):
+            self.decide("revoke", role="labeler", target_id=x["decision_id"])
+        proposal = self.decide("propose", role="labeler", identity_id=self.burger["identity_id"],
+                               payload={"kind": "classes", "change": {"links": [{"model": "glasses", "class": "CASA"}]}})
+        self.assertEqual(proposal["status"], "pending")
+
+    def test_class_decision_changes_the_mapping_and_survives_reimport(self):
+        decision = self.set_class(self.burger["identity_id"], "CASA")
+        self.assertIn("glasses.CASA", decision["miro_text"])
+        catalog.import_catalog(self.settings)
+        burger = self.find("NEW BURGER")
+        self.assertEqual((burger["state"], burger["mapping"]), ("tracked", "glasses.CASA"))
+        self.assertIn("ručna odluka, čeka izdanje", burger["tags"])
+        self.assertIn("nije provereno na snimku", burger["tags"])
+        self.assertIn("NEW BURGER", [v["name"] for v in catalog.list_variations(self.settings, "Glasses", "CASA")])
+
+    def test_changed_decision_keeps_the_old_one_and_revoke_steps_back(self):
+        first = self.set_class(self.burger["identity_id"], "CASA")
+        second = self.set_class(self.burger["identity_id"], "NISKA")
+        self.assertEqual(self.find("NEW BURGER")["mapping"], "glasses.NISKA")
+        history = catalog.article_card(self.settings, self.burger["article_id"])["history"]
+        self.assertEqual([h["decision_id"] for h in history], [second["decision_id"], first["decision_id"]])
+        self.decide("revoke", target_id=second["decision_id"])
+        self.assertEqual(self.find("NEW BURGER")["mapping"], "glasses.CASA")
+        with self.assertRaises(catalog.CatalogError):
+            self.decide("revoke", target_id=second["decision_id"])
+        self.decide("revoke", target_id=first["decision_id"])
+        burger = self.find("NEW BURGER")
+        self.assertEqual((burger["state"], burger["mapping"]), ("pending", "mapiranje nedostaje"))
+        history = catalog.article_card(self.settings, self.burger["article_id"])["history"]
+        self.assertEqual(len(history), 4)
+        self.assertTrue(all(h["revoked"] for h in history if h["kind"] == "classes"))
+
+    def test_decision_takes_effect_from_its_date(self):
+        drink = self.find("drink")
+        self.set_class(drink["identity_id"], "NISKA", valid_from="2030-05-01")
+        self.assertEqual(self.find("drink")["mapping"], "glasses.CASA, glasses.NISKA")
+        before = catalog.article_card(self.settings, drink["article_id"], as_of="2030-04-30")["variations"][0]
+        after = catalog.article_card(self.settings, drink["article_id"], as_of="2030-05-01")["variations"][0]
+        self.assertEqual((before["mapping"], after["mapping"]), ("glasses.CASA, glasses.NISKA", "glasses.NISKA"))
+        self.assertTrue(catalog.list_decisions(self.settings)["items"][0]["future"])
+
+    def test_x_ignores_the_whole_article_and_can_be_undone(self):
+        drink = self.find("drink")
+        x = self.decide("ignore", role="labeler", article_id=drink["article_id"], reason="")
+        self.assertEqual(self.find("drink")["mapping"], "ne pratimo")
+        ignored = next(g for g in catalog.list_unclassified(self.settings)["groups"] if g["state"] == "ignored")["items"]
+        self.assertIn("drink", [v["name"] for v in ignored])
+        self.assertEqual([d["decision_id"] for d in catalog.list_decisions(self.settings, "ignore")["items"]], [x["decision_id"]])
+        self.decide("revoke", target_id=x["decision_id"])
+        self.assertEqual(self.find("drink")["mapping"], "glasses.CASA, glasses.NISKA")
+
+    def test_merge_puts_variations_on_one_card_and_can_be_undone(self):
+        main, other = self.find("MAIN"), self.find("OTHER DRINK")
+        self.assertNotEqual(main["article_id"], other["article_id"])
+        merge = self.decide("merge", article_id=other["article_id"], payload={"into": main["article_id"]})
+        card = catalog.article_card(self.settings, other["article_id"])
+        self.assertEqual(card["merged_into"], main["article_id"])
+        self.assertEqual(sorted(v["name"] for v in card["variations"]), ["MAIN", "OTHER DRINK"])
+        self.assertEqual(self.find("OTHER DRINK")["article_id"], main["article_id"])
+        with self.assertRaises(catalog.CatalogError):
+            self.decide("merge", article_id=main["article_id"], payload={"into": other["article_id"]})
+        self.decide("revoke", target_id=merge["decision_id"])
+        self.assertEqual(self.find("OTHER DRINK")["article_id"], other["article_id"])
+
+    def test_proposal_is_applied_with_a_star_or_rejected_with_a_reason(self):
+        change = {"kind": "classes", "change": {"links": [{"model": "glasses", "class": "CASA"}]}}
+        first = self.decide("propose", role="labeler", identity_id=self.burger["identity_id"], payload=change)
+        applied = self.decide("classes", identity_id=self.burger["identity_id"],
+                              payload={**first["payload"]["change"], "provisional": "nisam siguran", "from_proposal": first["decision_id"]})
+        self.assertEqual(catalog.get_decision(self.settings, first["decision_id"])["status"], "applied")
+        self.assertIn("privremeno", self.find("NEW BURGER")["tags"])
+        with self.assertRaises(catalog.CatalogError):
+            self.decide("classes", identity_id=self.burger["identity_id"],
+                        payload={**first["payload"]["change"], "from_proposal": first["decision_id"]})
+        second = self.decide("propose", role="labeler", identity_id=self.burger["identity_id"], payload=change)
+        with self.assertRaises(catalog.CatalogError):
+            self.decide("reject", target_id=second["decision_id"], reason="")
+        self.decide("reject", target_id=second["decision_id"], reason="već rešeno")
+        self.assertEqual(catalog.get_decision(self.settings, second["decision_id"])["status"], "rejected")
+        with self.assertRaises(catalog.CatalogError):
+            self.decide("reject", target_id=second["decision_id"])
+        self.assertEqual(applied["payload"]["from_proposal"], first["decision_id"])
+
+    def test_bad_decisions_are_refused(self):
+        with self.assertRaises(catalog.CatalogError):
+            self.set_class(self.burger["identity_id"], "NOT_A_CLASS")
+        with self.assertRaises(catalog.CatalogError):
+            self.set_class(self.burger["identity_id"], "CASA", reason="")
+        with self.assertRaises(catalog.CatalogError):
+            self.set_class(self.burger["identity_id"], "CASA", valid_from="01.12.2026")
+        with self.assertRaises(catalog.CatalogError):
+            catalog.record_decision(self.settings, "ignore", "  ", "labeler", article_id=self.burger["article_id"])
+        with self.assertRaises(catalog.UnknownArticle):
+            self.set_class(999999, "CASA")
+        self.assertEqual(catalog.list_decisions(self.settings)["items"], [])
+
+    def test_decisions_are_append_only_and_production_files_stay_the_same(self):
+        files = [self.map_path, self.blacklist, *self.pos.iterdir(), *self.models.iterdir()]
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in files}
+        d = self.set_class(self.burger["identity_id"], "CASA")
+        self.decide("ignore", article_id=self.find("drink")["article_id"])
+        self.decide("revoke", target_id=d["decision_id"])
+        self.assertEqual({p: (p.read_bytes(), p.stat().st_mtime_ns) for p in files}, before)
+        with sqlite3.connect(str(self.tmp / "db" / "catalog.db")) as conn:
+            for sql in ("UPDATE decisions SET reason = 'x'", "DELETE FROM decisions"):
+                with self.assertRaises(sqlite3.DatabaseError):
+                    conn.execute(sql)
+
+    def test_article_list_searches_and_says_when_mapping_is_missing(self):
+        data = catalog.list_articles(self.settings)
+        self.assertEqual(len(data["items"]), sum(data["counts"][s] for s in store.STATE_LABELS))
+        self.assertEqual([v["name"] for v in catalog.list_articles(self.settings, "0706")["items"]], ["drink"])
+        self.assertEqual([v["name"] for v in catalog.list_articles(self.settings, "burg")["items"]], ["NEW BURGER"])
+        missing = catalog.list_articles(self.settings, state="missing")["items"]
+        self.assertIn("NEW BURGER", [v["name"] for v in missing])
+        self.assertTrue(all(v["mapping"] == "mapiranje nedostaje" for v in missing))
+        self.assertTrue(all(v["mapping"] == "ne pratimo" for v in catalog.list_articles(self.settings, state="ignored")["items"]))
+
+    def test_fifth_version_database_is_upgraded(self):
+        db = self.tmp / "db2" / "catalog.db"
+        db.parent.mkdir()
+        conn = sqlite3.connect(str(db))
+        conn.executescript(store._SCHEMA + store._SCHEMA_V2 + store._SCHEMA_V3 + store._SCHEMA_V4 + store._SCHEMA_V5
+                           + "PRAGMA user_version = 5;")
+        conn.close()
+        settings = self.make_settings(catalog_db_path=str(db))
+        catalog.import_catalog(settings)
+        self.assertEqual(catalog.list_decisions(settings)["items"], [])
+
+
+class BackupTests(AssortmentFixture):
+    """Ticket 06: nightly copy of the database and images, kept 30 days, and a proven way back."""
+
+    def setUp(self):
+        super().setUp()
+        catalog.import_catalog(self.settings)
+        self.db = self.tmp / "db" / "catalog.db"
+        self.media = self.tmp / "db" / "media"
+        (self.media / "evidence").mkdir(parents=True)
+        (self.media / "evidence" / "abc.png").write_bytes(b"image bytes")
+        self.dest = self.tmp / "disk" / "backups"
+        self.burger = next(v for v in catalog.list_articles(self.settings)["items"] if v["name"] == "NEW BURGER")
+
+    def decide(self, cls):
+        return catalog.record_decision(self.settings, "classes", "Aleksa", "admin", identity_id=self.burger["identity_id"],
+                                       payload={"links": [{"model": "glasses", "class": cls}]}, reason="test")
+
+    def test_copy_is_checked_and_kept_thirty_days(self):
+        from datetime import datetime, timedelta
+        from web_labeler.catalog import backup
+        start = datetime(2026, 11, 1)
+        for i in range(40):
+            report = backup.backup(self.db, self.dest, "venue_a", self.media, today=start + timedelta(days=i))
+        self.assertEqual(report["schema_version"], store.SCHEMA_VERSION)
+        days = [b["day"] for b in backup.list_backups(self.dest, "venue_a")]
+        self.assertEqual(len(days), 31)
+        self.assertEqual(days[0], "2026-11-10")
+        self.assertEqual((self.dest / "media" / "evidence" / "abc.png").read_bytes(), b"image bytes")
+        self.assertFalse(list(self.dest.glob("*.part")))
+
+    def test_restore_brings_back_the_copy_and_keeps_the_current_database(self):
+        from web_labeler.catalog import backup
+        first = self.decide("CASA")
+        copy = Path(backup.backup(self.db, self.dest, "venue_a", self.media)["backup"])
+        self.decide("NISKA")
+        (self.media / "evidence" / "abc.png").unlink()
+        report = backup.restore(copy, self.db, self.dest / "media", self.media)
+        self.assertEqual([d["decision_id"] for d in catalog.list_decisions(self.settings)["items"]], [first["decision_id"]])
+        self.assertEqual(next(v for v in catalog.list_articles(self.settings)["items"] if v["name"] == "NEW BURGER")["mapping"],
+                         "glasses.CASA")
+        self.assertTrue(Path(report["previous_kept_as"]).is_file())
+        self.assertEqual((self.media / "evidence" / "abc.png").read_bytes(), b"image bytes")
+
+    def test_broken_copy_is_refused_and_nothing_is_replaced(self):
+        from web_labeler.catalog import backup
+        bad = self.tmp / "catalog_venue_a_2026-11-24.db"
+        bad.write_bytes(b"not a database" * 100)
+        before = self.db.read_bytes()
+        with self.assertRaises(backup.BackupError):
+            backup.restore(bad, self.db)
+        self.assertEqual(self.db.read_bytes(), before)
+        with self.assertRaises(backup.BackupError):
+            backup.backup(self.tmp / "missing.db", self.dest, "venue_a")
+
+
 if __name__ == "__main__":
     unittest.main()

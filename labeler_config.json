@@ -46,5 +46,6 @@
     "Pitchers": "Pitchers Classes.pdf",
     "Shots": "Shot Classes.pdf"
   },
-  "catalog_miro_suggestions_path": "web_labeler/catalog/venues/blaznavac/miro_suggestions.yaml"
+  "catalog_miro_suggestions_path": "web_labeler/catalog/venues/blaznavac/miro_suggestions.yaml",
+  "catalog_backup_dir": "/media/intellicup/Transcend/intellicup_catalog_backups/blaznavac"
 }
